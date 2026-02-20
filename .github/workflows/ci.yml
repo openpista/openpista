@@ -83,11 +83,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-gnu
+            builder: cargo
+          - target: x86_64-unknown-linux-musl
+            builder: cross
+          - target: aarch64-unknown-linux-gnu
+            builder: cross
+          - target: aarch64-unknown-linux-musl
+            builder: cross
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,14 +99,30 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native Linux dependencies
+        if: matrix.builder == 'cargo'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev
+
+      - name: Add target for native cargo build
+        if: matrix.builder == 'cargo'
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install cross
+        if: matrix.builder == 'cross'
         uses: taiki-e/install-action@cross
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build workspace for target
-        run: cross build --workspace --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.builder }}" = "cross" ]; then
+            cross build --workspace --target "${{ matrix.target }}"
+          else
+            cargo build --workspace --target "${{ matrix.target }}"
+          fi
 
   build-macos-arm64:
     name: build (macos-arm64)
@@ -146,10 +166,7 @@ jobs:
       - name: Generate lcov for Codecov
         run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: lcov.info
-          flags: unittests
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: ${{ secrets.CODECOV_TOKEN != '' }}
