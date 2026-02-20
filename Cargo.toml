@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/proto",
+    "crates/gateway",
+    "crates/agent",
+    "crates/tools",
+    "crates/channels",
+    "crates/skills",
+    "crates/cli",
+]
+
+[workspace.dependencies]
+# 비동기 런타임
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures-util = "0.3"
+
+# QUIC / TLS
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
+
+# 직렬화
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# LLM
+async-openai = "0.27"
+
+# 데이터베이스
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+
+# 로깅
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 에러
+thiserror = "2"
+anyhow = "1"
+
+# 유틸
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+
+# 채널
+teloxide = { version = "0.12", features = ["macros"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# 스케줄러
+tokio-cron-scheduler = "0.10"
+
+# OAuth / 인증
+reqwest = { version = "0.12", features = ["json"] }
+chromiumoxide = "0.8"
+bollard = "0.19"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+image = "0.24.9"
+screenshots = "0.8"
+
+# 내부 crate
+proto = { path = "crates/proto" }
+gateway = { path = "crates/gateway" }
+agent = { path = "crates/agent" }
+tools = { path = "crates/tools" }
+channels = { path = "crates/channels" }
+skills = { path = "crates/skills" }
