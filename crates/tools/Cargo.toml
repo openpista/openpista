@@ -18,6 +18,9 @@ reqwest = { workspace = true }
 chromiumoxide = { workspace = true }
 futures-util = { workspace = true }
 bollard = { workspace = true }
+skills = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

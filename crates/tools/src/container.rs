@@ -9,11 +9,14 @@ use bollard::query_parameters::{
 use futures_util::TryStreamExt;
 use proto::ToolResult;
 use serde::Deserialize;
+use skills::{SkillExecutionMode, SkillLoader};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::Tool;
+use crate::wasm_runtime::{WasmRunRequest, run_wasm_skill};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
@@ -21,12 +24,21 @@ const DEFAULT_MEMORY_MB: i64 = 512;
 const DEFAULT_CPU_MILLIS: i64 = 1000;
 const MAX_OUTPUT_CHARS: usize = 10_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeMode {
+    Docker,
+    Wasm,
+}
+
+/// Container/WASM sandbox execution tool (`container.run`).
 pub struct ContainerTool;
 
 #[derive(Debug, Deserialize)]
 struct ContainerArgs {
-    image: String,
-    command: String,
+    image: Option<String>,
+    command: Option<String>,
+    skill_name: Option<String>,
+    skill_args: Option<serde_json::Value>,
     timeout_secs: Option<u64>,
     working_dir: Option<String>,
     env: Option<Vec<String>>,
@@ -38,6 +50,7 @@ struct ContainerArgs {
 }
 
 impl ContainerTool {
+    /// Creates a container sandbox tool instance.
     pub fn new() -> Self {
         Self
     }
@@ -65,11 +78,18 @@ impl Tool for ContainerTool {
             "properties": {
                 "image": {
                     "type": "string",
-                    "description": "Container image name (for example: alpine:3.20)"
+                    "description": "Container image name (for example: alpine:3.20). Optional for wasm mode"
                 },
                 "command": {
                     "type": "string",
-                    "description": "Shell command to execute in the container"
+                    "description": "Shell command to execute in the container. Optional for wasm mode"
+                },
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill directory name under <workspace>/skills to resolve SKILL.md mode"
+                },
+                "skill_args": {
+                    "description": "JSON arguments forwarded to wasm skill ABI as ToolCall.arguments"
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -105,7 +125,7 @@ impl Tool for ContainerTool {
                     "description": "Pull image before run (default: false)"
                 }
             },
-            "required": ["image", "command"],
+            "required": [],
             "additionalProperties": false
         })
     }
@@ -118,10 +138,75 @@ impl Tool for ContainerTool {
             }
         };
 
-        if parsed.image.trim().is_empty() {
+        let runtime_mode = match resolve_runtime_mode(&parsed).await {
+            Ok(mode) => mode,
+            Err(e) => return ToolResult::error(call_id, self.name(), e),
+        };
+
+        if runtime_mode == RuntimeMode::Wasm {
+            let workspace_dir = parsed
+                .workspace_dir
+                .as_deref()
+                .and_then(non_empty)
+                .map(PathBuf::from);
+            let Some(workspace_dir) = workspace_dir else {
+                return ToolResult::error(
+                    call_id,
+                    self.name(),
+                    "workspace_dir is required when running mode: wasm",
+                );
+            };
+            let Some(skill_name) = parsed
+                .skill_name
+                .as_deref()
+                .and_then(non_empty)
+                .map(|s| s.to_string())
+            else {
+                return ToolResult::error(
+                    call_id,
+                    self.name(),
+                    "skill_name is required when running mode: wasm",
+                );
+            };
+
+            let request = WasmRunRequest {
+                call_id: call_id.to_string(),
+                skill_name,
+                workspace_dir,
+                arguments: parsed
+                    .skill_args
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({})),
+                timeout_secs: parsed.timeout_secs,
+            };
+
+            return match run_wasm_skill(request).await {
+                Ok(result) if result.is_error => {
+                    ToolResult::error(call_id, self.name(), result.output)
+                }
+                Ok(result) => ToolResult::success(call_id, self.name(), result.output),
+                Err(e) => ToolResult::error(call_id, self.name(), e),
+            };
+        }
+
+        let image = match parsed.image.as_deref().and_then(non_empty) {
+            Some(image) => image,
+            None => {
+                return ToolResult::error(call_id, self.name(), "image must not be empty");
+            }
+        };
+
+        let command = match parsed.command.as_deref().and_then(non_empty) {
+            Some(command) => command,
+            None => {
+                return ToolResult::error(call_id, self.name(), "command must not be empty");
+            }
+        };
+
+        if image.is_empty() {
             return ToolResult::error(call_id, self.name(), "image must not be empty");
         }
-        if parsed.command.trim().is_empty() {
+        if command.is_empty() {
             return ToolResult::error(call_id, self.name(), "command must not be empty");
         }
 
@@ -166,17 +251,61 @@ impl Tool for ContainerTool {
     }
 }
 
+async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, String> {
+    let Some(skill_name) = args.skill_name.as_deref().and_then(non_empty) else {
+        return Ok(RuntimeMode::Docker);
+    };
+
+    let workspace = args
+        .workspace_dir
+        .as_deref()
+        .and_then(non_empty)
+        .ok_or_else(|| "workspace_dir is required when skill_name is provided".to_string())?;
+
+    let loader = SkillLoader::new(workspace);
+    let metadata = loader
+        .load_skill_metadata(skill_name)
+        .await
+        .ok_or_else(|| format!("SKILL.md not found for skill '{skill_name}'"))?;
+
+    if metadata.mode == SkillExecutionMode::Wasm {
+        Ok(RuntimeMode::Wasm)
+    } else {
+        Ok(RuntimeMode::Docker)
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 async fn run_container(
     docker: &Docker,
     container_name: &str,
     args: &ContainerArgs,
 ) -> Result<String, String> {
+    let image = args
+        .image
+        .as_deref()
+        .and_then(non_empty)
+        .ok_or_else(|| "image must not be empty".to_string())?;
+    let command = args
+        .command
+        .as_deref()
+        .and_then(non_empty)
+        .ok_or_else(|| "command must not be empty".to_string())?;
+
     if args.pull.unwrap_or(false) {
         docker
             .create_image(
                 Some(
                     CreateImageOptionsBuilder::default()
-                        .from_image(args.image.as_str())
+                        .from_image(image)
                         .build(),
                 ),
                 None,
@@ -184,7 +313,7 @@ async fn run_container(
             )
             .try_collect::<Vec<_>>()
             .await
-            .map_err(|e| format!("Failed to pull image '{}': {e}", args.image))?;
+            .map_err(|e| format!("Failed to pull image '{image}': {e}"))?;
     }
 
     let mut binds = Vec::new();
@@ -218,11 +347,11 @@ async fn run_container(
     };
 
     let config = ContainerCreateBody {
-        image: Some(args.image.clone()),
+        image: Some(image.to_string()),
         cmd: Some(vec![
             "sh".to_string(),
             "-lc".to_string(),
-            args.command.clone(),
+            command.to_string(),
         ]),
         env: args.env.clone(),
         working_dir: args.working_dir.clone(),
@@ -368,7 +497,16 @@ fn format_output(stdout: &str, stderr: &str, exit_code: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(path, content).expect("write file");
+    }
 
     #[test]
     fn container_tool_metadata_is_stable() {
@@ -378,16 +516,18 @@ mod tests {
 
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"][0], "image");
-        assert_eq!(schema["required"][1], "command");
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required array")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
-    async fn execute_rejects_invalid_arguments() {
+    async fn execute_rejects_non_object_arguments() {
         let tool = ContainerTool::new();
-        let result = tool
-            .execute("call-1", serde_json::json!({"image":"alpine:3"}))
-            .await;
+        let result = tool.execute("call-1", serde_json::json!("bad")).await;
 
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
@@ -399,12 +539,84 @@ mod tests {
         let result = tool
             .execute(
                 "call-2",
-                serde_json::json!({"image":"","command":"echo ok"}),
+                serde_json::json!({"image":"","command":"echo ok", "timeout_secs": 1}),
             )
             .await;
 
         assert!(result.is_error);
         assert!(result.output.contains("image must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mode_detects_wasm_skill_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_file(
+            &tmp.path().join("skills/hello/SKILL.md"),
+            "---\nmode: wasm\n---\n# hello\n",
+        );
+
+        let args = ContainerArgs {
+            image: None,
+            command: None,
+            skill_name: Some("hello".to_string()),
+            skill_args: Some(serde_json::json!({"name":"openpista"})),
+            timeout_secs: Some(1),
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: Some(tmp.path().to_string_lossy().to_string()),
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+        };
+
+        let mode = resolve_runtime_mode(&args).await.expect("mode");
+        assert_eq!(mode, RuntimeMode::Wasm);
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mode_defaults_to_docker_for_subprocess_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_file(
+            &tmp.path().join("skills/shell/SKILL.md"),
+            "---\nmode: subprocess\n---\n# shell\n",
+        );
+
+        let args = ContainerArgs {
+            image: Some("alpine:3.20".to_string()),
+            command: Some("echo ok".to_string()),
+            skill_name: Some("shell".to_string()),
+            skill_args: None,
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: Some(tmp.path().to_string_lossy().to_string()),
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+        };
+
+        let mode = resolve_runtime_mode(&args).await.expect("mode");
+        assert_eq!(mode, RuntimeMode::Docker);
+    }
+
+    #[tokio::test]
+    async fn execute_requires_workspace_for_wasm_skill_mode() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute(
+                "call-3",
+                serde_json::json!({"skill_name":"hello", "skill_args": {"x": 1}}),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .contains("workspace_dir is required when skill_name is provided")
+        );
     }
 
     #[test]

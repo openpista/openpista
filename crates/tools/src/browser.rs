@@ -15,9 +15,13 @@ use tokio::time::timeout;
 
 use crate::Tool;
 
+/// Browser navigation tool (`browser.navigate`).
 pub struct BrowserTool;
+/// Browser click tool (`browser.click`).
 pub struct BrowserClickTool;
+/// Browser typing tool (`browser.type`).
 pub struct BrowserTypeTool;
+/// Browser screenshot tool (`browser.screenshot`).
 pub struct BrowserScreenshotTool;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -133,6 +137,7 @@ struct ScreenshotArgs {
 }
 
 impl BrowserTool {
+    /// Creates a browser navigation tool instance.
     pub fn new() -> Self {
         Self
     }
@@ -145,6 +150,7 @@ impl Default for BrowserTool {
 }
 
 impl BrowserClickTool {
+    /// Creates a browser click tool instance.
     pub fn new() -> Self {
         Self
     }
@@ -157,6 +163,7 @@ impl Default for BrowserClickTool {
 }
 
 impl BrowserTypeTool {
+    /// Creates a browser typing tool instance.
     pub fn new() -> Self {
         Self
     }
@@ -169,6 +176,7 @@ impl Default for BrowserTypeTool {
 }
 
 impl BrowserScreenshotTool {
+    /// Creates a browser screenshot tool instance.
     pub fn new() -> Self {
         Self
     }

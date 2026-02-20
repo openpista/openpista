@@ -3,12 +3,43 @@
 use std::path::{Path, PathBuf};
 
 use proto::ToolResult;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 /// Loads skills from SKILL.md files in the workspace
 pub struct SkillLoader {
     workspace: PathBuf,
+}
+
+/// Skill execution mode selected from `SKILL.md` front-matter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SkillExecutionMode {
+    /// Execute skill entrypoints such as `run.sh`/`main.py` as subprocesses.
+    #[default]
+    Subprocess,
+    /// Execute a `main.wasm` module with the embedded WASM runtime.
+    Wasm,
+}
+
+/// Parsed metadata for one skill directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillMetadata {
+    /// Skill directory name under `<workspace>/skills`.
+    pub name: String,
+    /// Optional container image hint from front-matter (`image:`).
+    pub image: Option<String>,
+    /// Optional user-facing description from front-matter.
+    pub description: Option<String>,
+    /// Execution mode used by runtime dispatch.
+    pub mode: SkillExecutionMode,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SkillFrontMatter {
+    image: Option<String>,
+    description: Option<String>,
+    mode: Option<String>,
 }
 
 impl SkillLoader {
@@ -147,6 +178,78 @@ impl SkillLoader {
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
+
+    /// Loads skill metadata from `skills/<name>/SKILL.md` front-matter.
+    pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
+        let skill_md = self
+            .workspace
+            .join("skills")
+            .join(skill_name)
+            .join("SKILL.md");
+        let content = self.read_skill_file(&skill_md).await?;
+
+        let front = parse_skill_front_matter(&content);
+        let mode = front
+            .as_ref()
+            .and_then(|fm| fm.mode.as_deref())
+            .map(parse_mode)
+            .unwrap_or_default();
+
+        let image = front
+            .as_ref()
+            .and_then(|fm| fm.image.clone())
+            .and_then(normalize_optional_text);
+
+        let description = front
+            .as_ref()
+            .and_then(|fm| fm.description.clone())
+            .and_then(normalize_optional_text);
+
+        Some(SkillMetadata {
+            name: skill_name.to_string(),
+            image,
+            description,
+            mode,
+        })
+    }
+}
+
+fn parse_skill_front_matter(content: &str) -> Option<SkillFrontMatter> {
+    let yaml = extract_front_matter(content)?;
+    serde_yaml::from_str::<SkillFrontMatter>(&yaml).ok()
+}
+
+fn extract_front_matter(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+
+    let mut yaml_lines = Vec::new();
+    for line in lines {
+        if line.trim() == "---" {
+            return Some(yaml_lines.join("\n"));
+        }
+        yaml_lines.push(line);
+    }
+
+    None
+}
+
+fn parse_mode(value: &str) -> SkillExecutionMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "wasm" => SkillExecutionMode::Wasm,
+        _ => SkillExecutionMode::Subprocess,
+    }
+}
+
+fn normalize_optional_text(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Executes a script by trying executors in order until one launches successfully.
@@ -277,5 +380,61 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let loader = SkillLoader::new(tmp.path());
         assert_eq!(loader.workspace(), tmp.path());
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_parses_mode_and_image_from_front_matter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_md = tmp.path().join("skills/hello-wasm/SKILL.md");
+        write_file(
+            &skill_md,
+            "---\nmode: wasm\nimage: ghcr.io/openpista/wasm:latest\ndescription: hello wasm\n---\n# hello\n",
+        );
+
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader
+            .load_skill_metadata("hello-wasm")
+            .await
+            .expect("metadata");
+
+        assert_eq!(metadata.name, "hello-wasm");
+        assert_eq!(metadata.mode, SkillExecutionMode::Wasm);
+        assert_eq!(
+            metadata.image.as_deref(),
+            Some("ghcr.io/openpista/wasm:latest")
+        );
+        assert_eq!(metadata.description.as_deref(), Some("hello wasm"));
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_defaults_mode_when_missing_or_invalid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let a = tmp.path().join("skills/a/SKILL.md");
+        let b = tmp.path().join("skills/b/SKILL.md");
+        write_file(&a, "---\nimage: alpine:3.20\n---\n# a\n");
+        write_file(&b, "---\nmode: unknown\n---\n# b\n");
+
+        let loader = SkillLoader::new(tmp.path());
+        let a_md = loader.load_skill_metadata("a").await.expect("a metadata");
+        let b_md = loader.load_skill_metadata("b").await.expect("b metadata");
+
+        assert_eq!(a_md.mode, SkillExecutionMode::Subprocess);
+        assert_eq!(b_md.mode, SkillExecutionMode::Subprocess);
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_returns_none_when_skill_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader.load_skill_metadata("missing").await;
+        assert!(metadata.is_none());
+    }
+
+    #[test]
+    fn parse_mode_recognizes_wasm_and_defaults_other_values() {
+        assert_eq!(parse_mode("wasm"), SkillExecutionMode::Wasm);
+        assert_eq!(parse_mode("WASM"), SkillExecutionMode::Wasm);
+        assert_eq!(parse_mode("subprocess"), SkillExecutionMode::Subprocess);
+        assert_eq!(parse_mode(""), SkillExecutionMode::Subprocess);
     }
 }

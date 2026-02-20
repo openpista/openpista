@@ -75,14 +75,14 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 ### WASM Skill Sandbox
 
-- [ ] `wasmtime` integration as an embedded WASM runtime
-- [ ] WASI host interface: restricted filesystem (read-only workspace) + stdout/stderr
-- [ ] Skill execution mode flag in `SKILL.md` (`mode: wasm` vs `mode: subprocess`)
-- [ ] Host↔guest ABI: receive JSON-encoded `ToolCall` args via WASM memory, return `ToolResult`
-- [ ] 30-second execution timeout enforced at the WASM fuel/epoch level
-- [ ] Memory cap: 64 MB per WASM skill instance
-- [ ] `cargo build --target wasm32-wasip1` build guide included in `skills/README.md`
-- [ ] Example WASM skill included in the repo (`skills/hello-wasm/`)
+- [x] `wasmtime` integration as an embedded WASM runtime
+- [x] WASI host interface: restricted filesystem (read-only workspace) + stdout/stderr
+- [x] Skill execution mode flag in `SKILL.md` (`mode: wasm` vs `mode: subprocess`)
+- [x] Host↔guest ABI: receive JSON-encoded `ToolCall` args via WASM memory, return `ToolResult`
+- [x] 30-second execution timeout enforced at the WASM fuel/epoch level
+- [x] Memory cap: 64 MB per WASM skill instance
+- [x] `cargo build --target wasm32-wasip1` build guide included in `skills/README.md`
+- [x] Example WASM skill included in the repo (`skills/hello-wasm/`)
 
 ### CLI & Configuration
 

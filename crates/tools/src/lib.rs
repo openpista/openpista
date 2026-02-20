@@ -7,6 +7,7 @@ pub mod bash;
 pub mod browser;
 pub mod container;
 pub mod screen;
+mod wasm_runtime;
 
 pub use bash::BashTool;
 pub use browser::{BrowserClickTool, BrowserScreenshotTool, BrowserTool, BrowserTypeTool};
