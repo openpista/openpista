@@ -38,7 +38,7 @@
 ### 메모리 및 지속성 (Memory & Persistence)
 
 - [x] `sqlx`를 통한 SQLite 대화 메모리
-- [x] 시작 시 자동 마이그레이션 (`sqlx::migrate!`)
+- [x] 시작 시 자동 마이그레이션
 - [x] 세션 생성, 조회 및 타임스탬프 업데이트
 - [x] 역할(role), 내용(content), 도구 호출(tool call) 메타데이터와 함께 메시지 저장/로드
 - [x] 세션 간에 보존되는 도구 호출 JSON 직렬화
@@ -91,7 +91,7 @@
 - [x] `openpistacrab repl` — 세션 지속성을 갖춘 대화형 REPL
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
-- [ ] 시작 시 PID 파일 작성, 종료 시 제거
+- [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
 
 ### 품질 및 CI (Quality & CI)
@@ -99,14 +99,15 @@
 - [x] 유닛 + 통합 테스트: `cargo test --workspace` (목표: 90+ 테스트)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
-- [ ] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우
-- [ ] Codecov 커버리지 리포팅
+- [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우
+- [x] Linux 교차 빌드 매트릭스 (`x86_64/aarch64` × `gnu/musl`)
+- [x] Codecov 커버리지 리포팅
 
 ### 문서화 및 릴리스 아티팩트 (Documentation & Release Artifacts)
 
-- [ ] 배지(CI, codecov, Rust 버전, 라이선스)를 포함한 `README.md`
-- [ ] `ROADMAP.md` (이 문서)
-- [ ] v0.1.0 항목이 포함된 `CHANGELOG.md`
+- [x] 배지(CI, codecov, Rust 버전, 라이선스)를 포함한 `README.md`
+- [x] `ROADMAP.md` (이 문서)
+- [x] v0.1.0 항목이 포함된 `CHANGELOG.md`
 - [ ] `LICENSE-MIT` 및 `LICENSE-APACHE`
 - [ ] 모든 옵션이 문서화된 `config.example.toml`
 - [ ] 미리 빌드된 바이너리가 포함된 GitHub 릴리스(Release):
