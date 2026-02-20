@@ -65,6 +65,7 @@ bollard = "0.19"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+tar = "0.4"
 image = "0.24.9"
 screenshots = "0.8"
 

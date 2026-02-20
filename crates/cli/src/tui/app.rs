@@ -470,6 +470,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn make_app() -> TuiApp {
         TuiApp::new("gpt-4o", SessionId::new(), ChannelId::from("cli:tui"))
@@ -563,6 +564,149 @@ mod tests {
         app.state = AppState::Thinking { round: 0 };
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn apply_progress_llm_thinking_sets_state_round() {
+        let mut app = make_app();
+        app.apply_progress(ProgressEvent::LlmThinking { round: 3 });
+        assert_eq!(app.state, AppState::Thinking { round: 3 });
+    }
+
+    #[test]
+    fn apply_progress_marks_latest_matching_tool_call_done() {
+        let mut app = make_app();
+        app.apply_progress(ProgressEvent::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            args: serde_json::json!({"command":"echo 1"}),
+        });
+        app.apply_progress(ProgressEvent::ToolCallStarted {
+            call_id: "c2".into(),
+            tool_name: "system.run".into(),
+            args: serde_json::json!({"command":"echo 2"}),
+        });
+        app.apply_progress(ProgressEvent::ToolCallFinished {
+            call_id: "c2".into(),
+            tool_name: "system.run".into(),
+            output: "ok".into(),
+            is_error: false,
+        });
+
+        assert!(matches!(
+            &app.messages[0],
+            TuiMessage::ToolCall { done: false, .. }
+        ));
+        assert!(matches!(
+            &app.messages[1],
+            TuiMessage::ToolCall { done: true, .. }
+        ));
+    }
+
+    #[test]
+    fn handle_key_moves_cursor_left_and_right_with_utf8() {
+        let mut app = make_app();
+        app.input = "a한b".into();
+        app.cursor_pos = app.input.len();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.cursor_pos, "a한".len());
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.cursor_pos, "a".len());
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.cursor_pos, "a한".len());
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.cursor_pos, "a한b".len());
+    }
+
+    #[test]
+    fn handle_key_scroll_shortcuts_update_history_scroll() {
+        let mut app = make_app();
+        app.history_scroll = 5;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.history_scroll, 4);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.history_scroll, 5);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.history_scroll, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.history_scroll, 10);
+    }
+
+    #[test]
+    fn handle_key_quit_shortcuts_only_when_idle() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.should_quit);
+
+        app.should_quit = false;
+        app.state = AppState::Thinking { round: 1 };
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit);
+
+        app.state = AppState::Idle;
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn render_draws_all_message_variants_without_mutating_state() {
+        let mut app = make_app();
+        app.push_user("user line".into());
+        app.push_assistant("first\nsecond".into());
+        app.messages.push(TuiMessage::ToolCall {
+            tool_name: "system.run".into(),
+            args_preview: "{\"command\":\"echo ok\"}".into(),
+            done: false,
+        });
+        app.messages.push(TuiMessage::ToolResult {
+            tool_name: "system.run".into(),
+            output_preview: "ok".into(),
+            is_error: false,
+        });
+        app.push_error("boom".into());
+        app.input = "typed".into();
+        app.cursor_pos = 2;
+        app.state = AppState::ExecutingTool {
+            tool_name: "system.run".into(),
+        };
+        app.spinner_tick = 3;
+        app.history_scroll = 7;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.input, "typed");
+        assert_eq!(app.cursor_pos, 2);
+        assert_eq!(app.history_scroll, 7);
+        assert_eq!(app.messages.len(), 5);
+    }
+
+    #[test]
+    fn render_idle_placeholder_path_executes() {
+        let mut app = make_app();
+        app.state = AppState::Idle;
+        app.input.clear();
+        app.cursor_pos = 0;
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert_eq!(app.state, AppState::Idle);
         assert_eq!(app.input, "");
     }
 

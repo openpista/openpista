@@ -12,6 +12,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
+tar = { workspace = true }
 image = { workspace = true }
 screenshots = { workspace = true }
 reqwest = { workspace = true }

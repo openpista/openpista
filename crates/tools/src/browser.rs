@@ -1,3 +1,5 @@
+//! Browser automation tools backed by Chromium CDP.
+
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use chromiumoxide::Page;
@@ -15,9 +17,13 @@ use tokio::time::timeout;
 
 use crate::Tool;
 
+/// Tool that navigates the shared browser page to a URL.
 pub struct BrowserTool;
+/// Tool that clicks an element on the shared browser page.
 pub struct BrowserClickTool;
+/// Tool that types text into an element on the shared browser page.
 pub struct BrowserTypeTool;
+/// Tool that captures a screenshot from the shared browser page.
 pub struct BrowserScreenshotTool;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -133,6 +139,7 @@ struct ScreenshotArgs {
 }
 
 impl BrowserTool {
+    /// Creates a browser navigation tool.
     pub fn new() -> Self {
         Self
     }
@@ -145,6 +152,7 @@ impl Default for BrowserTool {
 }
 
 impl BrowserClickTool {
+    /// Creates a browser click tool.
     pub fn new() -> Self {
         Self
     }
@@ -157,6 +165,7 @@ impl Default for BrowserClickTool {
 }
 
 impl BrowserTypeTool {
+    /// Creates a browser typing tool.
     pub fn new() -> Self {
         Self
     }
@@ -169,6 +178,7 @@ impl Default for BrowserTypeTool {
 }
 
 impl BrowserScreenshotTool {
+    /// Creates a browser screenshot tool.
     pub fn new() -> Self {
         Self
     }
@@ -683,5 +693,15 @@ mod tests {
         assert_eq!(result.tool_name, "browser.screenshot");
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
+    }
+
+    #[test]
+    fn operation_timeout_clamps_values() {
+        assert_eq!(operation_timeout(None), Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(operation_timeout(Some(0)), Duration::from_secs(1));
+        assert_eq!(
+            operation_timeout(Some(MAX_TIMEOUT_SECS + 100)),
+            Duration::from_secs(MAX_TIMEOUT_SECS)
+        );
     }
 }

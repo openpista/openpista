@@ -1,26 +1,39 @@
+//! Container execution tool powered by Docker Engine API.
+
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose};
 use bollard::Docker;
+use bollard::body_full;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, StartContainerOptions, WaitContainerOptions,
+    RemoveContainerOptionsBuilder, StartContainerOptions, UploadToContainerOptionsBuilder,
+    WaitContainerOptions,
 };
 use futures_util::TryStreamExt;
 use proto::ToolResult;
+use rand::RngCore;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
 use crate::Tool;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_TOKEN_TTL_SECS: u64 = 300;
+const MAX_TOKEN_TTL_SECS: u64 = 900;
 const DEFAULT_MEMORY_MB: i64 = 512;
 const DEFAULT_CPU_MILLIS: i64 = 1000;
 const MAX_OUTPUT_CHARS: usize = 10_000;
+const TOKEN_ENV_FILE_NAME: &str = ".openpista_task_env";
+const TOKEN_MOUNT_DIR: &str = "/run/secrets";
+const DEFAULT_TOKEN_ENV_NAME: &str = "OPENPISTACRAB_TASK_TOKEN";
 
+/// Tool that runs one-off commands in isolated Docker containers.
 pub struct ContainerTool;
 
 #[derive(Debug, Deserialize)]
@@ -35,9 +48,20 @@ struct ContainerArgs {
     memory_mb: Option<i64>,
     cpu_millis: Option<i64>,
     pull: Option<bool>,
+    inject_task_token: Option<bool>,
+    token_ttl_secs: Option<u64>,
+    token_env_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TaskCredential {
+    token: String,
+    expires_at_unix: u64,
+    env_name: String,
 }
 
 impl ContainerTool {
+    /// Creates a new container execution tool.
     pub fn new() -> Self {
         Self
     }
@@ -103,6 +127,18 @@ impl Tool for ContainerTool {
                 "pull": {
                     "type": "boolean",
                     "description": "Pull image before run (default: false)"
+                },
+                "inject_task_token": {
+                    "type": "boolean",
+                    "description": "Inject a short-lived per-task credential via tmpfs file (default: false)"
+                },
+                "token_ttl_secs": {
+                    "type": "integer",
+                    "description": "TTL for injected task credential in seconds (default: 300, max: 900)"
+                },
+                "token_env_name": {
+                    "type": "string",
+                    "description": "Environment variable name exposed by injected credential file (default: OPENPISTACRAB_TASK_TOKEN)"
                 }
             },
             "required": ["image", "command"],
@@ -144,12 +180,18 @@ impl Tool for ContainerTool {
         };
 
         let container_name = build_container_name(call_id);
+        let mut credential = match maybe_mint_task_credential(&parsed) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::error(call_id, self.name(), e),
+        };
 
         let run = timeout(
             timeout_duration,
-            run_container(&docker, &container_name, &parsed),
+            run_container(&docker, &container_name, &parsed, credential.as_ref()),
         )
         .await;
+
+        cleanup_task_credential(&mut credential);
 
         match run {
             Ok(Ok(output)) => ToolResult::success(call_id, self.name(), output),
@@ -170,6 +212,7 @@ async fn run_container(
     docker: &Docker,
     container_name: &str,
     args: &ContainerArgs,
+    credential: Option<&TaskCredential>,
 ) -> Result<String, String> {
     if args.pull.unwrap_or(false) {
         docker
@@ -197,6 +240,12 @@ async fn run_container(
 
     let mut tmpfs = HashMap::new();
     tmpfs.insert("/tmp".to_string(), "rw,nosuid,nodev,size=64m".to_string());
+    if credential.is_some() {
+        tmpfs.insert(
+            TOKEN_MOUNT_DIR.to_string(),
+            "rw,nosuid,nodev,noexec,size=1m".to_string(),
+        );
+    }
 
     let host_config = HostConfig {
         auto_remove: Some(false),
@@ -222,7 +271,7 @@ async fn run_container(
         cmd: Some(vec![
             "sh".to_string(),
             "-lc".to_string(),
-            args.command.clone(),
+            build_shell_command(args, credential),
         ]),
         env: args.env.clone(),
         working_dir: args.working_dir.clone(),
@@ -246,6 +295,13 @@ async fn run_container(
         .map_err(|e| format!("Failed to create container: {e}"));
 
     if let Err(e) = create_result {
+        let _ = cleanup_container(docker, container_name).await;
+        return Err(e);
+    }
+
+    if let Some(credential) = credential
+        && let Err(e) = upload_task_credential(docker, container_name, credential).await
+    {
         let _ = cleanup_container(docker, container_name).await;
         return Err(e);
     }
@@ -301,6 +357,127 @@ async fn run_container(
 
     let _ = cleanup_container(docker, container_name).await;
     run_result
+}
+
+fn maybe_mint_task_credential(args: &ContainerArgs) -> Result<Option<TaskCredential>, String> {
+    if !args.inject_task_token.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let ttl_secs = args
+        .token_ttl_secs
+        .unwrap_or(DEFAULT_TOKEN_TTL_SECS)
+        .clamp(1, MAX_TOKEN_TTL_SECS);
+    let env_name = sanitize_env_name(args.token_env_name.as_deref())?;
+    let now = unix_now_secs()?;
+
+    let mut random = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut random);
+    let token = general_purpose::URL_SAFE_NO_PAD.encode(random);
+
+    Ok(Some(TaskCredential {
+        token,
+        expires_at_unix: now + ttl_secs,
+        env_name,
+    }))
+}
+
+fn sanitize_env_name(env_name: Option<&str>) -> Result<String, String> {
+    let value = env_name.unwrap_or(DEFAULT_TOKEN_ENV_NAME).trim();
+    if !is_valid_env_name(value) {
+        return Err("token_env_name must match [A-Za-z_][A-Za-z0-9_]*".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn unix_now_secs() -> Result<u64, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {e}"))?;
+    Ok(now.as_secs())
+}
+
+fn build_shell_command(args: &ContainerArgs, credential: Option<&TaskCredential>) -> String {
+    if credential.is_some() {
+        format!(
+            ". {TOKEN_MOUNT_DIR}/{TOKEN_ENV_FILE_NAME} >/dev/null 2>&1; {}",
+            args.command
+        )
+    } else {
+        args.command.clone()
+    }
+}
+
+async fn upload_task_credential(
+    docker: &Docker,
+    container_name: &str,
+    credential: &TaskCredential,
+) -> Result<(), String> {
+    let archive = build_task_credential_archive(credential)?;
+    docker
+        .upload_to_container(
+            container_name,
+            Some(
+                UploadToContainerOptionsBuilder::default()
+                    .path(TOKEN_MOUNT_DIR)
+                    .build(),
+            ),
+            body_full(archive.into()),
+        )
+        .await
+        .map_err(|e| format!("Failed to inject task credential: {e}"))
+}
+
+fn build_task_credential_archive(credential: &TaskCredential) -> Result<Vec<u8>, String> {
+    let payload = build_task_credential_script(credential);
+    let payload_bytes = payload.as_bytes();
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(payload_bytes.len() as u64);
+    header.set_mode(0o400);
+    header.set_cksum();
+
+    builder
+        .append_data(&mut header, TOKEN_ENV_FILE_NAME, payload_bytes)
+        .map_err(|e| format!("Failed to build credential archive: {e}"))?;
+
+    builder
+        .into_inner()
+        .map_err(|e| format!("Failed to finalize credential archive: {e}"))
+}
+
+fn build_task_credential_script(credential: &TaskCredential) -> String {
+    format!(
+        "export {}={}\nexport OPENPISTACRAB_TASK_TOKEN_EXPIRES_AT={}\n",
+        credential.env_name,
+        shell_single_quote(&credential.token),
+        credential.expires_at_unix
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn cleanup_task_credential(credential: &mut Option<TaskCredential>) {
+    if let Some(inner) = credential {
+        inner.token.clear();
+        inner.env_name.clear();
+        inner.expires_at_unix = 0;
+    }
+    *credential = None;
 }
 
 async fn cleanup_container(docker: &Docker, container_name: &str) -> Result<(), String> {
@@ -419,5 +596,90 @@ mod tests {
         assert!(out.contains("stdout:\nok"));
         assert!(out.contains("stderr:\nwarn"));
         assert!(out.contains("exit_code: 7"));
+    }
+
+    #[test]
+    fn maybe_mint_task_credential_returns_none_when_disabled() {
+        let args = ContainerArgs {
+            image: "alpine:3".to_string(),
+            command: "echo hi".to_string(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: Some(false),
+            token_ttl_secs: None,
+            token_env_name: None,
+        };
+
+        let credential = maybe_mint_task_credential(&args).expect("mint result");
+        assert!(credential.is_none());
+    }
+
+    #[test]
+    fn maybe_mint_task_credential_validates_env_name() {
+        let args = ContainerArgs {
+            image: "alpine:3".to_string(),
+            command: "echo hi".to_string(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: Some(true),
+            token_ttl_secs: Some(120),
+            token_env_name: Some("9BAD".to_string()),
+        };
+
+        let err = maybe_mint_task_credential(&args).expect_err("invalid env name should fail");
+        assert!(err.contains("token_env_name"));
+    }
+
+    #[test]
+    fn build_shell_command_sources_credential_file() {
+        let args = ContainerArgs {
+            image: "alpine:3".to_string(),
+            command: "echo hi".to_string(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: Some(true),
+            token_ttl_secs: None,
+            token_env_name: None,
+        };
+        let credential = TaskCredential {
+            token: "tok".to_string(),
+            expires_at_unix: 1,
+            env_name: DEFAULT_TOKEN_ENV_NAME.to_string(),
+        };
+
+        let cmd = build_shell_command(&args, Some(&credential));
+        assert!(cmd.contains(TOKEN_ENV_FILE_NAME));
+        assert!(cmd.contains("echo hi"));
+    }
+
+    #[test]
+    fn build_task_credential_script_contains_exports() {
+        let credential = TaskCredential {
+            token: "abc123".to_string(),
+            expires_at_unix: 42,
+            env_name: "OPENPISTACRAB_TASK_TOKEN".to_string(),
+        };
+
+        let script = build_task_credential_script(&credential);
+        assert!(script.contains("export OPENPISTACRAB_TASK_TOKEN='abc123'"));
+        assert!(script.contains("OPENPISTACRAB_TASK_TOKEN_EXPIRES_AT=42"));
     }
 }

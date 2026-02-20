@@ -622,4 +622,11 @@ mod tests {
         // Should not panic or error — just warn
         adapter.send_response(resp).await.unwrap();
     }
+
+    #[test]
+    fn generate_self_signed_returns_non_empty_der_blobs() {
+        let (cert, key) = generate_self_signed().expect("self signed cert generation");
+        assert!(!cert.as_ref().is_empty());
+        assert!(!key.secret_der().is_empty());
+    }
 }
