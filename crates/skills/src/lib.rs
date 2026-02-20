@@ -3,4 +3,4 @@
 pub mod loader;
 
 /// Skill loader for workspace-based skills.
-pub use loader::SkillLoader;
+pub use loader::{SkillLoader, SkillMetadata};

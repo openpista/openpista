@@ -21,9 +21,11 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
@@ -47,7 +49,9 @@ pub struct ContainerTool;
 
 #[derive(Debug, Deserialize)]
 struct ContainerArgs {
+    #[serde(default)]
     image: String,
+    skill_image: Option<String>,
     command: String,
     timeout_secs: Option<u64>,
     working_dir: Option<String>,
@@ -65,6 +69,7 @@ struct ContainerArgs {
     orchestrator_quic_addr: Option<String>,
     orchestrator_channel_id: Option<String>,
     orchestrator_session_id: Option<String>,
+    allow_subprocess_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +115,11 @@ impl Tool for ContainerTool {
             "properties": {
                 "image": {
                     "type": "string",
-                    "description": "Container image name (for example: alpine:3.20)"
+                    "description": "Container image name (for example: alpine:3.20); when omitted, skill_image can be used"
+                },
+                "skill_image": {
+                    "type": "string",
+                    "description": "Skill-provided default image from SKILL.md front matter (used when image is omitted)"
                 },
                 "command": {
                     "type": "string",
@@ -180,26 +189,31 @@ impl Tool for ContainerTool {
                 "orchestrator_session_id": {
                     "type": "string",
                     "description": "Orchestrator session_id that should receive the worker report"
+                },
+                "allow_subprocess_fallback": {
+                    "type": "boolean",
+                    "description": "Fallback to local subprocess when Docker is unavailable (default: true)"
                 }
             },
-            "required": ["image", "command"],
+            "required": ["command"],
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, call_id: &str, args: serde_json::Value) -> ToolResult {
-        let parsed: ContainerArgs = match serde_json::from_value(args) {
+        let mut parsed: ContainerArgs = match serde_json::from_value(args) {
             Ok(v) => v,
             Err(e) => {
                 return ToolResult::error(call_id, self.name(), format!("Invalid arguments: {e}"));
             }
         };
 
-        if parsed.image.trim().is_empty() {
-            return ToolResult::error(call_id, self.name(), "image must not be empty");
-        }
         if parsed.command.trim().is_empty() {
             return ToolResult::error(call_id, self.name(), "command must not be empty");
+        }
+
+        if let Some(image) = resolve_image(&parsed) {
+            parsed.image = image;
         }
 
         let timeout_duration = Duration::from_secs(
@@ -209,37 +223,31 @@ impl Tool for ContainerTool {
                 .clamp(1, MAX_TIMEOUT_SECS),
         );
 
-        let docker = match Docker::connect_with_local_defaults() {
-            Ok(v) => v,
-            Err(e) => {
-                return ToolResult::error(
-                    call_id,
-                    self.name(),
-                    format!("Failed to connect to Docker daemon: {e}"),
-                );
-            }
-        };
-
         let container_name = build_container_name(call_id);
-        let mut credential = match maybe_mint_task_credential(&parsed) {
-            Ok(v) => v,
-            Err(e) => return ToolResult::error(call_id, self.name(), e),
+        let image_for_report = if parsed.image.trim().is_empty() {
+            "local-subprocess".to_string()
+        } else {
+            parsed.image.clone()
         };
 
-        let run = timeout(
+        let docker_result = Docker::connect_with_local_defaults()
+            .map_err(|e| format!("Failed to connect to Docker daemon: {e}"));
+        let execution_result = run_with_docker_or_subprocess(
+            call_id,
+            &parsed,
             timeout_duration,
-            run_container(&docker, &container_name, &parsed, credential.as_ref()),
+            &container_name,
+            docker_result,
         )
         .await;
 
-        cleanup_task_credential(&mut credential);
-
-        match run {
-            Ok(Ok(execution)) => {
+        match execution_result {
+            Ok(execution) => {
                 if let Err(err) = maybe_report_worker_result(
                     call_id,
                     &parsed,
                     &container_name,
+                    &image_for_report,
                     &execution,
                     timeout_duration,
                 )
@@ -256,15 +264,7 @@ impl Tool for ContainerTool {
                     format_output(&execution.stdout, &execution.stderr, execution.exit_code),
                 )
             }
-            Ok(Err(e)) => ToolResult::error(call_id, self.name(), e),
-            Err(_) => {
-                let _ = cleanup_container(&docker, &container_name).await;
-                ToolResult::error(
-                    call_id,
-                    self.name(),
-                    format!("Command timed out after {}s", timeout_duration.as_secs()),
-                )
-            }
+            Err(e) => ToolResult::error(call_id, self.name(), e),
         }
     }
 }
@@ -274,13 +274,14 @@ async fn run_container(
     container_name: &str,
     args: &ContainerArgs,
     credential: Option<&TaskCredential>,
+    image: &str,
 ) -> Result<ContainerExecution, String> {
     if args.pull.unwrap_or(false) {
         docker
             .create_image(
                 Some(
                     CreateImageOptionsBuilder::default()
-                        .from_image(args.image.as_str())
+                        .from_image(image)
                         .build(),
                 ),
                 None,
@@ -288,7 +289,7 @@ async fn run_container(
             )
             .try_collect::<Vec<_>>()
             .await
-            .map_err(|e| format!("Failed to pull image '{}': {e}", args.image))?;
+            .map_err(|e| format!("Failed to pull image '{image}': {e}"))?;
     }
 
     let mut binds = Vec::new();
@@ -328,7 +329,7 @@ async fn run_container(
     };
 
     let config = ContainerCreateBody {
-        image: Some(args.image.clone()),
+        image: Some(image.to_string()),
         cmd: Some(vec![
             "sh".to_string(),
             "-lc".to_string(),
@@ -424,10 +425,119 @@ async fn run_container(
     run_result
 }
 
+async fn run_with_docker_or_subprocess(
+    call_id: &str,
+    args: &ContainerArgs,
+    timeout_duration: Duration,
+    container_name: &str,
+    docker_result: Result<Docker, String>,
+) -> Result<ContainerExecution, String> {
+    match docker_result {
+        Ok(docker) => {
+            if args.image.trim().is_empty() {
+                return Err("image must not be empty".to_string());
+            }
+
+            let mut credential = maybe_mint_task_credential(args)?;
+            let run = timeout(
+                timeout_duration,
+                run_container(
+                    &docker,
+                    container_name,
+                    args,
+                    credential.as_ref(),
+                    &args.image,
+                ),
+            )
+            .await;
+
+            cleanup_task_credential(&mut credential);
+
+            match run {
+                Ok(Ok(execution)) => Ok(execution),
+                Ok(Err(e)) => Err(e),
+                Err(_) => {
+                    let _ = cleanup_container(&docker, container_name).await;
+                    Err(format!(
+                        "Command timed out after {}s",
+                        timeout_duration.as_secs()
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            if !args.allow_subprocess_fallback.unwrap_or(true) {
+                return Err(e);
+            }
+
+            warn!("Docker unavailable for call_id={call_id}; falling back to subprocess mode: {e}");
+            run_as_subprocess(args, timeout_duration).await
+        }
+    }
+}
+
+async fn run_as_subprocess(
+    args: &ContainerArgs,
+    timeout_duration: Duration,
+) -> Result<ContainerExecution, String> {
+    warn!("Docker is unavailable; running command as local subprocess fallback");
+    warn!(
+        "subprocess fallback does not enforce Docker CPU/memory limits (requested memory_mb={:?}, cpu_millis={:?})",
+        args.memory_mb, args.cpu_millis
+    );
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(&args.command);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+
+    if let Some(working_dir) = args
+        .working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        cmd.current_dir(working_dir);
+    }
+
+    if let Some(env_values) = args.env.as_deref() {
+        for value in env_values {
+            let Some((key, env_value)) = value.split_once('=') else {
+                return Err(format!("Invalid env entry '{value}', expected KEY=VALUE"));
+            };
+
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(format!(
+                    "Invalid env entry '{value}', key must not be empty"
+                ));
+            }
+
+            cmd.env(key, env_value);
+        }
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn subprocess: {e}"))?;
+    let output = timeout(timeout_duration, child.wait_with_output())
+        .await
+        .map_err(|_| format!("Command timed out after {}s", timeout_duration.as_secs()))?
+        .map_err(|e| format!("Failed to run subprocess: {e}"))?;
+
+    Ok(ContainerExecution {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: i64::from(output.status.code().unwrap_or(-1)),
+    })
+}
+
 async fn maybe_report_worker_result(
     call_id: &str,
     args: &ContainerArgs,
     container_name: &str,
+    image: &str,
     execution: &ContainerExecution,
     run_timeout: Duration,
 ) -> Result<(), String> {
@@ -457,7 +567,7 @@ async fn maybe_report_worker_result(
     let report = WorkerReport::new(
         call_id.to_string(),
         container_name.to_string(),
-        args.image.clone(),
+        image.to_string(),
         args.command.clone(),
         proto::WorkerOutput {
             exit_code: execution.exit_code,
@@ -699,6 +809,19 @@ fn build_shell_command(args: &ContainerArgs, credential: Option<&TaskCredential>
     } else {
         args.command.clone()
     }
+}
+
+fn resolve_image(args: &ContainerArgs) -> Option<String> {
+    let explicit = args.image.trim();
+    if !explicit.is_empty() {
+        return Some(explicit.to_string());
+    }
+
+    args.skill_image
+        .as_deref()
+        .map(str::trim)
+        .filter(|image| !image.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn upload_task_credential(
@@ -948,6 +1071,138 @@ mod tests {
 
     use super::*;
 
+    fn base_args(command: &str) -> ContainerArgs {
+        ContainerArgs {
+            image: "alpine:3".to_string(),
+            skill_image: None,
+            command: command.to_string(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: None,
+            token_ttl_secs: None,
+            token_env_name: None,
+            report_via_quic: None,
+            report_timeout_secs: None,
+            orchestrator_quic_addr: None,
+            orchestrator_channel_id: None,
+            orchestrator_session_id: None,
+            allow_subprocess_fallback: None,
+        }
+    }
+
+    #[test]
+    fn resolve_image_prefers_explicit_and_falls_back_to_skill_image() {
+        let explicit = ContainerArgs {
+            image: "alpine:3.20".to_string(),
+            skill_image: Some("python:3.12-slim".to_string()),
+            ..base_args("echo ok")
+        };
+        assert_eq!(resolve_image(&explicit).as_deref(), Some("alpine:3.20"));
+
+        let fallback = ContainerArgs {
+            image: String::new(),
+            skill_image: Some("python:3.12-slim".to_string()),
+            ..base_args("echo ok")
+        };
+        assert_eq!(
+            resolve_image(&fallback).as_deref(),
+            Some("python:3.12-slim")
+        );
+
+        let missing = ContainerArgs {
+            image: String::new(),
+            skill_image: None,
+            ..base_args("echo ok")
+        };
+        assert!(resolve_image(&missing).is_none());
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_returns_output_for_successful_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut args = base_args("printf '%s:%s' \"$PWD\" \"$MSG\"");
+        args.working_dir = Some(tmp.path().to_string_lossy().to_string());
+        args.env = Some(vec!["MSG=hello".to_string()]);
+
+        let execution = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect("subprocess should succeed");
+
+        assert_eq!(execution.exit_code, 0);
+        assert!(
+            execution
+                .stdout
+                .contains(tmp.path().to_string_lossy().as_ref())
+        );
+        assert!(execution.stdout.contains("hello"));
+        assert!(execution.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_captures_non_zero_exit() {
+        let args = base_args("echo failed 1>&2; exit 7");
+        let execution = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect("subprocess should run");
+
+        assert_eq!(execution.exit_code, 7);
+        assert!(execution.stderr.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_returns_timeout_error() {
+        let args = base_args("sleep 2");
+        let err = run_as_subprocess(&args, Duration::from_millis(100))
+            .await
+            .expect_err("subprocess should time out");
+
+        assert!(err.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn docker_unavailable_uses_subprocess_fallback_when_enabled() {
+        let mut args = base_args("printf fallback-ok");
+        args.image = String::new();
+        args.allow_subprocess_fallback = Some(true);
+
+        let execution = run_with_docker_or_subprocess(
+            "call-fallback",
+            &args,
+            Duration::from_secs(2),
+            "ctr",
+            Err("docker down".to_string()),
+        )
+        .await
+        .expect("fallback execution should succeed");
+
+        assert_eq!(execution.exit_code, 0);
+        assert!(execution.stdout.contains("fallback-ok"));
+    }
+
+    #[tokio::test]
+    async fn docker_unavailable_returns_error_when_fallback_disabled() {
+        let mut args = base_args("echo ignored");
+        args.allow_subprocess_fallback = Some(false);
+
+        let err = run_with_docker_or_subprocess(
+            "call-no-fallback",
+            &args,
+            Duration::from_secs(2),
+            "ctr",
+            Err("docker down".to_string()),
+        )
+        .await
+        .expect_err("docker connection error should be returned");
+
+        assert!(err.contains("docker down"));
+    }
+
     #[test]
     fn container_tool_metadata_is_stable() {
         let tool = ContainerTool::new();
@@ -956,8 +1211,9 @@ mod tests {
 
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"][0], "image");
-        assert_eq!(schema["required"][1], "command");
+        assert_eq!(schema["required"][0], "command");
+        assert!(schema["properties"]["skill_image"].is_object());
+        assert!(schema["properties"]["allow_subprocess_fallback"].is_object());
     }
 
     #[tokio::test]
@@ -975,14 +1231,11 @@ mod tests {
     async fn execute_rejects_empty_required_fields() {
         let tool = ContainerTool::new();
         let result = tool
-            .execute(
-                "call-2",
-                serde_json::json!({"image":"","command":"echo ok"}),
-            )
+            .execute("call-2", serde_json::json!({"image":"","command":""}))
             .await;
 
         assert!(result.is_error);
-        assert!(result.output.contains("image must not be empty"));
+        assert!(result.output.contains("command must not be empty"));
     }
 
     #[tokio::test]
@@ -1023,6 +1276,7 @@ mod tests {
     fn maybe_mint_task_credential_returns_none_when_disabled() {
         let args = ContainerArgs {
             image: "alpine:3".to_string(),
+            skill_image: None,
             command: "echo hi".to_string(),
             timeout_secs: None,
             working_dir: None,
@@ -1040,6 +1294,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            allow_subprocess_fallback: None,
         };
 
         let credential = maybe_mint_task_credential(&args).expect("mint result");
@@ -1050,6 +1305,7 @@ mod tests {
     fn maybe_mint_task_credential_validates_env_name() {
         let args = ContainerArgs {
             image: "alpine:3".to_string(),
+            skill_image: None,
             command: "echo hi".to_string(),
             timeout_secs: None,
             working_dir: None,
@@ -1067,6 +1323,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            allow_subprocess_fallback: None,
         };
 
         let err = maybe_mint_task_credential(&args).expect_err("invalid env name should fail");
@@ -1077,6 +1334,7 @@ mod tests {
     fn build_shell_command_sources_credential_file() {
         let args = ContainerArgs {
             image: "alpine:3".to_string(),
+            skill_image: None,
             command: "echo hi".to_string(),
             timeout_secs: None,
             working_dir: None,
@@ -1094,6 +1352,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            allow_subprocess_fallback: None,
         };
         let credential = TaskCredential {
             token: "tok".to_string(),
@@ -1194,6 +1453,7 @@ mod tests {
     async fn maybe_report_worker_result_skips_when_disabled() {
         let args = ContainerArgs {
             image: "alpine".into(),
+            skill_image: None,
             command: "echo".into(),
             timeout_secs: None,
             working_dir: None,
@@ -1211,15 +1471,22 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {
             stdout: "ok".into(),
             stderr: "".into(),
             exit_code: 0,
         };
-        let result =
-            maybe_report_worker_result("call-1", &args, "ctr", &execution, Duration::from_secs(10))
-                .await;
+        let result = maybe_report_worker_result(
+            "call-1",
+            &args,
+            "ctr",
+            "alpine",
+            &execution,
+            Duration::from_secs(10),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -1227,6 +1494,7 @@ mod tests {
     async fn maybe_report_worker_result_fails_missing_addr() {
         let args = ContainerArgs {
             image: "alpine".into(),
+            skill_image: None,
             command: "echo".into(),
             timeout_secs: None,
             working_dir: None,
@@ -1244,15 +1512,22 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: Some("ch".into()),
             orchestrator_session_id: Some("ses".into()),
+            allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {
             stdout: "".into(),
             stderr: "".into(),
             exit_code: 0,
         };
-        let result =
-            maybe_report_worker_result("call-1", &args, "ctr", &execution, Duration::from_secs(10))
-                .await;
+        let result = maybe_report_worker_result(
+            "call-1",
+            &args,
+            "ctr",
+            "alpine",
+            &execution,
+            Duration::from_secs(10),
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("orchestrator_quic_addr"));
     }
@@ -1261,6 +1536,7 @@ mod tests {
     async fn maybe_report_worker_result_fails_bad_addr() {
         let args = ContainerArgs {
             image: "alpine".into(),
+            skill_image: None,
             command: "echo".into(),
             timeout_secs: None,
             working_dir: None,
@@ -1278,15 +1554,22 @@ mod tests {
             orchestrator_quic_addr: Some("not-a-socket-addr".into()),
             orchestrator_channel_id: Some("ch".into()),
             orchestrator_session_id: Some("ses".into()),
+            allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {
             stdout: "".into(),
             stderr: "err".into(),
             exit_code: 1,
         };
-        let result =
-            maybe_report_worker_result("call-2", &args, "ctr", &execution, Duration::from_secs(10))
-                .await;
+        let result = maybe_report_worker_result(
+            "call-2",
+            &args,
+            "ctr",
+            "alpine",
+            &execution,
+            Duration::from_secs(10),
+        )
+        .await;
         assert!(result.is_err());
         assert!(
             result
