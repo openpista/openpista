@@ -1567,6 +1567,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn execute_wasm_skill_path_end_to_end() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let skill_dir = repo_root.join("skills/hello-wasm");
+        let manifest_path = skill_dir.join("Cargo.toml");
+        assert!(manifest_path.exists(), "hello-wasm manifest must exist");
+        let build_target = tempfile::tempdir().expect("build target tempdir");
+
+        let build = Command::new("cargo")
+            .current_dir(&skill_dir)
+            .env("CARGO_TARGET_DIR", build_target.path())
+            .args(["build", "--target", "wasm32-wasip1", "--release"])
+            .output()
+            .await
+            .expect("build hello-wasm");
+
+        if !build.status.success() {
+            let stderr = String::from_utf8_lossy(&build.stderr);
+            if stderr.contains("wasm32-wasip1")
+                && (stderr.contains("target may not be installed")
+                    || stderr.contains("can't find crate for `std`")
+                    || stderr.contains("rustup target add wasm32-wasip1"))
+            {
+                eprintln!("skipping wasm e2e: wasm32-wasip1 target unavailable");
+                return;
+            }
+            panic!(
+                "failed to build hello-wasm fixture:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&build.stdout),
+                stderr
+            );
+        }
+
+        let built_wasm = build_target
+            .path()
+            .join("wasm32-wasip1/release/hello_wasm.wasm");
+        assert!(built_wasm.exists(), "compiled wasm fixture should exist");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_skill_dir = tmp.path().join("skills/hello-wasm");
+        std::fs::create_dir_all(&tmp_skill_dir).expect("create temp skill dir");
+        std::fs::copy(skill_dir.join("SKILL.md"), tmp_skill_dir.join("SKILL.md"))
+            .expect("copy skill metadata");
+        std::fs::copy(&built_wasm, tmp_skill_dir.join("main.wasm")).expect("copy wasm module");
+
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute(
+                "call-wasm-e2e",
+                serde_json::json!({
+                    "skill_name": "hello-wasm",
+                    "workspace_dir": tmp.path().to_string_lossy().to_string(),
+                    "skill_args": {"name": "openpista"},
+                    "timeout_secs": 5
+                }),
+            )
+            .await;
+
+        assert!(!result.is_error, "result output: {}", result.output);
+        assert_eq!(result.call_id, "call-wasm-e2e");
+        assert_eq!(result.tool_name, "container.run");
+        assert_eq!(result.output, "hello from wasm, openpista");
+    }
+
     #[test]
     fn build_container_name_sanitizes_input() {
         let name = build_container_name("call:1/abc");
