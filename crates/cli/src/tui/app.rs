@@ -9,6 +9,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use std::str::FromStr;
+
+use crate::config::ProviderPreset;
 
 /// Spinner animation frames (Braille pattern).
 const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
@@ -119,6 +122,65 @@ impl TuiApp {
     pub fn take_input(&mut self) -> String {
         self.cursor_pos = 0;
         std::mem::take(&mut self.input)
+    }
+
+    pub fn handle_slash_command(&mut self, raw: &str) -> bool {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('/') {
+            return false;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let command = parts.next().unwrap_or(trimmed);
+        match command {
+            "/quit" | "/exit" => {
+                self.should_quit = true;
+            }
+            "/clear" => {
+                self.messages.clear();
+                self.history_scroll = 0;
+            }
+            "/help" => {
+                self.push_assistant(
+                    "TUI commands:\n/help - show this help\n/login [provider] - auth guide for provider\n/clear - clear history\n/quit or /exit - leave TUI"
+                        .to_string(),
+                );
+            }
+            "/login" => {
+                let provider = parts.next().unwrap_or("openai").to_ascii_lowercase();
+                match ProviderPreset::from_str(&provider) {
+                    Ok(ProviderPreset::OpenAi) | Ok(ProviderPreset::OpenRouter) => {
+                        self.push_assistant(format!(
+                            "OAuth login:\nopenpista auth login --provider {provider}\n\nIf needed, set OPENPISTACRAB_OAUTH_CLIENT_ID first."
+                        ));
+                    }
+                    Ok(preset) => {
+                        let env_name = preset.api_key_env();
+                        if env_name.is_empty() {
+                            self.push_assistant(format!(
+                                "Provider '{provider}' does not require OAuth login. Use its local endpoint/base_url configuration."
+                            ));
+                        } else {
+                            self.push_assistant(format!(
+                                "Provider '{provider}' uses API key auth. Set {env_name} (or OPENPISTACRAB_API_KEY) and run again."
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        self.push_error(format!(
+                            "Unknown provider: {provider}. Try one of: openai, openrouter, glue-gpt, glue-google, together, ollama, custom."
+                        ));
+                    }
+                }
+            }
+            other => {
+                self.push_error(format!(
+                    "Unknown command: {other}. Try /help for available commands."
+                ));
+            }
+        }
+
+        true
     }
 
     /// Apply a progress event from the agent runtime.
@@ -394,7 +456,7 @@ impl TuiApp {
     fn render_status(&self, frame: &mut Frame<'_>, area: Rect) {
         let status_text = match &self.state {
             AppState::Idle => Line::from(Span::styled(
-                " Enter:send  ↑↓:scroll  Ctrl+C:quit",
+                " Enter:send  /help:commands  ↑↓:scroll  Ctrl+C:quit",
                 Style::default().fg(Color::DarkGray),
             )),
             AppState::Thinking { round } => {
@@ -719,6 +781,70 @@ mod tests {
         assert_eq!(taken, "hello");
         assert_eq!(app.input, "");
         assert_eq!(app.cursor_pos, 0);
+    }
+
+    #[test]
+    fn handle_slash_command_help_pushes_local_message() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/help");
+        assert!(handled);
+        assert!(matches!(&app.messages[0], TuiMessage::Assistant(_)));
+    }
+
+    #[test]
+    fn handle_slash_command_login_oauth_provider_pushes_auth_hint() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/login openai");
+        assert!(handled);
+        assert!(
+            matches!(&app.messages[0], TuiMessage::Assistant(text) if text.contains("openpista auth login --provider openai"))
+        );
+    }
+
+    #[test]
+    fn handle_slash_command_login_api_key_provider_pushes_env_hint() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/login together");
+        assert!(handled);
+        assert!(
+            matches!(&app.messages[0], TuiMessage::Assistant(text) if text.contains("TOGETHER_API_KEY"))
+        );
+    }
+
+    #[test]
+    fn handle_slash_command_clear_clears_history() {
+        let mut app = make_app();
+        app.push_user("hi".into());
+        app.push_assistant("hello".into());
+
+        let handled = app.handle_slash_command("/clear");
+        assert!(handled);
+        assert!(app.messages.is_empty());
+        assert_eq!(app.history_scroll, 0);
+    }
+
+    #[test]
+    fn handle_slash_command_quit_sets_should_quit() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/quit");
+        assert!(handled);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn handle_slash_command_unknown_adds_error() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/nope");
+        assert!(handled);
+        assert!(matches!(&app.messages[0], TuiMessage::Error(_)));
+    }
+
+    #[test]
+    fn handle_slash_command_returns_false_for_plain_message() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("hello");
+        assert!(!handled);
+        assert!(app.messages.is_empty());
     }
 
     #[test]
