@@ -2,8 +2,10 @@
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
+#[cfg(not(target_env = "musl"))]
 use image::ImageFormat;
 use proto::ToolResult;
+#[cfg(not(target_env = "musl"))]
 use screenshots::Screen;
 use serde::Deserialize;
 use std::io::Cursor;
@@ -70,6 +72,7 @@ impl Tool for ScreenTool {
     }
 }
 
+#[cfg(not(target_env = "musl"))]
 fn capture_png_base64(display_index: usize) -> Result<String, String> {
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate displays: {e}"))?;
     if screens.is_empty() {
@@ -106,6 +109,11 @@ fn capture_png_base64(display_index: usize) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+#[cfg(target_env = "musl")]
+fn capture_png_base64(_display_index: usize) -> Result<String, String> {
+    Err("screen.capture is not supported on musl targets".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +136,48 @@ mod tests {
         assert_eq!(result.tool_name, "screen.capture");
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
+    }
+
+    #[cfg(not(target_env = "musl"))]
+    #[tokio::test]
+    async fn execute_with_valid_arguments_returns_result_shape() {
+        let tool = ScreenTool::new();
+        let result = tool
+            .execute("call-3", serde_json::json!({"display":0}))
+            .await;
+        assert_eq!(result.call_id, "call-3");
+        assert_eq!(result.tool_name, "screen.capture");
+        assert!(!result.output.is_empty());
+    }
+
+    #[cfg(target_env = "musl")]
+    #[tokio::test]
+    async fn execute_with_valid_arguments_returns_result_shape() {
+        let tool = ScreenTool::new();
+        let result = tool
+            .execute("call-3", serde_json::json!({"display":0}))
+            .await;
+        assert_eq!(result.call_id, "call-3");
+        assert_eq!(result.tool_name, "screen.capture");
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .contains("screen.capture is not supported on musl targets")
+        );
+    }
+
+    #[test]
+    fn capture_png_base64_handles_out_of_range_or_missing_display() {
+        let result = capture_png_base64(usize::MAX);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.contains("No displays found")
+                    || err.contains("Display index out of range")
+                    || err.contains("screen.capture is not supported on musl targets")
+                    || err.contains("Failed to enumerate displays")
+            );
+        }
     }
 }

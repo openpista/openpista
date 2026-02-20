@@ -7,6 +7,8 @@
 
 **Languages:** English | [한국어](README_ko.md)
 
+Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
+
 **A QUIC-based OS Gateway AI Agent** — let your LLM control your machine through any messenger.
 
 > Inspired by [OpenClaw](https://github.com/openpista/openclaw)'s WebSocket-based agent architecture,
