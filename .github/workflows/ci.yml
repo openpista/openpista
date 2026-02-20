@@ -86,7 +86,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -98,7 +102,10 @@ jobs:
       - name: Install native Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -152,3 +159,5 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true

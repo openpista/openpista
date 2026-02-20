@@ -112,6 +112,11 @@ impl SkillLoader {
 
     /// Loads parsed skill metadata from `skills/<name>/SKILL.md` or `skills/<name>.md`.
     pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
+        if !is_valid_skill_name(skill_name) {
+            warn!("Invalid skill name attempt: {skill_name}");
+            return None;
+        }
+
         let skills_dir = self.workspace.join("skills");
         let candidates = [
             skills_dir.join(skill_name).join("SKILL.md"),
@@ -136,6 +141,15 @@ impl SkillLoader {
 
     /// Execute a skill subprocess
     pub async fn run_skill(&self, skill_name: &str, args: &[&str]) -> ToolResult {
+        if !is_valid_skill_name(skill_name) {
+            warn!("Invalid skill name attempt: {skill_name}");
+            return ToolResult::error(
+                "skill",
+                skill_name,
+                format!("Invalid skill name: {skill_name}"),
+            );
+        }
+
         let skill_path = self.workspace.join("skills").join(skill_name);
 
         // Look for executable script
@@ -249,6 +263,18 @@ fn parse_skill_markdown(content: &str) -> (Option<String>, String) {
     }
 
     (None, content.trim().to_string())
+}
+
+fn is_valid_skill_name(name: &str) -> bool {
+    let path = Path::new(name);
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(valid_name)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false; // must be exactly one component
+    }
+    valid_name.to_str() == Some(name)
 }
 
 fn parse_front_matter_image(front_matter: &str) -> Option<String> {
