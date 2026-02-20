@@ -7,3 +7,5 @@ Cargo.lock
 *.cert
 *.pid
 config.toml
+.DS_Store
+.sisyphus/
