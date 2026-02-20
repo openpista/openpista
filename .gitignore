@@ -1,11 +1,29 @@
-/target
+# Rust / Cargo
+/target/
 **/*.rs.bk
 Cargo.lock
+
+# Rust debug / profiling artifacts
+*.pdb
+*.dSYM/
+
+# Docs build artifacts
+/docs/book/
+/docs/dist/
+/docs/.cache/
+/docs/.docusaurus/
+/docs/.vitepress/dist/
+/docs/.next/
+/docs/node_modules/
+
+# Local secrets / runtime files
 .env
+config.toml
 *.pem
 *.key
 *.cert
 *.pid
-config.toml
+
+# OS / local tooling
 .DS_Store
 .sisyphus/
