@@ -9,6 +9,9 @@ members = [
     "crates/skills",
     "crates/cli", "quinn-test",
 ]
+exclude = [
+    "skills/hello-wasm"
+]
 
 [workspace.dependencies]
 # 비동기 런타임
