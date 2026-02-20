@@ -129,4 +129,30 @@ mod tests {
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
     }
+
+    #[tokio::test]
+    async fn execute_with_valid_arguments_returns_result_shape() {
+        let tool = ScreenTool::new();
+        let result = tool
+            .execute("call-3", serde_json::json!({"display":0}))
+            .await;
+        assert_eq!(result.call_id, "call-3");
+        assert_eq!(result.tool_name, "screen.capture");
+        assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn capture_png_base64_handles_out_of_range_or_missing_display() {
+        let result = capture_png_base64(usize::MAX);
+        match result {
+            Ok(payload) => {
+                assert!(!payload.is_empty());
+            }
+            Err(err) => {
+                assert!(
+                    err.contains("No displays found") || err.contains("Display index out of range")
+                );
+            }
+        }
+    }
 }

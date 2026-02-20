@@ -584,6 +584,26 @@ mod tests {
         assert!(result.output.contains("image must not be empty"));
     }
 
+    #[tokio::test]
+    async fn execute_with_valid_arguments_returns_result_shape() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute(
+                "call-2b",
+                serde_json::json!({
+                    "image":"alpine:3.20",
+                    "command":"echo hi",
+                    "timeout_secs":1,
+                    "pull":false
+                }),
+            )
+            .await;
+
+        assert_eq!(result.call_id, "call-2b");
+        assert_eq!(result.tool_name, "container.run");
+        assert!(!result.output.is_empty());
+    }
+
     #[test]
     fn build_container_name_sanitizes_input() {
         let name = build_container_name("call:1/abc");
@@ -681,5 +701,64 @@ mod tests {
         let script = build_task_credential_script(&credential);
         assert!(script.contains("export OPENPISTACRAB_TASK_TOKEN='abc123'"));
         assert!(script.contains("OPENPISTACRAB_TASK_TOKEN_EXPIRES_AT=42"));
+    }
+
+    #[test]
+    fn sanitize_env_name_uses_default_and_rejects_invalid_values() {
+        assert_eq!(
+            sanitize_env_name(None).expect("default env name"),
+            DEFAULT_TOKEN_ENV_NAME
+        );
+        assert_eq!(
+            sanitize_env_name(Some("CUSTOM_TOKEN")).expect("custom env name"),
+            "CUSTOM_TOKEN"
+        );
+        assert!(sanitize_env_name(Some("BAD-NAME")).is_err());
+        assert!(sanitize_env_name(Some("9BAD")).is_err());
+    }
+
+    #[test]
+    fn is_valid_env_name_checks_boundaries() {
+        assert!(is_valid_env_name("_TOKEN"));
+        assert!(is_valid_env_name("TOKEN_1"));
+        assert!(!is_valid_env_name(""));
+        assert!(!is_valid_env_name("1TOKEN"));
+        assert!(!is_valid_env_name("TOKEN-NAME"));
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        let value = "abc'def";
+        let quoted = shell_single_quote(value);
+        assert_eq!(quoted, "'abc'\"'\"'def'");
+    }
+
+    #[test]
+    fn build_task_credential_archive_contains_env_file() {
+        let credential = TaskCredential {
+            token: "tok".to_string(),
+            expires_at_unix: 7,
+            env_name: DEFAULT_TOKEN_ENV_NAME.to_string(),
+        };
+
+        let archive = build_task_credential_archive(&credential).expect("archive");
+        let mut ar = tar::Archive::new(std::io::Cursor::new(archive));
+        let mut names = Vec::new();
+        for entry in ar.entries().expect("entries") {
+            let entry = entry.expect("entry");
+            names.push(entry.path().expect("path").to_string_lossy().to_string());
+        }
+        assert_eq!(names, vec![TOKEN_ENV_FILE_NAME.to_string()]);
+    }
+
+    #[test]
+    fn cleanup_task_credential_clears_sensitive_fields() {
+        let mut credential = Some(TaskCredential {
+            token: "secret".to_string(),
+            expires_at_unix: 99,
+            env_name: "ENV".to_string(),
+        });
+        cleanup_task_credential(&mut credential);
+        assert!(credential.is_none());
     }
 }

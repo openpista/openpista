@@ -660,6 +660,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn navigate_rejects_invalid_url() {
+        let tool = BrowserTool::new();
+        let result = tool
+            .execute("call-1b", serde_json::json!({"url":"not a url"}))
+            .await;
+        assert_eq!(result.call_id, "call-1b");
+        assert_eq!(result.tool_name, "browser.navigate");
+        assert!(result.is_error);
+        assert!(result.output.contains("Invalid URL"));
+    }
+
+    #[tokio::test]
     async fn click_rejects_invalid_arguments() {
         let tool = BrowserClickTool::new();
         let result = tool
@@ -695,13 +707,79 @@ mod tests {
         assert!(result.output.contains("Invalid arguments"));
     }
 
+    #[tokio::test]
+    async fn navigate_with_valid_url_returns_result_shape() {
+        let tool = BrowserTool::new();
+        let result = tool
+            .execute(
+                "call-5",
+                serde_json::json!({"url":"https://example.com","timeout_secs":1}),
+            )
+            .await;
+        assert_eq!(result.call_id, "call-5");
+        assert_eq!(result.tool_name, "browser.navigate");
+        assert!(!result.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn click_with_valid_selector_returns_result_shape() {
+        let tool = BrowserClickTool::new();
+        let result = tool
+            .execute(
+                "call-6",
+                serde_json::json!({"selector":"body","timeout_secs":1}),
+            )
+            .await;
+        assert_eq!(result.call_id, "call-6");
+        assert_eq!(result.tool_name, "browser.click");
+        assert!(!result.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn type_with_valid_selector_returns_result_shape() {
+        let tool = BrowserTypeTool::new();
+        let result = tool
+            .execute(
+                "call-7",
+                serde_json::json!({"selector":"body","text":"hello","timeout_secs":1}),
+            )
+            .await;
+        assert_eq!(result.call_id, "call-7");
+        assert_eq!(result.tool_name, "browser.type");
+        assert!(!result.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn screenshot_with_valid_args_returns_result_shape() {
+        let tool = BrowserScreenshotTool::new();
+        let result = tool
+            .execute(
+                "call-8",
+                serde_json::json!({"full_page":false,"timeout_secs":1}),
+            )
+            .await;
+        assert_eq!(result.call_id, "call-8");
+        assert_eq!(result.tool_name, "browser.screenshot");
+        assert!(!result.output.is_empty());
+    }
+
     #[test]
     fn operation_timeout_clamps_values() {
-        assert_eq!(operation_timeout(None), Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            operation_timeout(None),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
         assert_eq!(operation_timeout(Some(0)), Duration::from_secs(1));
         assert_eq!(
             operation_timeout(Some(MAX_TIMEOUT_SECS + 100)),
             Duration::from_secs(MAX_TIMEOUT_SECS)
         );
+    }
+
+    #[test]
+    fn shared_state_returns_same_instance() {
+        let a = shared_state();
+        let b = shared_state();
+        assert!(Arc::ptr_eq(&a, &b));
     }
 }
