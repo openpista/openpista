@@ -5,6 +5,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
 
+**Languages:** English | [한국어](README_ko.md)
+
 Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 **A QUIC-based OS Gateway AI Agent** — let your LLM control your machine through any messenger.
@@ -35,7 +37,7 @@ openpistacrab is a lightweight daemon written in Rust that bridges **messaging c
 [ Agent Runtime ]     LLM loop · ToolRegistry · SQLite memory
         │  tool_call
         ▼
-[ OS Tools ]          system.run (bash) · screen* · browser*
+[ OS Tools ]          system.run (bash) · screen* · input control*
 [ Skills ]            SKILL.md → system prompt + subprocess
 
 * coming in v0.2.0
@@ -55,7 +57,7 @@ openpistacrab is a lightweight daemon written in Rust that bridges **messaging c
 | SQLite conversation memory | ✅ v0.1.0 |
 | Skills (SKILL.md loader) | ✅ v0.1.0 |
 | Screen capture | 🔜 v0.2.0 |
-| Browser control | 🔜 v0.2.0 |
+| Screen & input control (OpenClaw-style) | 🔜 v0.2.0 |
 | Discord / Slack adapters | 🔜 v0.2.0 |
 
 ---
