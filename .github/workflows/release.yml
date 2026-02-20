@@ -120,8 +120,16 @@ jobs:
           if-no-files-found: error
 
   release-nix:
-    name: release nix (x86_64-linux)
+    name: release nix (${{ matrix.target }})
     needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            artifact: release-nix-x86_64-linux
+          - target: aarch64-linux
+            artifact: release-nix-aarch64-linux
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -136,14 +144,14 @@ jobs:
         id: package
         run: |
           tag="${{ needs.prepare.outputs.release_tag }}"
-          target="x86_64-linux"
+          target="${{ matrix.target }}"
           package_dir="openpistacrab-${tag}-nix-${target}"
           artifact="${package_dir}.tar.gz"
 
-          nix build .#packages.x86_64-linux.openpista
+          nix build .#packages.${target}.openpista
 
           mkdir -p "${package_dir}"
-          cp "$(readlink -f ./result/bin/openpista)" "${package_dir}/openpistacrab"
+          cp "$(readlink -f ./result/bin/openpistacrab)" "${package_dir}/openpistacrab"
           tar -czf "${artifact}" "${package_dir}"
 
           echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
@@ -151,7 +159,7 @@ jobs:
       - name: Upload Nix artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-nix-x86_64-linux
+          name: ${{ matrix.artifact }}
           path: ${{ steps.package.outputs.artifact }}
           if-no-files-found: error
 

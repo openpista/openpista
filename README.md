@@ -130,7 +130,7 @@ Optional: run directly from Nix and copy build output.
 
 ```bash
 nix build .#openpista
-cp result/bin/openpista /usr/local/bin/openpistacrab
+cp result/bin/openpistacrab /usr/local/bin/openpistacrab
 ```
 
 
