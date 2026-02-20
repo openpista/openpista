@@ -7,11 +7,6 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-/// Loads skills from SKILL.md files in the workspace
-pub struct SkillLoader {
-    workspace: PathBuf,
-}
-
 /// Skill execution mode selected from `SKILL.md` front-matter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SkillExecutionMode {
@@ -40,6 +35,11 @@ struct SkillFrontMatter {
     image: Option<String>,
     description: Option<String>,
     mode: Option<String>,
+}
+
+/// Loads skills from SKILL.md files in the workspace
+pub struct SkillLoader {
+    workspace: PathBuf,
 }
 
 impl SkillLoader {
@@ -124,8 +124,63 @@ impl SkillLoader {
         tokio::fs::read_to_string(path).await.ok()
     }
 
+    /// Loads parsed skill metadata from `skills/<name>/SKILL.md` or `skills/<name>.md`.
+    pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
+        if !is_valid_skill_name(skill_name) {
+            warn!("Invalid skill name attempt: {skill_name}");
+            return None;
+        }
+
+        let skills_dir = self.workspace.join("skills");
+        let candidates = [
+            skills_dir.join(skill_name).join("SKILL.md"),
+            skills_dir.join(format!("{skill_name}.md")),
+        ];
+
+        for path in candidates {
+            let Some(content) = self.read_skill_file(&path).await else {
+                continue;
+            };
+
+            let front = parse_skill_front_matter(&content);
+            let mode = front
+                .as_ref()
+                .and_then(|fm| fm.mode.as_deref())
+                .map(parse_mode)
+                .unwrap_or_default();
+
+            let image = front
+                .as_ref()
+                .and_then(|fm| fm.image.clone())
+                .and_then(normalize_optional_text);
+
+            let description = front
+                .as_ref()
+                .and_then(|fm| fm.description.clone())
+                .and_then(normalize_optional_text);
+
+            return Some(SkillMetadata {
+                name: skill_name.to_string(),
+                image,
+                description,
+                mode,
+            });
+        }
+
+        None
+    }
+
     /// Execute a skill subprocess
     pub async fn run_skill(&self, skill_name: &str, args: &[&str]) -> ToolResult {
+        if !is_valid_skill_name(skill_name) {
+            warn!("Invalid skill name attempt: {skill_name}");
+            return ToolResult::error(
+                "skill",
+                skill_name,
+                format!("Invalid skill name: {skill_name}"),
+            );
+        }
+
         let skill_path = self.workspace.join("skills").join(skill_name);
 
         // Look for executable script
@@ -177,40 +232,6 @@ impl SkillLoader {
     /// Returns the configured workspace root path.
     pub fn workspace(&self) -> &Path {
         &self.workspace
-    }
-
-    /// Loads skill metadata from `skills/<name>/SKILL.md` front-matter.
-    pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
-        let skill_md = self
-            .workspace
-            .join("skills")
-            .join(skill_name)
-            .join("SKILL.md");
-        let content = self.read_skill_file(&skill_md).await?;
-
-        let front = parse_skill_front_matter(&content);
-        let mode = front
-            .as_ref()
-            .and_then(|fm| fm.mode.as_deref())
-            .map(parse_mode)
-            .unwrap_or_default();
-
-        let image = front
-            .as_ref()
-            .and_then(|fm| fm.image.clone())
-            .and_then(normalize_optional_text);
-
-        let description = front
-            .as_ref()
-            .and_then(|fm| fm.description.clone())
-            .and_then(normalize_optional_text);
-
-        Some(SkillMetadata {
-            name: skill_name.to_string(),
-            image,
-            description,
-            mode,
-        })
     }
 }
 
@@ -288,6 +309,18 @@ async fn run_with_executor_candidates(
     }))
 }
 
+fn is_valid_skill_name(name: &str) -> bool {
+    let path = Path::new(name);
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(valid_name)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false; // must be exactly one component
+    }
+    valid_name.to_str() == Some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -328,6 +361,74 @@ mod tests {
         assert!(ctx.contains("Do commands"));
         assert!(ctx.contains("### Skill: login"));
         assert!(ctx.contains("Deep nested skill"));
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_returns_none_when_skill_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader.load_skill_metadata("missing").await;
+        assert!(metadata.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_parses_front_matter_image() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_file = tmp.path().join("skills/py/SKILL.md");
+        write_file(
+            &skill_file,
+            "---\nimage: python:3.12-slim\n---\n# Python\nRuns scripts",
+        );
+
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader
+            .load_skill_metadata("py")
+            .await
+            .expect("metadata present");
+
+        assert_eq!(metadata.name, "py");
+        assert_eq!(metadata.image.as_deref(), Some("python:3.12-slim"));
+        assert!(metadata.description.is_none());
+        assert_eq!(metadata.mode, SkillExecutionMode::Subprocess);
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_handles_front_matter_without_image() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_file = tmp.path().join("skills/no-image/SKILL.md");
+        write_file(
+            &skill_file,
+            "---\ndescription: test\n---\n# Skill\nNo image declared",
+        );
+
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader
+            .load_skill_metadata("no-image")
+            .await
+            .expect("metadata present");
+
+        assert_eq!(metadata.name, "no-image");
+        assert!(metadata.image.is_none());
+        assert_eq!(metadata.description.as_deref(), Some("test"));
+        assert_eq!(metadata.mode, SkillExecutionMode::Subprocess);
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_handles_markdown_without_front_matter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_file = tmp.path().join("skills/plain/SKILL.md");
+        write_file(&skill_file, "# Plain\nNo front matter");
+
+        let loader = SkillLoader::new(tmp.path());
+        let metadata = loader
+            .load_skill_metadata("plain")
+            .await
+            .expect("metadata present");
+
+        assert_eq!(metadata.name, "plain");
+        assert!(metadata.image.is_none());
+        assert!(metadata.description.is_none());
+        assert_eq!(metadata.mode, SkillExecutionMode::Subprocess);
     }
 
     #[tokio::test]
