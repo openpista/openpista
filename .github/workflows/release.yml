@@ -58,8 +58,12 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - runner: macos-14
             target: aarch64-apple-darwin
     steps:
@@ -83,9 +87,18 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Install cross
+        if: endsWith(matrix.target, '-musl')
+        uses: taiki-e/install-action@cross
+
       - name: Build release binary
         shell: bash
-        run: cargo build --release -p cli --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ matrix.target }}" == *"-musl" ]]; then
+            cross build --release -p cli --target "${{ matrix.target }}"
+          else
+            cargo build --release -p cli --target "${{ matrix.target }}"
+          fi
 
       - name: Package release artifact
         id: package

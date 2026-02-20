@@ -86,7 +86,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -100,11 +104,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
+      - name: Install cross
+        if: endsWith(matrix.target, '-musl')
+        uses: taiki-e/install-action@cross
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build workspace for target
-        run: cargo build --workspace --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ matrix.target }}" == *"-musl" ]]; then
+            cross build --workspace --target "${{ matrix.target }}"
+          else
+            cargo build --workspace --target "${{ matrix.target }}"
+          fi
 
   build-macos-arm64:
     name: build (macos-arm64)
