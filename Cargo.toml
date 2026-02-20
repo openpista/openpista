@@ -7,7 +7,7 @@ members = [
     "crates/tools",
     "crates/channels",
     "crates/skills",
-    "crates/cli",
+    "crates/cli", "quinn-test",
 ]
 
 [workspace.dependencies]
@@ -19,17 +19,19 @@ futures-util = "0.3"
 # QUIC / TLS
 quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
 rcgen = "0.13"
 
 # 직렬화
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 
 # LLM
-async-openai = "0.27"
+async-openai = { version = "0.27", default-features = false, features = ["rustls"] }
 
 # 데이터베이스
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -49,7 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 
 # 채널
-teloxide = { version = "0.12", features = ["macros"] }
+teloxide = { version = "0.12", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
 # TUI
 ratatui = "0.29"
@@ -58,13 +60,13 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # 스케줄러
 tokio-cron-scheduler = "0.10"
 
-# OAuth / 인증
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chromiumoxide = "0.8"
 bollard = "0.19"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+tar = "0.4"
 image = "0.24.9"
 screenshots = "0.8"
 

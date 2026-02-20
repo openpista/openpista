@@ -8,13 +8,7 @@ Cargo.lock
 *.dSYM/
 
 # Docs build artifacts
-/docs/book/
-/docs/dist/
-/docs/.cache/
-/docs/.docusaurus/
-/docs/.vitepress/dist/
-/docs/.next/
-/docs/node_modules/
+/docs/*
 
 # Local secrets / runtime files
 .env

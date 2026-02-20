@@ -153,3 +153,14 @@ pub async fn run_tui(
     // TerminalGuard::drop handles cleanup
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_guard_drop_path_is_safe() {
+        let guard = TerminalGuard;
+        drop(guard);
+    }
+}

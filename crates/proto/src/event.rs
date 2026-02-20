@@ -77,17 +77,91 @@ pub enum ProgressEvent {
     LlmThinking { round: usize },
     /// A tool call has been dispatched but has not yet completed.
     ToolCallStarted {
+        /// Tool-call identifier emitted by the LLM.
         call_id: String,
+        /// Tool name that is about to execute.
         tool_name: String,
+        /// JSON arguments passed to the tool.
         args: serde_json::Value,
     },
     /// A tool call has finished executing.
     ToolCallFinished {
+        /// Tool-call identifier emitted by the LLM.
         call_id: String,
+        /// Tool name that finished execution.
         tool_name: String,
+        /// Tool output payload persisted in history/UI.
         output: String,
+        /// Whether the tool result represents an error.
         is_error: bool,
     },
+}
+
+/// Metadata kind tag used for worker reports embedded in `ChannelEvent.metadata`.
+pub const WORKER_REPORT_KIND: &str = "worker_report";
+
+/// Raw worker command execution output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerOutput {
+    /// Process exit code.
+    pub exit_code: i64,
+    /// Captured standard output.
+    pub stdout: String,
+    /// Captured standard error.
+    pub stderr: String,
+    /// Preformatted combined output for user-facing display.
+    pub output: String,
+}
+
+/// Structured worker report sent from `container.run` back to the orchestrator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerReport {
+    /// Discriminator used to identify worker-report metadata payloads.
+    pub kind: String,
+    /// Original tool call identifier.
+    pub call_id: String,
+    /// Worker/container identifier.
+    pub worker_id: String,
+    /// Executed container image.
+    pub image: String,
+    /// Executed command string.
+    pub command: String,
+    /// Process exit code.
+    pub exit_code: i64,
+    /// Captured standard output.
+    pub stdout: String,
+    /// Captured standard error.
+    pub stderr: String,
+    /// Preformatted combined output for user-facing display.
+    pub output: String,
+}
+
+impl WorkerReport {
+    /// Builds a worker report from identifying metadata and command output.
+    pub fn new(
+        call_id: impl Into<String>,
+        worker_id: impl Into<String>,
+        image: impl Into<String>,
+        command: impl Into<String>,
+        worker_output: WorkerOutput,
+    ) -> Self {
+        Self {
+            kind: WORKER_REPORT_KIND.to_string(),
+            call_id: call_id.into(),
+            worker_id: worker_id.into(),
+            image: image.into(),
+            command: command.into(),
+            exit_code: worker_output.exit_code,
+            stdout: worker_output.stdout,
+            stderr: worker_output.stderr,
+            output: worker_output.output,
+        }
+    }
+
+    /// Returns true when `kind` matches the worker-report discriminator.
+    pub fn is_worker_report(&self) -> bool {
+        self.kind == WORKER_REPORT_KIND
+    }
 }
 
 #[cfg(test)]
@@ -126,5 +200,27 @@ mod tests {
 
         assert_eq!(resp.content, "boom");
         assert!(resp.is_error);
+    }
+
+    #[test]
+    fn worker_report_constructor_sets_kind_and_fields() {
+        let report = WorkerReport::new(
+            "call-1",
+            "worker-a",
+            "alpine:3.20",
+            "echo hi",
+            WorkerOutput {
+                exit_code: 0,
+                stdout: "hi\n".into(),
+                stderr: "".into(),
+                output: "stdout:\nhi\n\nexit_code: 0".into(),
+            },
+        );
+
+        assert_eq!(report.kind, WORKER_REPORT_KIND);
+        assert_eq!(report.call_id, "call-1");
+        assert_eq!(report.worker_id, "worker-a");
+        assert_eq!(report.exit_code, 0);
+        assert!(report.is_worker_report());
     }
 }

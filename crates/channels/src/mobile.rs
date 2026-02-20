@@ -465,6 +465,96 @@ fn generate_self_signed() -> Result<
 mod tests {
     use super::*;
     use proto::{ChannelId as CId, SessionId as SId};
+    use std::sync::Arc;
+
+    fn ensure_crypto_provider() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    struct TestQuicHarness {
+        endpoint: quinn::Endpoint,
+        client_endpoint: quinn::Endpoint,
+        server_addr: SocketAddr,
+        inner: Arc<Inner>,
+    }
+
+    fn build_test_harness(api_token: &str) -> TestQuicHarness {
+        ensure_crypto_provider();
+
+        let (cert_der, key_der) = generate_self_signed().expect("self signed cert");
+
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .expect("server tls config");
+        tls_config.max_early_data_size = u32::MAX;
+
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+                .expect("quic server config"),
+        ));
+        let endpoint =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().expect("bind addr"))
+                .expect("server endpoint");
+        let server_addr = endpoint.local_addr().expect("server addr");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der).expect("add root cert");
+        let client_crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let client_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
+                .expect("quic client config"),
+        ));
+        let mut client_endpoint =
+            quinn::Endpoint::client("127.0.0.1:0".parse().expect("client bind"))
+                .expect("client endpoint");
+        client_endpoint.set_default_client_config(client_config);
+
+        let inner = Arc::new(Inner {
+            api_token: api_token.to_string(),
+            bind_addr: server_addr,
+            pending: DashMap::new(),
+        });
+
+        TestQuicHarness {
+            endpoint,
+            client_endpoint,
+            server_addr,
+            inner,
+        }
+    }
+
+    async fn connect_client(
+        client_endpoint: &quinn::Endpoint,
+        server_addr: SocketAddr,
+    ) -> quinn::Connection {
+        client_endpoint
+            .connect(server_addr, "localhost")
+            .expect("connect setup")
+            .await
+            .expect("connect")
+    }
+
+    async fn write_auth_frame(conn: &quinn::Connection, token: &str, device_id: &str) {
+        let (mut auth_send, mut auth_recv) = conn.open_bi().await.expect("auth stream");
+        let auth_payload = serde_json::to_vec(&ClientMessage::Auth(AuthRequest {
+            token: token.into(),
+            device_id: device_id.into(),
+        }))
+        .expect("auth payload");
+        write_frame(&mut auth_send, &auth_payload)
+            .await
+            .expect("write auth");
+        auth_send.finish().expect("finish auth send");
+        let _ = read_frame(&mut auth_recv)
+            .await
+            .expect("read auth response");
+    }
 
     // ── Auth validation ──────────────────────────────────────────────────────
 
@@ -621,5 +711,232 @@ mod tests {
         );
         // Should not panic or error — just warn
         adapter.send_response(resp).await.unwrap();
+    }
+
+    #[test]
+    fn generate_self_signed_returns_non_empty_der_blobs() {
+        let (cert, key) = generate_self_signed().expect("self signed cert generation");
+        assert!(!cert.as_ref().is_empty());
+        assert!(!key.secret_der().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_connection_auth_and_message_roundtrip() {
+        let TestQuicHarness {
+            endpoint,
+            client_endpoint,
+            server_addr,
+            inner,
+        } = build_test_harness("secret");
+        let response_handle = MobileAdapter {
+            inner: Arc::clone(&inner),
+        };
+
+        let (tx, mut rx) = mpsc::channel::<ChannelEvent>(8);
+        let server_task = tokio::spawn({
+            let inner = Arc::clone(&inner);
+            async move {
+                let incoming = endpoint.accept().await.expect("incoming connection");
+                let conn = incoming.await.expect("accepted connection");
+                handle_connection(conn, inner, tx).await
+            }
+        });
+        let conn = connect_client(&client_endpoint, server_addr).await;
+
+        let (mut auth_send, mut auth_recv) = conn.open_bi().await.expect("auth stream");
+        let auth_payload = serde_json::to_vec(&ClientMessage::Auth(AuthRequest {
+            token: "secret".into(),
+            device_id: "device-1".into(),
+        }))
+        .expect("auth payload");
+        write_frame(&mut auth_send, &auth_payload)
+            .await
+            .expect("write auth");
+        auth_send.finish().expect("finish auth send");
+
+        let auth_resp_buf = read_frame(&mut auth_recv)
+            .await
+            .expect("read auth response");
+        let auth_resp: ServerMessage = serde_json::from_slice(&auth_resp_buf).expect("auth json");
+        assert!(matches!(auth_resp, ServerMessage::AuthOk(_)));
+
+        let (mut msg_send, mut msg_recv) = conn.open_bi().await.expect("message stream");
+        let msg_payload = serde_json::to_vec(&ClientMessage::Message(UserMessage {
+            text: "hello from client".into(),
+        }))
+        .expect("message payload");
+        write_frame(&mut msg_send, &msg_payload)
+            .await
+            .expect("write message");
+        msg_send.finish().expect("finish message send");
+
+        let event = rx.recv().await.expect("channel event");
+        assert_eq!(event.user_message, "hello from client");
+        assert_eq!(event.session_id.as_str(), "mobile:device-1");
+        assert!(event.channel_id.as_str().starts_with("mobile:device-1:"));
+
+        response_handle
+            .send_response(AgentResponse::new(
+                event.channel_id.clone(),
+                event.session_id.clone(),
+                "server reply",
+            ))
+            .await
+            .expect("send response");
+
+        let msg_resp_buf = read_frame(&mut msg_recv)
+            .await
+            .expect("read message response");
+        let msg_resp: ServerMessage = serde_json::from_slice(&msg_resp_buf).expect("message json");
+        match msg_resp {
+            ServerMessage::Response(payload) => {
+                assert_eq!(payload.content, "server reply");
+                assert!(!payload.is_error);
+            }
+            _ => panic!("expected response message"),
+        }
+
+        conn.close(0u32.into(), b"done");
+        let server_result = server_task.await.expect("server task join");
+        assert!(server_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_connection_rejects_invalid_token() {
+        let TestQuicHarness {
+            endpoint,
+            client_endpoint,
+            server_addr,
+            inner,
+        } = build_test_harness("secret");
+        let (tx, _rx) = mpsc::channel::<ChannelEvent>(8);
+
+        let server_task = tokio::spawn({
+            async move {
+                let incoming = endpoint.accept().await.expect("incoming connection");
+                let conn = incoming.await.expect("accepted connection");
+                handle_connection(conn, inner, tx).await
+            }
+        });
+        let conn = connect_client(&client_endpoint, server_addr).await;
+        let (mut auth_send, mut auth_recv) = conn.open_bi().await.expect("auth stream");
+        let auth_payload = serde_json::to_vec(&ClientMessage::Auth(AuthRequest {
+            token: "wrong".into(),
+            device_id: "device-1".into(),
+        }))
+        .expect("auth payload");
+        write_frame(&mut auth_send, &auth_payload)
+            .await
+            .expect("write auth");
+        auth_send.finish().expect("finish auth send");
+
+        if let Ok(auth_resp_buf) = read_frame(&mut auth_recv).await {
+            let auth_resp: ServerMessage =
+                serde_json::from_slice(&auth_resp_buf).expect("auth json");
+            match auth_resp {
+                ServerMessage::AuthError(payload) => {
+                    assert!(payload.message.contains("Invalid API token"));
+                }
+                _ => panic!("expected auth error"),
+            }
+        }
+
+        conn.close(0u32.into(), b"done");
+        let result = server_task.await.expect("server task join");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn message_stream_returns_error_when_agent_unavailable() {
+        let TestQuicHarness {
+            endpoint,
+            client_endpoint,
+            server_addr,
+            inner,
+        } = build_test_harness("secret");
+        let (tx, rx) = mpsc::channel::<ChannelEvent>(1);
+        drop(rx);
+
+        let server_task = tokio::spawn({
+            async move {
+                let incoming = endpoint.accept().await.expect("incoming connection");
+                let conn = incoming.await.expect("accepted connection");
+                handle_connection(conn, inner, tx).await
+            }
+        });
+        let conn = connect_client(&client_endpoint, server_addr).await;
+        write_auth_frame(&conn, "secret", "device-1").await;
+
+        let (mut msg_send, mut msg_recv) = conn.open_bi().await.expect("message stream");
+        let msg_payload = serde_json::to_vec(&ClientMessage::Message(UserMessage {
+            text: "hello from client".into(),
+        }))
+        .expect("message payload");
+        write_frame(&mut msg_send, &msg_payload)
+            .await
+            .expect("write message");
+        msg_send.finish().expect("finish message send");
+
+        let msg_resp_buf = read_frame(&mut msg_recv)
+            .await
+            .expect("read message response");
+        let msg_resp: ServerMessage = serde_json::from_slice(&msg_resp_buf).expect("message json");
+        match msg_resp {
+            ServerMessage::Error(payload) => {
+                assert!(payload.message.contains("Agent unavailable"));
+            }
+            _ => panic!("expected error message"),
+        }
+
+        conn.close(0u32.into(), b"done");
+        let server_result = server_task.await.expect("server task join");
+        assert!(server_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn message_stream_rejects_auth_frame_after_handshake() {
+        let TestQuicHarness {
+            endpoint,
+            client_endpoint,
+            server_addr,
+            inner,
+        } = build_test_harness("secret");
+        let (tx, _rx) = mpsc::channel::<ChannelEvent>(8);
+
+        let server_task = tokio::spawn({
+            async move {
+                let incoming = endpoint.accept().await.expect("incoming connection");
+                let conn = incoming.await.expect("accepted connection");
+                handle_connection(conn, inner, tx).await
+            }
+        });
+        let conn = connect_client(&client_endpoint, server_addr).await;
+        write_auth_frame(&conn, "secret", "device-1").await;
+
+        let (mut msg_send, mut msg_recv) = conn.open_bi().await.expect("message stream");
+        let payload = serde_json::to_vec(&ClientMessage::Auth(AuthRequest {
+            token: "secret".into(),
+            device_id: "device-1".into(),
+        }))
+        .expect("auth payload");
+        write_frame(&mut msg_send, &payload)
+            .await
+            .expect("write wrong frame");
+        msg_send.finish().expect("finish message send");
+
+        let msg_resp_buf = read_frame(&mut msg_recv)
+            .await
+            .expect("read message response");
+        let msg_resp: ServerMessage = serde_json::from_slice(&msg_resp_buf).expect("message json");
+        match msg_resp {
+            ServerMessage::Error(payload) => {
+                assert!(payload.message.contains("Expected message, got auth frame"));
+            }
+            _ => panic!("expected error message"),
+        }
+
+        conn.close(0u32.into(), b"done");
+        let server_result = server_task.await.expect("server task join");
+        assert!(server_result.is_ok());
     }
 }

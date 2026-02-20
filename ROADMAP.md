@@ -38,7 +38,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 ### Memory & Persistence
 
 - [x] SQLite conversation memory via `sqlx`
-- [x] Automatic migrations on startup (`sqlx::migrate!`)
+- [x] Automatic migrations on startup
 - [x] Session creation, lookup, and timestamp updates
 - [x] Message store/load with role, content, and tool call metadata
 - [x] Tool call JSON serialization preserved across sessions
@@ -63,15 +63,15 @@ The first public release establishes the core autonomous loop: the LLM receives 
 ### Docker Sandbox
 
 - [x] `container.run` tool — creates an isolated Docker container per task
-- [ ] Per-task ephemeral tokens: short-lived credentials injected at container start, auto-revoked on exit
-- [ ] Orchestrator/worker pattern: main agent acts as orchestrator and spawns worker containers for heavy or dangerous tasks
-- [ ] Worker containers report results back to the orchestrator session via QUIC stream
-- [ ] Container-level resource limits: CPU quota, memory cap, no-network by default
-- [ ] Workspace volume mount (read-only) so workers can read skills/files without write access to the host
-- [ ] Container lifecycle: create → inject token → run task → collect results → destroy (no reuse)
-- [ ] `bollard` crate for Docker API integration (not `docker` CLI shell-out)
-- [ ] Configurable base image per skill (`image:` field in `SKILL.md`)
-- [ ] Fallback to subprocess mode when Docker daemon is unavailable
+- [x] Per-task ephemeral tokens: short-lived credentials injected at container start, auto-revoked on exit
+- [x] Orchestrator/worker pattern: main agent acts as orchestrator and spawns worker containers for heavy or dangerous tasks
+- [x] Worker containers report results back to the orchestrator session via QUIC stream
+- [x] Container-level resource limits: CPU quota, memory cap, no-network by default
+- [x] Workspace volume mount (read-only) so workers can read skills/files without write access to the host
+- [x] Container lifecycle: create → inject token → run task → collect results → destroy (no reuse)
+- [x] `bollard` crate for Docker API integration (not `docker` CLI shell-out)
+- [x] Configurable base image per skill (`image:` field in `SKILL.md`)
+- [x] Fallback to subprocess mode when Docker daemon is unavailable
 
 ### WASM Skill Sandbox
 
@@ -91,7 +91,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `openpistacrab repl` — interactive REPL with session persistence
 - [x] TOML config file with documented examples (`config.toml`)
 - [x] Environment variable override for all secrets
-- [ ] PID file written on start, removed on exit
+- [x] PID file written on start, removed on exit
 - [x] `SIGTERM` + `Ctrl-C` graceful shutdown
 
 ### Quality & CI
@@ -99,14 +99,15 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Unit + integration tests: `cargo test --workspace` (target: 90+ tests)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
-- [ ] GitHub Actions CI workflow on `push` / `pull_request` to `main`
-- [ ] Codecov coverage reporting
+- [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`
+- [x] Linux cross-build matrix (`x86_64/aarch64` × `gnu/musl`)
+- [x] Codecov coverage reporting
 
 ### Documentation & Release Artifacts
 
-- [ ] `README.md` with badges (CI, codecov, Rust version, license)
-- [ ] `ROADMAP.md` (this document)
-- [ ] `CHANGELOG.md` with v0.1.0 entries
+- [x] `README.md` with badges (CI, codecov, Rust version, license)
+- [x] `ROADMAP.md` (this document)
+- [x] `CHANGELOG.md` with v0.1.0 entries
 - [ ] `LICENSE-MIT` and `LICENSE-APACHE`
 - [ ] `config.example.toml` with all options documented
 - [ ] GitHub Release with pre-built binaries:
