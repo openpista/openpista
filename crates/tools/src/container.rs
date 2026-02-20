@@ -459,10 +459,12 @@ async fn maybe_report_worker_result(
         container_name.to_string(),
         args.image.clone(),
         args.command.clone(),
-        execution.exit_code,
-        execution.stdout.clone(),
-        execution.stderr.clone(),
-        output,
+        proto::WorkerOutput {
+            exit_code: execution.exit_code,
+            stdout: execution.stdout.clone(),
+            stderr: execution.stderr.clone(),
+            output,
+        },
     );
 
     let mut event = ChannelEvent::new(
@@ -629,10 +631,11 @@ impl ServerCertVerifier for InsecureServerCertVerifier {
 }
 
 fn build_insecure_quic_client_config() -> Result<quinn::ClientConfig, String> {
-    let tls = rustls::ClientConfig::builder()
+    let mut tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
         .with_no_client_auth();
+    tls.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
         .map_err(|e| format!("Failed to build QUIC client TLS config: {e}"))?;
     Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
@@ -824,6 +827,125 @@ fn format_output(stdout: &str, stderr: &str, exit_code: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn required_arg_string_returns_value_or_err() {
+        assert_eq!(required_arg_string(Some("val"), "field").unwrap(), "val");
+        assert!(required_arg_string(Some(""), "field").is_err());
+        assert!(required_arg_string(None, "field").is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_worker_report_over_quic_fails_invalid_addr() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let report = proto::WorkerReport::new(
+            "call_1",
+            "worker_1",
+            "image",
+            "cmd",
+            proto::WorkerOutput {
+                exit_code: 0,
+                stdout: "".into(),
+                stderr: "".into(),
+                output: "".into(),
+            },
+        );
+        let mut event = proto::ChannelEvent::new(
+            proto::ChannelId::new("cli", "test"),
+            proto::SessionId::from("ses"),
+            "summary",
+        );
+        event.metadata = Some(serde_json::to_value(&report).unwrap());
+        let result =
+            submit_worker_report_over_quic(addr, event, std::time::Duration::from_secs(1)).await;
+        // Since no server is listening, it should fail.
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_worker_report_over_quic_success() {
+        use std::sync::Arc;
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert_der],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der),
+            )
+            .unwrap();
+        server_crypto.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
+        ));
+
+        let server_endpoint =
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_addr = server_endpoint.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            if let Some(incoming) = server_endpoint.accept().await
+                && let Ok(conn) = incoming.await
+                && let Ok((mut send, mut recv)) = conn.accept_bi().await
+            {
+                let mut len_buf = [0u8; 4];
+                let _ = recv.read_exact(&mut len_buf).await;
+                let len = u32::from_be_bytes(len_buf) as usize;
+                let mut body = vec![0u8; len];
+                let _ = recv.read_exact(&mut body).await;
+                let resp = serde_json::json!({
+                    "channel_id": "cli:test",
+                    "session_id": "ses",
+                    "content": "ok",
+                    "is_error": false
+                })
+                .to_string();
+                let resp_bytes = resp.as_bytes();
+                let resp_len = (resp_bytes.len() as u32).to_be_bytes();
+                let _ = send.write_all(&resp_len).await;
+                let _ = send.write_all(resp_bytes).await;
+                let _ = send.finish();
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        });
+
+        let report = proto::WorkerReport::new(
+            "call_1",
+            "worker_1",
+            "image",
+            "cmd",
+            proto::WorkerOutput {
+                exit_code: 0,
+                stdout: "".into(),
+                stderr: "".into(),
+                output: "".into(),
+            },
+        );
+        let mut event = proto::ChannelEvent::new(
+            proto::ChannelId::new("cli", "test"),
+            proto::SessionId::from("ses"),
+            "summary",
+        );
+        event.metadata = Some(serde_json::to_value(&report).unwrap());
+
+        let result =
+            submit_worker_report_over_quic(server_addr, event, std::time::Duration::from_secs(5))
+                .await;
+        assert!(
+            result.is_ok(),
+            "Expected QUIC report success, got {:?}",
+            result
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1054,5 +1176,137 @@ mod tests {
         });
         cleanup_task_credential(&mut credential);
         assert!(credential.is_none());
+    }
+
+    #[test]
+    fn build_worker_summary_success_and_error() {
+        let ok = build_worker_summary("c1", 0, "echo hi");
+        assert!(ok.contains("status=success"));
+        assert!(ok.contains("call_id=c1"));
+        assert!(ok.contains("exit_code=0"));
+
+        let fail = build_worker_summary("c2", 1, "false");
+        assert!(fail.contains("status=error"));
+        assert!(fail.contains("exit_code=1"));
+    }
+
+    #[tokio::test]
+    async fn maybe_report_worker_result_skips_when_disabled() {
+        let args = ContainerArgs {
+            image: "alpine".into(),
+            command: "echo".into(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: None,
+            token_ttl_secs: None,
+            token_env_name: None,
+            report_via_quic: None,
+            report_timeout_secs: None,
+            orchestrator_quic_addr: None,
+            orchestrator_channel_id: None,
+            orchestrator_session_id: None,
+        };
+        let execution = ContainerExecution {
+            stdout: "ok".into(),
+            stderr: "".into(),
+            exit_code: 0,
+        };
+        let result =
+            maybe_report_worker_result("call-1", &args, "ctr", &execution, Duration::from_secs(10))
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn maybe_report_worker_result_fails_missing_addr() {
+        let args = ContainerArgs {
+            image: "alpine".into(),
+            command: "echo".into(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: None,
+            token_ttl_secs: None,
+            token_env_name: None,
+            report_via_quic: Some(true),
+            report_timeout_secs: None,
+            orchestrator_quic_addr: None,
+            orchestrator_channel_id: Some("ch".into()),
+            orchestrator_session_id: Some("ses".into()),
+        };
+        let execution = ContainerExecution {
+            stdout: "".into(),
+            stderr: "".into(),
+            exit_code: 0,
+        };
+        let result =
+            maybe_report_worker_result("call-1", &args, "ctr", &execution, Duration::from_secs(10))
+                .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("orchestrator_quic_addr"));
+    }
+
+    #[tokio::test]
+    async fn maybe_report_worker_result_fails_bad_addr() {
+        let args = ContainerArgs {
+            image: "alpine".into(),
+            command: "echo".into(),
+            timeout_secs: None,
+            working_dir: None,
+            env: None,
+            allow_network: None,
+            workspace_dir: None,
+            memory_mb: None,
+            cpu_millis: None,
+            pull: None,
+            inject_task_token: None,
+            token_ttl_secs: None,
+            token_env_name: None,
+            report_via_quic: Some(true),
+            report_timeout_secs: Some(1),
+            orchestrator_quic_addr: Some("not-a-socket-addr".into()),
+            orchestrator_channel_id: Some("ch".into()),
+            orchestrator_session_id: Some("ses".into()),
+        };
+        let execution = ContainerExecution {
+            stdout: "".into(),
+            stderr: "err".into(),
+            exit_code: 1,
+        };
+        let result =
+            maybe_report_worker_result("call-2", &args, "ctr", &execution, Duration::from_secs(10))
+                .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Invalid orchestrator_quic_addr")
+        );
+    }
+
+    #[test]
+    fn build_insecure_quic_client_config_returns_ok() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let cfg = build_insecure_quic_client_config();
+        assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn unix_now_secs_returns_reasonable_value() {
+        let ts = unix_now_secs().expect("unix_now");
+        assert!(ts > 1_700_000_000);
     }
 }

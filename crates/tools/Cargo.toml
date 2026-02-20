@@ -24,4 +24,5 @@ quinn = { workspace = true }
 rustls = { workspace = true }
 
 [dev-dependencies]
+rcgen.workspace = true
 tempfile = "3"

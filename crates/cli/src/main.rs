@@ -668,10 +668,18 @@ mod tests {
             "worker-a",
             "alpine:3.20",
             "echo hi",
-            0,
-            "hi\n",
-            "",
-            "stdout:\nhi\n\nexit_code: 0",
+            proto::WorkerOutput {
+                exit_code: 0,
+                stdout: "hi
+"
+                .to_string(),
+                stderr: "".to_string(),
+                output: "stdout:
+hi
+
+exit_code: 0"
+                    .to_string(),
+            },
         );
         let mut event = ChannelEvent::new(
             ChannelId::from("cli:local"),

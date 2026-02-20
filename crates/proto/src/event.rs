@@ -93,6 +93,14 @@ pub enum ProgressEvent {
 pub const WORKER_REPORT_KIND: &str = "worker_report";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerOutput {
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerReport {
     pub kind: String,
     pub call_id: String,
@@ -111,10 +119,7 @@ impl WorkerReport {
         worker_id: impl Into<String>,
         image: impl Into<String>,
         command: impl Into<String>,
-        exit_code: i64,
-        stdout: impl Into<String>,
-        stderr: impl Into<String>,
-        output: impl Into<String>,
+        worker_output: WorkerOutput,
     ) -> Self {
         Self {
             kind: WORKER_REPORT_KIND.to_string(),
@@ -122,10 +127,10 @@ impl WorkerReport {
             worker_id: worker_id.into(),
             image: image.into(),
             command: command.into(),
-            exit_code,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-            output: output.into(),
+            exit_code: worker_output.exit_code,
+            stdout: worker_output.stdout,
+            stderr: worker_output.stderr,
+            output: worker_output.output,
         }
     }
 
@@ -179,10 +184,12 @@ mod tests {
             "worker-a",
             "alpine:3.20",
             "echo hi",
-            0,
-            "hi\n",
-            "",
-            "stdout:\nhi\n\nexit_code: 0",
+            WorkerOutput {
+                exit_code: 0,
+                stdout: "hi\n".into(),
+                stderr: "".into(),
+                output: "stdout:\nhi\n\nexit_code: 0".into(),
+            },
         );
 
         assert_eq!(report.kind, WORKER_REPORT_KIND);

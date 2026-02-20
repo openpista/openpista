@@ -776,10 +776,18 @@ mod tests {
             "worker-1",
             "alpine:3.20",
             "echo hi",
-            0,
-            "hi\n",
-            "",
-            "stdout:\nhi\n\nexit_code: 0",
+            proto::WorkerOutput {
+                exit_code: 0,
+                stdout: "hi
+"
+                .into(),
+                stderr: "".into(),
+                output: "stdout:
+hi
+
+exit_code: 0"
+                    .into(),
+            },
         );
 
         runtime
