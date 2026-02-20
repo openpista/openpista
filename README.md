@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
 
-**Languages:** English | [한국어](README.ko.md)
+**Languages:** English | [한국어](README_ko.md)
 
 **A QUIC-based OS Gateway AI Agent** — let your LLM control your machine through any messenger.
 

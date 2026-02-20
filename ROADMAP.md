@@ -147,4 +147,4 @@ Extends the tool surface to full visual OS control, inspired by OpenClaw's appro
 - Stable public API for all crates
 - Full end-to-end security audit
 - Long-term support guarantee
-- Packaging: `brew`, `apt`, `winget`, Docker image
+- Packaging: `brew`, `apt`, Docker image
