@@ -89,6 +89,8 @@
 - [x] `openpistacrab start` — 전체 데몬 (QUIC + 활성화된 모든 채널)
 - [x] `openpistacrab run -e "..."` — 단발성(single-shot) 에이전트 명령
 - [x] `openpistacrab repl` — 세션 지속성을 갖춘 대화형 REPL
+- [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
+- [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
 - [ ] 시작 시 PID 파일 작성, 종료 시 제거
