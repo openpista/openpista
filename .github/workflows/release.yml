@@ -58,13 +58,10 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            builder: cargo
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            builder: cross
           - runner: macos-14
             target: aarch64-apple-darwin
-            builder: cargo
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,24 +71,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.builder == 'cross'
-        uses: taiki-e/install-action@cross
-
       - name: Build release binary
         shell: bash
-        run: |
-          if [ "${{ matrix.builder }}" = "cross" ]; then
-            cross build --release -p cli --target "${{ matrix.target }}"
-          else
-            cargo build --release -p cli --target "${{ matrix.target }}"
-          fi
+        run: cargo build --release -p cli --target "${{ matrix.target }}"
 
       - name: Package release artifact
         id: package

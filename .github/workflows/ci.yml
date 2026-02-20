@@ -79,15 +79,15 @@ jobs:
 
   build-linux:
     name: build (linux-${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            builder: cargo
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            builder: cross
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,29 +96,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install native Linux dependencies
-        if: matrix.builder == 'cargo'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev
-
-      - name: Add target for native cargo build
-        if: matrix.builder == 'cargo'
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.builder == 'cross'
-        uses: taiki-e/install-action@cross
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build workspace for target
-        run: |
-          if [ "${{ matrix.builder }}" = "cross" ]; then
-            cross build --workspace --target "${{ matrix.target }}"
-          else
-            cargo build --workspace --target "${{ matrix.target }}"
-          fi
+        run: cargo build --workspace --target "${{ matrix.target }}"
 
   build-macos-arm64:
     name: build (macos-arm64)
