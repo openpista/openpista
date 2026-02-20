@@ -58,19 +58,13 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            use_zig: false
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            use_zig: true
+            builder: cargo
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            use_zig: true
-          - runner: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            use_zig: true
+            builder: cross
           - runner: macos-14
             target: aarch64-apple-darwin
-            use_zig: false
+            builder: cargo
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,15 +80,15 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Install cargo-zigbuild
-        if: matrix.use_zig
-        uses: taiki-e/install-action@cargo-zigbuild
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        uses: taiki-e/install-action@cross
 
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ matrix.use_zig }}" = "true" ]; then
-            cargo zigbuild --release -p cli --target "${{ matrix.target }}"
+          if [ "${{ matrix.builder }}" = "cross" ]; then
+            cross build --release -p cli --target "${{ matrix.target }}"
           else
             cargo build --release -p cli --target "${{ matrix.target }}"
           fi

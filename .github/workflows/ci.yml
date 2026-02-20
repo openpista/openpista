@@ -86,11 +86,7 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             builder: cargo
-          - target: x86_64-unknown-linux-musl
-            builder: cross
           - target: aarch64-unknown-linux-gnu
-            builder: cross
-          - target: aarch64-unknown-linux-musl
             builder: cross
     steps:
       - name: Checkout
