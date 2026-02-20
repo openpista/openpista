@@ -160,7 +160,11 @@ mod tests {
         assert_eq!(result.call_id, "call-3");
         assert_eq!(result.tool_name, "screen.capture");
         assert!(result.is_error);
-        assert!(result.output.contains("screen.capture is not supported on musl targets"));
+        assert!(
+            result
+                .output
+                .contains("screen.capture is not supported on musl targets")
+        );
     }
 
     #[test]

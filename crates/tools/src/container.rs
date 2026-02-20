@@ -1654,11 +1654,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("orchestrator_quic_addr")
-        );
+        assert!(result.unwrap_err().contains("orchestrator_quic_addr"));
     }
 
     #[test]
