@@ -30,12 +30,58 @@ struct WasmStoreData {
     limits: StoreLimits,
 }
 
+/// Runs a WASM-backed skill request by executing the synchronous runner on a blocking thread.
+///
+/// On success returns the tool's `ToolResult`; on failure returns a descriptive error `String`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+/// use serde_json::json;
+/// // Construct a request (fields shown for illustration)
+/// let req = WasmRunRequest {
+///     call_id: "1".to_string(),
+///     skill_name: "echo".to_string(),
+///     workspace_dir: PathBuf::from("/tmp/workspace"),
+///     arguments: json!({ "message": "hi" }),
+///     timeout_secs: Some(5),
+/// };
+/// // Call asynchronously (in an async context)
+/// // let result = run_wasm_skill(req).await;
+/// ```
+pub async fn run_wasm_skill(req: WasmRunRequest) -> Result<ToolResult, String>;
 pub async fn run_wasm_skill(req: WasmRunRequest) -> Result<ToolResult, String> {
     tokio::task::spawn_blocking(move || run_wasm_skill_sync(req))
         .await
         .map_err(|e| format!("WASM task join error: {e}"))?
 }
 
+/// Executes a WASM skill described by the given `WasmRunRequest` and returns its `ToolResult`.
+///
+/// The function locates the skill's WASM module under the workspace, configures a WASI-enabled
+/// Wasmtime environment with resource limits and a timeout watchdog, serializes the `ToolCall`
+/// into WASM memory, invokes the module's `run` export, and deserializes the returned `ToolResult`.
+/// Captured stdout and stderr from the WASM instance are appended to `ToolResult.output` when present.
+/// Errors are returned as human-readable strings.
+///
+/// # Returns
+///
+/// `Ok(ToolResult)` on success; `Err(String)` containing a descriptive error message on failure.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+/// let req = WasmRunRequest {
+///     call_id: "call-1".to_string(),
+///     skill_name: "example_skill".to_string(),
+///     workspace_dir: PathBuf::from("/tmp/workspace"),
+///     arguments: serde_json::json!({}),
+///     timeout_secs: Some(5),
+/// };
+/// let _ = run_wasm_skill_sync(req);
+/// ```
 fn run_wasm_skill_sync(req: WasmRunRequest) -> Result<ToolResult, String> {
     let module_path = resolve_wasm_module_path(&req.workspace_dir, &req.skill_name);
     if !module_path.exists() {
@@ -192,6 +238,17 @@ fn run_wasm_skill_sync(req: WasmRunRequest) -> Result<ToolResult, String> {
     Ok(tool_result)
 }
 
+/// Build the filesystem path to a skill's WASM module inside a workspace.
+///
+/// The path is workspace_dir/skills/{skill_name}/main.wasm.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// let p = super::resolve_wasm_module_path(Path::new("/tmp/workspace"), "echo");
+/// assert_eq!(p, Path::new("/tmp/workspace").join("skills").join("echo").join("main.wasm"));
+/// ```
 fn resolve_wasm_module_path(workspace_dir: &Path, skill_name: &str) -> PathBuf {
     workspace_dir
         .join("skills")
@@ -199,6 +256,20 @@ fn resolve_wasm_module_path(workspace_dir: &Path, skill_name: &str) -> PathBuf {
         .join("main.wasm")
 }
 
+/// Decode a packed 64-bit ABI return value into a (pointer, length) pair.
+///
+/// The input `packed` encodes the pointer in the upper 32 bits and the length in the lower 32 bits.
+/// Returns the pointer and length as `usize` when `length > 0`. Returns an `Err` with a descriptive
+/// message if the decoded length is zero.
+///
+/// # Examples
+///
+/// ```
+/// let packed: i64 = ((4096u64 << 32) | 128u64) as i64;
+/// let (ptr, len) = unpack_abi_return(packed).expect("should decode");
+/// assert_eq!(ptr, 4096usize);
+/// assert_eq!(len, 128usize);
+/// ```
 fn unpack_abi_return(packed: i64) -> Result<(usize, usize), String> {
     let ptr = (packed >> 32) as u32;
     let len = packed as u32;
