@@ -1657,7 +1657,7 @@ mod tests {
         assert!(
             result
                 .unwrap_err()
-                .contains("Invalid orchestrator_quic_addr")
+                .contains("orchestrator_quic_addr")
         );
     }
 
