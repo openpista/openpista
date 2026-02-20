@@ -5,6 +5,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](LICENSE)
 
+Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
+
 **A QUIC-based OS Gateway AI Agent** — let your LLM control your machine through any messenger.
 
 > Inspired by [OpenClaw](https://github.com/openpista/openclaw)'s WebSocket-based agent architecture,
