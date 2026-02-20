@@ -223,7 +223,8 @@ async fn build_runtime(
 async fn cmd_start(config: Config) -> anyhow::Result<()> {
     info!("Starting openpistacrab daemon");
 
-    let report_addr = format!("127.0.0.1:{}", config.gateway.port);
+    let report_host = config.gateway.report_host.as_deref().unwrap_or("127.0.0.1");
+    let report_addr = format!("{report_host}:{}", config.gateway.port);
     let runtime = build_runtime(&config, Some(report_addr)).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
 

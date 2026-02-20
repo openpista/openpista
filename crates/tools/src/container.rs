@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, warn};
+use webpki_roots::TLS_SERVER_ROOTS;
 
 use crate::Tool;
 
@@ -69,6 +70,7 @@ struct ContainerArgs {
     orchestrator_quic_addr: Option<String>,
     orchestrator_channel_id: Option<String>,
     orchestrator_session_id: Option<String>,
+    orchestrator_quic_insecure_skip_verify: Option<bool>,
     allow_subprocess_fallback: Option<bool>,
 }
 
@@ -190,9 +192,13 @@ impl Tool for ContainerTool {
                     "type": "string",
                     "description": "Orchestrator session_id that should receive the worker report"
                 },
+                "orchestrator_quic_insecure_skip_verify": {
+                    "type": "boolean",
+                    "description": "Skip QUIC TLS certificate verification for orchestrator report upload (default: false; for local testing only)"
+                },
                 "allow_subprocess_fallback": {
                     "type": "boolean",
-                    "description": "Fallback to local subprocess when Docker is unavailable (default: true)"
+                    "description": "Fallback to local subprocess when Docker is unavailable (default: false)"
                 }
             },
             "required": ["command"],
@@ -466,7 +472,7 @@ async fn run_with_docker_or_subprocess(
             }
         }
         Err(e) => {
-            if !args.allow_subprocess_fallback.unwrap_or(true) {
+            if !args.allow_subprocess_fallback.unwrap_or(false) {
                 return Err(e);
             }
 
@@ -593,7 +599,14 @@ async fn maybe_report_worker_result(
             .clamp(1, MAX_REPORT_TIMEOUT_SECS),
     );
 
-    submit_worker_report_over_quic(addr, event, report_timeout.min(run_timeout)).await
+    let insecure_skip_verify = args.orchestrator_quic_insecure_skip_verify.unwrap_or(false);
+    submit_worker_report_over_quic(
+        addr,
+        event,
+        report_timeout.min(run_timeout),
+        insecure_skip_verify,
+    )
+    .await
 }
 
 fn required_arg_string(value: Option<&str>, field_name: &str) -> Result<String, String> {
@@ -624,6 +637,7 @@ async fn submit_worker_report_over_quic(
     addr: SocketAddr,
     event: ChannelEvent,
     timeout_duration: Duration,
+    insecure_skip_verify: bool,
 ) -> Result<(), String> {
     let payload = serde_json::to_vec(&event)
         .map_err(|e| format!("Failed to serialize worker report event: {e}"))?;
@@ -635,7 +649,7 @@ async fn submit_worker_report_over_quic(
     )
     .map_err(|e| format!("Failed to create QUIC client endpoint: {e}"))?;
 
-    let client_cfg = build_insecure_quic_client_config()?;
+    let client_cfg = build_quic_client_config(insecure_skip_verify)?;
     let mut endpoint = endpoint;
     endpoint.set_default_client_config(client_cfg);
 
@@ -746,6 +760,24 @@ fn build_insecure_quic_client_config() -> Result<quinn::ClientConfig, String> {
         .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
         .with_no_client_auth();
     tls.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
+    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
+        .map_err(|e| format!("Failed to build QUIC client TLS config: {e}"))?;
+    Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
+}
+
+fn build_quic_client_config(insecure_skip_verify: bool) -> Result<quinn::ClientConfig, String> {
+    if insecure_skip_verify {
+        return build_insecure_quic_client_config();
+    }
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
+
+    let mut tls = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
+
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
         .map_err(|e| format!("Failed to build QUIC client TLS config: {e}"))?;
     Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
@@ -982,7 +1014,8 @@ mod tests {
         );
         event.metadata = Some(serde_json::to_value(&report).unwrap());
         let result =
-            submit_worker_report_over_quic(addr, event, std::time::Duration::from_secs(1)).await;
+            submit_worker_report_over_quic(addr, event, std::time::Duration::from_secs(1), false)
+                .await;
         // Since no server is listening, it should fail.
         assert!(result.is_err());
     }
@@ -1059,9 +1092,13 @@ mod tests {
         );
         event.metadata = Some(serde_json::to_value(&report).unwrap());
 
-        let result =
-            submit_worker_report_over_quic(server_addr, event, std::time::Duration::from_secs(5))
-                .await;
+        let result = submit_worker_report_over_quic(
+            server_addr,
+            event,
+            std::time::Duration::from_secs(5),
+            true,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "Expected QUIC report success, got {:?}",
@@ -1092,6 +1129,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         }
     }
@@ -1203,6 +1241,24 @@ mod tests {
         assert!(err.contains("docker down"));
     }
 
+    #[tokio::test]
+    async fn docker_unavailable_returns_error_when_fallback_is_not_set() {
+        let mut args = base_args("echo ignored");
+        args.allow_subprocess_fallback = None;
+
+        let err = run_with_docker_or_subprocess(
+            "call-default-no-fallback",
+            &args,
+            Duration::from_secs(2),
+            "ctr",
+            Err("docker down".to_string()),
+        )
+        .await
+        .expect_err("docker connection error should be returned by default");
+
+        assert!(err.contains("docker down"));
+    }
+
     #[test]
     fn container_tool_metadata_is_stable() {
         let tool = ContainerTool::new();
@@ -1294,6 +1350,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -1323,6 +1380,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -1352,6 +1410,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
         let credential = TaskCredential {
@@ -1471,6 +1530,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: None,
             orchestrator_session_id: None,
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {
@@ -1512,6 +1572,7 @@ mod tests {
             orchestrator_quic_addr: None,
             orchestrator_channel_id: Some("ch".into()),
             orchestrator_session_id: Some("ses".into()),
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {
@@ -1554,6 +1615,7 @@ mod tests {
             orchestrator_quic_addr: Some("not-a-socket-addr".into()),
             orchestrator_channel_id: Some("ch".into()),
             orchestrator_session_id: Some("ses".into()),
+            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
         let execution = ContainerExecution {

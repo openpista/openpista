@@ -77,43 +77,67 @@ pub enum ProgressEvent {
     LlmThinking { round: usize },
     /// A tool call has been dispatched but has not yet completed.
     ToolCallStarted {
+        /// Tool-call identifier emitted by the LLM.
         call_id: String,
+        /// Tool name that is about to execute.
         tool_name: String,
+        /// JSON arguments passed to the tool.
         args: serde_json::Value,
     },
     /// A tool call has finished executing.
     ToolCallFinished {
+        /// Tool-call identifier emitted by the LLM.
         call_id: String,
+        /// Tool name that finished execution.
         tool_name: String,
+        /// Tool output payload persisted in history/UI.
         output: String,
+        /// Whether the tool result represents an error.
         is_error: bool,
     },
 }
 
+/// Metadata kind tag used for worker reports embedded in `ChannelEvent.metadata`.
 pub const WORKER_REPORT_KIND: &str = "worker_report";
 
+/// Raw worker command execution output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerOutput {
+    /// Process exit code.
     pub exit_code: i64,
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
+    /// Preformatted combined output for user-facing display.
     pub output: String,
 }
 
+/// Structured worker report sent from `container.run` back to the orchestrator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerReport {
+    /// Discriminator used to identify worker-report metadata payloads.
     pub kind: String,
+    /// Original tool call identifier.
     pub call_id: String,
+    /// Worker/container identifier.
     pub worker_id: String,
+    /// Executed container image.
     pub image: String,
+    /// Executed command string.
     pub command: String,
+    /// Process exit code.
     pub exit_code: i64,
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
+    /// Preformatted combined output for user-facing display.
     pub output: String,
 }
 
 impl WorkerReport {
+    /// Builds a worker report from identifying metadata and command output.
     pub fn new(
         call_id: impl Into<String>,
         worker_id: impl Into<String>,
@@ -134,6 +158,7 @@ impl WorkerReport {
         }
     }
 
+    /// Returns true when `kind` matches the worker-report discriminator.
     pub fn is_worker_report(&self) -> bool {
         self.kind == WORKER_REPORT_KIND
     }

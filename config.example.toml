@@ -1,5 +1,9 @@
 [gateway]
 port = 4433
+# 워커 컨테이너에서 오케스트레이터 QUIC 보고 주소로 접근할 때 사용할 호스트/IP
+# 비워두면 127.0.0.1 사용 (로컬 전용)
+# 컨테이너 환경 예시: "host.docker.internal", "172.17.0.1"
+# report_host = "host.docker.internal"
 tls_cert = ""  # 비어있으면 rcgen 으로 자동생성
 
 # ─────────────────────────────────────────────

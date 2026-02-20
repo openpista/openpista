@@ -144,15 +144,11 @@ mod tests {
     #[test]
     fn capture_png_base64_handles_out_of_range_or_missing_display() {
         let result = capture_png_base64(usize::MAX);
-        match result {
-            Ok(payload) => {
-                assert!(!payload.is_empty());
-            }
-            Err(err) => {
-                assert!(
-                    err.contains("No displays found") || err.contains("Display index out of range")
-                );
-            }
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(
+                err.contains("No displays found") || err.contains("Display index out of range")
+            );
         }
     }
 }

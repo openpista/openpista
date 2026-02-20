@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
@@ -35,4 +34,6 @@ impl ServerCertVerifier for DummyVerifier {
         vec![rustls::SignatureScheme::RSA_PKCS1_SHA256]
     }
 }
-fn main() {}
+fn main() {
+    let _ = DummyVerifier;
+}

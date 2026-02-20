@@ -707,6 +707,8 @@ mod tests {
         assert!(result.output.contains("Invalid arguments"));
     }
 
+    // These tests assert only the ToolResult shape to stay CI-tolerant when browser/display deps are unavailable.
+
     #[tokio::test]
     async fn navigate_with_valid_url_returns_result_shape() {
         let tool = BrowserTool::new();

@@ -1,35 +1,26 @@
 # Orchestrator/Worker Architecture
 
 ## Overview
-To isolate task execution and allow robust reporting, `openpista` will use an Orchestrator/Worker architecture via Docker and QUIC.
+`openpista` currently uses a Docker worker execution model with optional QUIC report upload.
 
-1. **Orchestrator**: The host agent running `openpistacrab start`. It listens for QUIC connections (e.g., port 4435 for internal workers).
-2. **Worker**: A short-lived Docker container spawned via `bollard`. It runs `openpistacrab worker --task-spec ...` instead of directly executing user shell scripts.
+1. **Orchestrator**: The host daemon running `openpistacrab start`.
+2. **Worker runtime**: `container.run` creates an isolated, short-lived Docker container via `bollard`, executes the requested shell command, collects stdout/stderr and exit code, and optionally sends a report event back over QUIC.
 
-## Components to Update
+## Current implementation
 
-### 1. `WorkerEnvelope` Protocol
-Add to `crates/proto/src`:
-```rust
-pub enum WorkerEnvelope {
-    Started,
-    StdoutChunk(String),
-    StderrChunk(String),
-    Finished { exit_code: i32, output: String },
-    Failed(String),
-}
-```
+### 1. Container execution (`crates/tools/src/container.rs`)
+- The user command is executed as-is via `sh -lc <command>`.
+- Container lifecycle is: create -> optional token injection -> start -> `docker.wait_container` -> `docker.logs` -> cleanup.
+- No `openpistacrab worker` subcommand override is used in the current path.
 
-### 2. Worker Subcommand (`crates/cli/src/main.rs`)
-Add a new `worker` subcommand that reads the task payload, executes the target skill/command, and streams output via a `quinn` client connection to the orchestrator.
+### 2. Task token injection
+- When enabled, `container.run` writes a short-lived credential script into `/run/secrets/.openpista_task_env`.
+- The command is prefixed to source that token file before executing the user command.
+- This path currently uses the `.openpista_task_env` file approach, not `OPENPISTA_WORKER_*` environment variable injection.
 
-### 3. Orchestrator Listener
-The main daemon must listen for internal worker connections, validate them using `OPENPISTA_WORKER_REPORT_TOKEN`, and map streams to a `DashMap<task_id, oneshot::Sender<ToolResult>>`.
+### 3. QUIC worker reporting
+- When `report_via_quic=true`, `container.run` builds a `WorkerReport`, wraps it in `ChannelEvent.metadata`, and sends it to the orchestrator over QUIC.
+- The orchestrator receives the event and persists the worker report via `AgentRuntime::record_worker_report`.
 
-### 4. `container.run` Upgrade (`crates/tools/src/container.rs`)
-- Inject ENVs into the container:
-  - `OPENPISTA_WORKER_REPORT_ADDR`
-  - `OPENPISTA_WORKER_TASK_ID`
-  - `OPENPISTA_WORKER_REPORT_TOKEN`
-- Override container command to launch `openpistacrab worker`.
-- Change `docker.wait_container` + `docker.logs` polling to an async await on the orchestrator's `oneshot::Receiver` mapped by `task_id`.
+### 4. Scope note
+- The previously documented streaming `WorkerEnvelope`, `openpistacrab worker` command override, and `oneshot::Receiver` task map are not part of the currently shipped implementation.

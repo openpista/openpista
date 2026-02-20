@@ -7,10 +7,14 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+/// Parsed metadata for one discovered skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillMetadata {
+    /// Skill identifier (directory name or markdown stem).
     pub name: String,
+    /// Optional container image hint from front matter.
     pub image: Option<String>,
+    /// Skill markdown body without front-matter header.
     pub description: String,
 }
 
@@ -106,6 +110,7 @@ impl SkillLoader {
         tokio::fs::read_to_string(path).await.ok()
     }
 
+    /// Loads parsed skill metadata from `skills/<name>/SKILL.md` or `skills/<name>.md`.
     pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
         let skills_dir = self.workspace.join("skills");
         let candidates = [

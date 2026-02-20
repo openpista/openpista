@@ -22,7 +22,8 @@ futures-util = { workspace = true }
 bollard = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
-rcgen.workspace = true
+rcgen = { workspace = true }
 tempfile = "3"

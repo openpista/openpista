@@ -45,6 +45,7 @@ impl AgentRuntime {
         }
     }
 
+    /// Sets the orchestrator QUIC address injected into `container.run` calls.
     pub fn with_worker_report_quic_addr(mut self, addr: Option<String>) -> Self {
         self.worker_report_quic_addr = addr.and_then(|value| {
             let trimmed = value.trim();
@@ -384,6 +385,7 @@ impl AgentRuntime {
         }
     }
 
+    /// Persists a worker report as a tool-result message in the target session.
     pub async fn record_worker_report(
         &self,
         channel_id: &ChannelId,
@@ -443,22 +445,29 @@ fn prepare_tool_args(
         other => return other,
     };
 
+    object.insert("allow_subprocess_fallback".to_string(), Value::Bool(false));
+    object.insert(
+        "orchestrator_quic_insecure_skip_verify".to_string(),
+        Value::Bool(false),
+    );
+
     let Some(quic_addr) = worker_report_quic_addr.as_deref() else {
         return Value::Object(object);
     };
 
-    object
-        .entry("report_via_quic".to_string())
-        .or_insert(Value::Bool(true));
-    object
-        .entry("orchestrator_quic_addr".to_string())
-        .or_insert(Value::String(quic_addr.to_string()));
-    object
-        .entry("orchestrator_channel_id".to_string())
-        .or_insert(Value::String(channel_id.as_str().to_string()));
-    object
-        .entry("orchestrator_session_id".to_string())
-        .or_insert(Value::String(session_id.as_str().to_string()));
+    object.insert("report_via_quic".to_string(), Value::Bool(true));
+    object.insert(
+        "orchestrator_quic_addr".to_string(),
+        Value::String(quic_addr.to_string()),
+    );
+    object.insert(
+        "orchestrator_channel_id".to_string(),
+        Value::String(channel_id.as_str().to_string()),
+    );
+    object.insert(
+        "orchestrator_session_id".to_string(),
+        Value::String(session_id.as_str().to_string()),
+    );
 
     Value::Object(object)
 }
@@ -749,19 +758,48 @@ mod tests {
     }
 
     #[test]
-    fn prepare_tool_args_injects_worker_report_defaults_for_container_tool() {
+    fn prepare_tool_args_enforces_worker_report_metadata_for_container_tool() {
         let args = prepare_tool_args(
             &Some("127.0.0.1:4433".to_string()),
             &ChannelId::from("cli:local"),
             &SessionId::from("session-x"),
             "container.run",
-            serde_json::json!({"image":"alpine:3","command":"echo hi"}),
+            serde_json::json!({
+                "image":"alpine:3",
+                "command":"echo hi",
+                "report_via_quic": false,
+                "orchestrator_quic_addr": "8.8.8.8:1111",
+                "orchestrator_channel_id": "attacker:channel",
+                "orchestrator_session_id": "attacker-session"
+            }),
         );
 
         assert_eq!(args["report_via_quic"], true);
+        assert_eq!(args["allow_subprocess_fallback"], false);
+        assert_eq!(args["orchestrator_quic_insecure_skip_verify"], false);
         assert_eq!(args["orchestrator_quic_addr"], "127.0.0.1:4433");
         assert_eq!(args["orchestrator_channel_id"], "cli:local");
         assert_eq!(args["orchestrator_session_id"], "session-x");
+    }
+
+    #[test]
+    fn prepare_tool_args_enforces_local_safety_flags_without_quic_addr() {
+        let args = prepare_tool_args(
+            &None,
+            &ChannelId::from("cli:local"),
+            &SessionId::from("session-x"),
+            "container.run",
+            serde_json::json!({
+                "image":"alpine:3",
+                "command":"echo hi",
+                "allow_subprocess_fallback": true,
+                "orchestrator_quic_insecure_skip_verify": true
+            }),
+        );
+
+        assert_eq!(args["allow_subprocess_fallback"], false);
+        assert_eq!(args["orchestrator_quic_insecure_skip_verify"], false);
+        assert!(args["report_via_quic"].is_null());
     }
 
     #[tokio::test]
