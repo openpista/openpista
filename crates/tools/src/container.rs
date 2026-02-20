@@ -555,6 +555,14 @@ async fn maybe_report_worker_result(
         args.orchestrator_quic_addr.as_deref(),
         "orchestrator_quic_addr",
     )?;
+
+    // Extract actual hostname for SNI before resolution
+    let sni_hostname = quic_addr
+        .split(':')
+        .next()
+        .unwrap_or("localhost")
+        .to_string();
+
     let channel_id = required_arg_string(
         args.orchestrator_channel_id.as_deref(),
         "orchestrator_channel_id",
@@ -564,9 +572,14 @@ async fn maybe_report_worker_result(
         "orchestrator_session_id",
     )?;
 
-    let addr: SocketAddr = quic_addr
-        .parse()
-        .map_err(|e| format!("Invalid orchestrator_quic_addr '{quic_addr}': {e}"))?;
+    // Resolve via DNS instead of raw parse()
+    let mut addrs = tokio::net::lookup_host(&quic_addr)
+        .await
+        .map_err(|e| format!("Failed to resolve orchestrator_quic_addr '{quic_addr}': {e}"))?;
+
+    let addr = addrs
+        .next()
+        .ok_or_else(|| format!("No DNS records found for '{quic_addr}'"))?;
 
     let output = format_output(&execution.stdout, &execution.stderr, execution.exit_code);
     let summary = build_worker_summary(call_id, execution.exit_code, &args.command);
@@ -602,6 +615,7 @@ async fn maybe_report_worker_result(
     let insecure_skip_verify = args.orchestrator_quic_insecure_skip_verify.unwrap_or(false);
     submit_worker_report_over_quic(
         addr,
+        &sni_hostname,
         event,
         report_timeout.min(run_timeout),
         insecure_skip_verify,
@@ -635,6 +649,7 @@ fn build_worker_summary(call_id: &str, exit_code: i64, command: &str) -> String 
 
 async fn submit_worker_report_over_quic(
     addr: SocketAddr,
+    sni_hostname: &str,
     event: ChannelEvent,
     timeout_duration: Duration,
     insecure_skip_verify: bool,
@@ -655,7 +670,7 @@ async fn submit_worker_report_over_quic(
 
     let connect = timeout(timeout_duration, async {
         endpoint
-            .connect(addr, "localhost")
+            .connect(addr, sni_hostname)
             .map_err(|e| format!("Failed to prepare QUIC connect: {e}"))?
             .await
             .map_err(|e| format!("Failed to connect to orchestrator QUIC {addr}: {e}"))
@@ -883,7 +898,7 @@ fn build_task_credential_archive(credential: &TaskCredential) -> Result<Vec<u8>,
     let mut builder = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
     header.set_size(payload_bytes.len() as u64);
-    header.set_mode(0o400);
+    header.set_mode(0o444); // readable by non-root users in container
     header.set_cksum();
 
     builder
@@ -1013,9 +1028,14 @@ mod tests {
             "summary",
         );
         event.metadata = Some(serde_json::to_value(&report).unwrap());
-        let result =
-            submit_worker_report_over_quic(addr, event, std::time::Duration::from_secs(1), false)
-                .await;
+        let result = submit_worker_report_over_quic(
+            addr,
+            "localhost",
+            event,
+            std::time::Duration::from_secs(1),
+            false,
+        )
+        .await;
         // Since no server is listening, it should fail.
         assert!(result.is_err());
     }
@@ -1094,6 +1114,7 @@ mod tests {
 
         let result = submit_worker_report_over_quic(
             server_addr,
+            "localhost",
             event,
             std::time::Duration::from_secs(5),
             true,
