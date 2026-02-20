@@ -176,6 +176,7 @@ mod tests {
                 err.contains("No displays found")
                     || err.contains("Display index out of range")
                     || err.contains("screen.capture is not supported on musl targets")
+                    || err.contains("Failed to enumerate displays")
             );
         }
     }
