@@ -1,0 +1,70 @@
+[gateway]
+port = 4433
+tls_cert = ""  # 비어있으면 rcgen 으로 자동생성
+
+# ─────────────────────────────────────────────
+# Agent 설정
+# ─────────────────────────────────────────────
+[agent]
+
+# 프로바이더 선택 (기본값: openai)
+#
+#   openai     → OpenAI API              (기본 model: gpt-4o)
+#   together   → Together.ai             (기본 model: meta-llama/Llama-3.3-70B-Instruct-Turbo, base_url 자동 설정)
+#   ollama     → 로컬 Ollama             (기본 model: llama3.2, base_url 자동 설정, api_key 불필요)
+#   openrouter → OpenRouter              (기본 model: openai/gpt-4o, base_url 자동 설정)
+#   custom     → base_url / model 직접 지정
+#
+provider = "openai"
+
+# 모델 ID — 비워두면 provider 기본값 사용
+# 예시:
+#   model = "gpt-4o"                                     # openai
+#   model = "gpt-4o-mini"                                # openai (저렴)
+#   model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"   # together
+#   model = "llama3.2"                                   # ollama
+#   model = "anthropic/claude-sonnet-4-5"                # openrouter
+model = ""
+
+# API 키 — 환경 변수가 우선 적용됩니다:
+#   OPENPISTACRAB_API_KEY   → 모든 provider에 적용 (최우선)
+#   OPENAI_API_KEY          → openai / custom (폴백)
+#   TOGETHER_API_KEY        → together
+#   OPENROUTER_API_KEY      → openrouter
+#   (ollama 는 API 키 불필요)
+api_key = ""
+
+# 최대 tool-call 라운드 수 (기본값: 10)
+max_tool_rounds = 10
+
+# API base URL — provider 선택 시 자동 설정되므로 대부분 생략 가능
+# custom provider 또는 base_url 재지정이 필요할 때만 설정:
+#   base_url = "http://localhost:11434/v1"   # Ollama 포트 변경 시
+#   base_url = "https://my-proxy.example.com/v1"
+# base_url = ""
+
+# ─────────────────────────────────────────────
+# 채널 설정
+# ─────────────────────────────────────────────
+[channels.telegram]
+enabled = false
+token = ""  # 또는 환경 변수 TELEGRAM_BOT_TOKEN
+
+[channels.cli]
+enabled = true
+
+# 모바일 QUIC 어댑터 — 모바일 앱(iOS/Android)이 QUIC 프로토콜로 직접 연결
+# 클라이언트는 연결 후 api_token으로 인증 후 메시지 교환
+[channels.mobile]
+enabled = false
+port = 4434         # QUIC 리슨 포트 (gateway 와 다른 포트 사용)
+api_token = ""      # 또는 환경 변수 OPENPISTACRAB_MOBILE_TOKEN
+
+# ─────────────────────────────────────────────
+# 데이터베이스 / 스킬 경로
+# ─────────────────────────────────────────────
+[database]
+url = "~/.openpistacrab/memory.db"
+
+[skills]
+workspace = "~/.openpistacrab/workspace"

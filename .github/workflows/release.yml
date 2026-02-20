@@ -1,0 +1,177 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (for example: v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+    steps:
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [ -z "${tag}" ]; then
+            echo "release tag is empty" >&2
+            exit 1
+          fi
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "tag must look like vX.Y.Z (or vX.Y.Z-...)" >&2
+            exit 1
+          fi
+
+          echo "release_tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+  release-build:
+    name: release build (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_zig: false
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_zig: true
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_zig: true
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_zig: true
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            use_zig: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        if: matrix.use_zig
+        uses: taiki-e/install-action@cargo-zigbuild
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_zig }}" = "true" ]; then
+            cargo zigbuild --release -p cli --target "${{ matrix.target }}"
+          else
+            cargo build --release -p cli --target "${{ matrix.target }}"
+          fi
+
+      - name: Package release artifact
+        id: package
+        shell: bash
+        run: |
+          tag="${{ needs.prepare.outputs.release_tag }}"
+          target="${{ matrix.target }}"
+          bin_path="target/${target}/release/openpistacrab"
+          package_dir="openpistacrab-${tag}-${target}"
+          artifact="${package_dir}.tar.gz"
+
+          if [ ! -f "${bin_path}" ]; then
+            echo "binary not found: ${bin_path}" >&2
+            exit 1
+          fi
+
+          mkdir -p "${package_dir}"
+          cp "${bin_path}" "${package_dir}/openpistacrab"
+          tar -czf "${artifact}" "${package_dir}"
+
+          echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ steps.package.outputs.artifact }}
+          if-no-files-found: error
+
+  publish-release:
+    name: publish release
+    needs:
+      - prepare
+      - release-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd dist
+          mapfile -t artifacts < <(ls -1 openpistacrab-*.tar.gz)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "no release artifacts found" >&2
+            exit 1
+          fi
+
+          for file in "${artifacts[@]}"; do
+            sha256sum "${file}"
+          done > SHA256SUMS.txt
+
+      - name: Publish release notes from Release Drafter
+        uses: release-drafter/release-drafter@v6
+        with:
+          publish: true
+          tag: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.release_tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/openpistacrab-*.tar.gz
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

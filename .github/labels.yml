@@ -1,0 +1,35 @@
+- name: feature
+  color: "1d76db"
+  description: New feature work
+
+- name: enhancement
+  color: "a2eeef"
+  description: Feature improvement
+
+- name: bug
+  color: "d73a4a"
+  description: Bug fix required
+
+- name: fix
+  color: "b60205"
+  description: General fix category
+
+- name: docs
+  color: "0075ca"
+  description: Documentation updates
+
+- name: chore
+  color: "cfd3d7"
+  description: Maintenance and housekeeping
+
+- name: ci
+  color: "5319e7"
+  description: Continuous integration and delivery changes
+
+- name: refactor
+  color: "0e8a16"
+  description: Refactoring without behavior change
+
+- name: major
+  color: "000000"
+  description: Marks major version impact
