@@ -89,6 +89,8 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `openpistacrab start` — full daemon (QUIC + all enabled channels)
 - [x] `openpistacrab run -e "..."` — single-shot agent command
 - [x] `openpistacrab repl` — interactive REPL with session persistence
+- [x] `openpista auth login` — browser OAuth PKCE login with persisted credentials
+- [x] Internal TUI slash commands (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
 - [x] TOML config file with documented examples (`config.toml`)
 - [x] Environment variable override for all secrets
 - [x] PID file written on start, removed on exit
