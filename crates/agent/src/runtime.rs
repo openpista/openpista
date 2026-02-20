@@ -406,6 +406,10 @@ mod tests {
 
     struct EchoTool;
 
+    struct SlowLlm {
+        delay: std::time::Duration,
+    }
+
     #[async_trait]
     impl tools::Tool for EchoTool {
         fn name(&self) -> &str {
@@ -427,6 +431,14 @@ mod tests {
         async fn execute(&self, call_id: &str, args: serde_json::Value) -> ToolResult {
             let value = args["value"].as_str().unwrap_or_default();
             ToolResult::success(call_id, self.name(), format!("echo:{value}"))
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SlowLlm {
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(ChatResponse::Text("late".to_string()))
         }
     }
 
@@ -525,6 +537,124 @@ mod tests {
             proto::Error::Llm(LlmError::MaxToolRoundsExceeded) => {}
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_propagates_llm_provider_error() {
+        let llm = Arc::new(MockLlm::new(Vec::new()));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 2);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-llm-error");
+
+        let err = runtime
+            .process(&channel, &session, "hello", None)
+            .await
+            .expect_err("llm provider error should propagate");
+
+        match err {
+            proto::Error::Llm(LlmError::InvalidResponse(msg)) => {
+                assert!(msg.contains("No mock response left"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_can_be_bounded_with_timeout_for_slow_provider() {
+        let llm = Arc::new(SlowLlm {
+            delay: std::time::Duration::from_millis(200),
+        });
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 2);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-llm-timeout");
+
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            runtime.process(&channel, &session, "hello", None),
+        )
+        .await;
+
+        assert!(timed.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_with_progress_emits_thinking_and_returns_text() {
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 4);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-progress-1");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let text = runtime
+            .process_with_progress(&channel, &session, "hello", None, tx)
+            .await
+            .expect("process_with_progress should succeed");
+        assert_eq!(text, "done");
+
+        let first = rx.recv().await.expect("thinking event");
+        assert!(matches!(
+            first,
+            proto::ProgressEvent::LlmThinking { round: 0 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_with_progress_emits_tool_start_and_finish_events() {
+        let tool_call = ToolCall {
+            id: "call-progress-1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value":"pong"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![
+            ChatResponse::ToolCalls(vec![tool_call]),
+            ChatResponse::Text("final".to_string()),
+        ]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 4);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-progress-2");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+        let text = runtime
+            .process_with_progress(&channel, &session, "run tool", Some("skills"), tx)
+            .await
+            .expect("process_with_progress should succeed");
+        assert_eq!(text, "final");
+
+        let mut started = false;
+        let mut finished = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                proto::ProgressEvent::ToolCallStarted {
+                    call_id,
+                    tool_name,
+                    args,
+                } => {
+                    assert_eq!(call_id, "call-progress-1");
+                    assert_eq!(tool_name, "echo");
+                    assert_eq!(args["value"], "pong");
+                    started = true;
+                }
+                proto::ProgressEvent::ToolCallFinished {
+                    call_id,
+                    tool_name,
+                    output,
+                    is_error,
+                } => {
+                    assert_eq!(call_id, "call-progress-1");
+                    assert_eq!(tool_name, "echo");
+                    assert_eq!(output, "echo:pong");
+                    assert!(!is_error);
+                    finished = true;
+                }
+                proto::ProgressEvent::LlmThinking { .. } => {}
+            }
+        }
+        assert!(started);
+        assert!(finished);
     }
 
     #[test]
