@@ -119,11 +119,48 @@ jobs:
           path: ${{ steps.package.outputs.artifact }}
           if-no-files-found: error
 
+  release-nix:
+    name: release nix (x86_64-linux)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Build Nix package
+        id: package
+        run: |
+          tag="${{ needs.prepare.outputs.release_tag }}"
+          target="x86_64-linux"
+          package_dir="openpistacrab-${tag}-nix-${target}"
+          artifact="${package_dir}.tar.gz"
+
+          nix build .#packages.x86_64-linux.openpista
+
+          mkdir -p "${package_dir}"
+          cp "$(readlink -f ./result/bin/openpista)" "${package_dir}/openpistacrab"
+          tar -czf "${artifact}" "${package_dir}"
+
+          echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload Nix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-nix-x86_64-linux
+          path: ${{ steps.package.outputs.artifact }}
+          if-no-files-found: error
+
   publish-release:
     name: publish release
     needs:
       - prepare
       - release-build
+      - release-nix
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts

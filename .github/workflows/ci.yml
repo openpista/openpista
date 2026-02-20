@@ -58,6 +58,25 @@ jobs:
       - name: Run clippy with warnings denied
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  nix-check:
+    name: nix-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Verify Nix
+        run: nix --version
+
+      - name: Run nix flake checks
+        run: nix flake check
+
+      - name: Build package with Nix
+        run: nix build .#packages.x86_64-linux.openpista
+
   security-audit:
     name: security-audit
     runs-on: ubuntu-latest

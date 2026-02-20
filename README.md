@@ -118,6 +118,21 @@ cargo build --release
 sudo cp target/release/openpistacrab /usr/local/bin/
 ```
 
+### Nix (flakes)
+
+```bash
+cd /path/to/openpista
+nix flake check
+nix build .#packages.x86_64-linux.openpista
+```
+
+Optional: run directly from Nix and copy build output.
+
+```bash
+nix build .#openpista
+cp result/bin/openpista /usr/local/bin/openpistacrab
+```
+
 
 ---
 
