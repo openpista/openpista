@@ -71,6 +71,10 @@ pub async fn run_tui(
                         // Enter key: submit input (only when Idle)
                         if key.code == KeyCode::Enter && app.state == AppState::Idle && !app.input.is_empty() {
                             let message = app.take_input();
+                            if app.handle_slash_command(&message) {
+                                app.scroll_to_bottom();
+                                continue;
+                            }
                             app.push_user(message.clone());
                             app.state = AppState::Thinking { round: 0 };
                             app.scroll_to_bottom();
