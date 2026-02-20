@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId};
+use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId, WorkerReport};
+use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -22,6 +23,7 @@ pub struct AgentRuntime {
     memory: Arc<SqliteMemory>,
     model: String,
     max_tool_rounds: usize,
+    worker_report_quic_addr: Option<String>,
 }
 
 impl AgentRuntime {
@@ -39,7 +41,20 @@ impl AgentRuntime {
             memory,
             model: model.into(),
             max_tool_rounds,
+            worker_report_quic_addr: None,
         }
+    }
+
+    pub fn with_worker_report_quic_addr(mut self, addr: Option<String>) -> Self {
+        self.worker_report_quic_addr = addr.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        self
     }
 
     /// Process a user message and return the agent's final text response
@@ -162,10 +177,15 @@ impl AgentRuntime {
 
                     // Execute each tool call
                     for tc in &tool_calls {
-                        let result = self
-                            .tools
-                            .execute(&tc.id, &tc.name, tc.arguments.clone())
-                            .await;
+                        let tool_args = prepare_tool_args(
+                            &self.worker_report_quic_addr,
+                            channel_id,
+                            session_id,
+                            &tc.name,
+                            tc.arguments.clone(),
+                        );
+
+                        let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
 
                         // Save tool result message to memory
                         let tool_msg = AgentMessage::tool_result(
@@ -324,10 +344,15 @@ impl AgentRuntime {
                             args: tc.arguments.clone(),
                         });
 
-                        let result = self
-                            .tools
-                            .execute(&tc.id, &tc.name, tc.arguments.clone())
-                            .await;
+                        let tool_args = prepare_tool_args(
+                            &self.worker_report_quic_addr,
+                            channel_id,
+                            session_id,
+                            &tc.name,
+                            tc.arguments.clone(),
+                        );
+
+                        let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
 
                         // Progress: tool call finished
                         let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallFinished {
@@ -358,6 +383,36 @@ impl AgentRuntime {
             }
         }
     }
+
+    pub async fn record_worker_report(
+        &self,
+        channel_id: &ChannelId,
+        session_id: &SessionId,
+        report: &WorkerReport,
+    ) -> Result<(), proto::Error> {
+        self.memory
+            .ensure_session(session_id, channel_id.as_str())
+            .await
+            .map_err(proto::Error::Database)?;
+
+        let tool_name = format!("container.worker.{}", report.worker_id);
+        let msg = AgentMessage::tool_result(
+            session_id.clone(),
+            report.call_id.clone(),
+            tool_name,
+            report.output.clone(),
+        );
+
+        self.memory
+            .save_message(&msg)
+            .await
+            .map_err(proto::Error::Database)?;
+        self.memory
+            .touch_session(session_id)
+            .await
+            .map_err(proto::Error::Database)?;
+        Ok(())
+    }
 }
 
 /// Builds the effective system prompt with optional skills context section.
@@ -370,6 +425,42 @@ fn build_system_prompt(skills_context: Option<&str>) -> String {
         prompt.push_str(skills);
     }
     prompt
+}
+
+fn prepare_tool_args(
+    worker_report_quic_addr: &Option<String>,
+    channel_id: &ChannelId,
+    session_id: &SessionId,
+    tool_name: &str,
+    args: Value,
+) -> Value {
+    if tool_name != "container.run" {
+        return args;
+    }
+
+    let mut object = match args {
+        Value::Object(map) => map,
+        other => return other,
+    };
+
+    let Some(quic_addr) = worker_report_quic_addr.as_deref() else {
+        return Value::Object(object);
+    };
+
+    object
+        .entry("report_via_quic".to_string())
+        .or_insert(Value::Bool(true));
+    object
+        .entry("orchestrator_quic_addr".to_string())
+        .or_insert(Value::String(quic_addr.to_string()));
+    object
+        .entry("orchestrator_channel_id".to_string())
+        .or_insert(Value::String(channel_id.as_str().to_string()));
+    object
+        .entry("orchestrator_session_id".to_string())
+        .or_insert(Value::String(session_id.as_str().to_string()));
+
+    Value::Object(object)
 }
 
 #[cfg(test)]
@@ -655,6 +746,59 @@ mod tests {
         }
         assert!(started);
         assert!(finished);
+    }
+
+    #[test]
+    fn prepare_tool_args_injects_worker_report_defaults_for_container_tool() {
+        let args = prepare_tool_args(
+            &Some("127.0.0.1:4433".to_string()),
+            &ChannelId::from("cli:local"),
+            &SessionId::from("session-x"),
+            "container.run",
+            serde_json::json!({"image":"alpine:3","command":"echo hi"}),
+        );
+
+        assert_eq!(args["report_via_quic"], true);
+        assert_eq!(args["orchestrator_quic_addr"], "127.0.0.1:4433");
+        assert_eq!(args["orchestrator_channel_id"], "cli:local");
+        assert_eq!(args["orchestrator_session_id"], "session-x");
+    }
+
+    #[tokio::test]
+    async fn record_worker_report_persists_tool_message() {
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-worker-report");
+        let report = proto::WorkerReport::new(
+            "call-42",
+            "worker-1",
+            "alpine:3.20",
+            "echo hi",
+            0,
+            "hi\n",
+            "",
+            "stdout:\nhi\n\nexit_code: 0",
+        );
+
+        runtime
+            .record_worker_report(&channel, &session, &report)
+            .await
+            .expect("worker report should be recorded");
+
+        let history = memory.load_session(&session).await.expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, Role::Tool);
+        assert_eq!(history[0].tool_call_id.as_deref(), Some("call-42"));
+        assert!(
+            history[0]
+                .tool_name
+                .as_deref()
+                .unwrap_or_default()
+                .contains("worker-1")
+        );
+        assert_eq!(history[0].content, report.output);
     }
 
     #[test]

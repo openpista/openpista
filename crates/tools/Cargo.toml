@@ -20,6 +20,8 @@ reqwest = { workspace = true }
 chromiumoxide = { workspace = true }
 futures-util = { workspace = true }
 bollard = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

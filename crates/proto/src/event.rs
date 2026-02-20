@@ -90,6 +90,50 @@ pub enum ProgressEvent {
     },
 }
 
+pub const WORKER_REPORT_KIND: &str = "worker_report";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerReport {
+    pub kind: String,
+    pub call_id: String,
+    pub worker_id: String,
+    pub image: String,
+    pub command: String,
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
+    pub output: String,
+}
+
+impl WorkerReport {
+    pub fn new(
+        call_id: impl Into<String>,
+        worker_id: impl Into<String>,
+        image: impl Into<String>,
+        command: impl Into<String>,
+        exit_code: i64,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: WORKER_REPORT_KIND.to_string(),
+            call_id: call_id.into(),
+            worker_id: worker_id.into(),
+            image: image.into(),
+            command: command.into(),
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            output: output.into(),
+        }
+    }
+
+    pub fn is_worker_report(&self) -> bool {
+        self.kind == WORKER_REPORT_KIND
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +170,25 @@ mod tests {
 
         assert_eq!(resp.content, "boom");
         assert!(resp.is_error);
+    }
+
+    #[test]
+    fn worker_report_constructor_sets_kind_and_fields() {
+        let report = WorkerReport::new(
+            "call-1",
+            "worker-a",
+            "alpine:3.20",
+            "echo hi",
+            0,
+            "hi\n",
+            "",
+            "stdout:\nhi\n\nexit_code: 0",
+        );
+
+        assert_eq!(report.kind, WORKER_REPORT_KIND);
+        assert_eq!(report.call_id, "call-1");
+        assert_eq!(report.worker_id, "worker-a");
+        assert_eq!(report.exit_code, 0);
+        assert!(report.is_worker_report());
     }
 }
