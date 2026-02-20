@@ -42,6 +42,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,8 +78,20 @@ jobs:
         run: cargo audit
 
   build-linux:
-    name: build (linux)
-    runs-on: ubuntu-latest
+    name: build (linux-${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,11 +99,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build workspace
-        run: cargo build --workspace --all-targets
+      - name: Build workspace for target
+        run: cargo build --workspace --target "${{ matrix.target }}"
 
   build-macos-arm64:
     name: build (macos-arm64)
@@ -111,6 +136,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -122,29 +152,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Count tests
-        id: test-count
-        shell: bash
-        run: |
-          count="$(cargo test --workspace --all-targets -- --list 2>/dev/null | awk '/: test$/ {n+=1} END {print n+0}')"
-          echo "count=${count}" >> "${GITHUB_OUTPUT}"
-          echo "Detected test count: ${count}"
+      - name: Generate lcov for Codecov
+        run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
-      - name: Run coverage with dynamic gate
-        shell: bash
-        run: |
-          if [ "${{ steps.test-count.outputs.count }}" -ge 10 ]; then
-            echo "Coverage gate enabled: fail under 85% (test count >= 10)"
-            cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info --fail-under-lines 85
-          else
-            echo "Coverage gate informational mode (test count < 10)"
-            cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
-          fi
-
-      - name: Upload coverage to Codecov
+      - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: lcov.info
-          flags: unittests
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: ${{ secrets.CODECOV_TOKEN != '' }}
+          files: lcov.info
+          fail_ci_if_error: true

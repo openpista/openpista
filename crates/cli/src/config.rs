@@ -140,6 +140,9 @@ pub struct Config {
 pub struct GatewayConfig {
     /// QUIC listening port.
     pub port: u16,
+    /// Optional host/IP advertised to worker containers for QUIC report callbacks.
+    /// Defaults to loopback when omitted.
+    pub report_host: Option<String>,
     /// Optional TLS cert path/content setting.
     pub tls_cert: String,
 }
@@ -148,6 +151,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             port: 4433,
+            report_host: None,
             tls_cert: String::new(),
         }
     }
@@ -409,6 +413,24 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn set_env_var(key: &str, value: &str) {
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    fn remove_env_var(key: &str) {
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
 
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
@@ -480,6 +502,8 @@ mod tests {
 
     #[test]
     fn load_reads_explicit_file_path() {
+        let _guard = env_lock().lock().expect("env lock");
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
         write_file(
@@ -487,6 +511,7 @@ mod tests {
             r#"
 [gateway]
 port = 5555
+report_host = "host.docker.internal"
 tls_cert = "inline"
 
 [agent]
@@ -513,6 +538,10 @@ workspace = "/tmp/workspace"
 
         let cfg = Config::load(Some(&config_path)).expect("config should parse");
         assert_eq!(cfg.gateway.port, 5555);
+        assert_eq!(
+            cfg.gateway.report_host.as_deref(),
+            Some("host.docker.internal")
+        );
         assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
         assert_eq!(cfg.agent.model, "gpt-4.1-mini");
         assert_eq!(cfg.agent.effective_model(), "gpt-4.1-mini");
@@ -531,6 +560,8 @@ workspace = "/tmp/workspace"
 
     #[test]
     fn load_together_preset_auto_configures_url() {
+        let _guard = env_lock().lock().expect("env lock");
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
         write_file(
@@ -556,6 +587,8 @@ api_key = "tg-key"
 
     #[test]
     fn load_returns_toml_error_for_invalid_content() {
+        let _guard = env_lock().lock().expect("env lock");
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_path = tmp.path().join("config.toml");
         write_file(&config_path, "[agent\nmodel = \"broken\"");
@@ -565,8 +598,79 @@ api_key = "tg-key"
 
     #[test]
     fn resolve_api_key_prefers_config_key() {
+        let _guard = env_lock().lock().expect("env lock");
+
         let mut cfg = Config::default();
         cfg.agent.api_key = "abc123".to_string();
         assert_eq!(cfg.resolve_api_key(), "abc123");
+    }
+
+    #[test]
+    fn provider_preset_from_str_and_metadata_are_stable() {
+        assert_eq!(
+            "openai".parse::<ProviderPreset>().ok(),
+            Some(ProviderPreset::OpenAi)
+        );
+        assert_eq!(
+            "openrouter".parse::<ProviderPreset>().ok(),
+            Some(ProviderPreset::OpenRouter)
+        );
+        assert!("unknown".parse::<ProviderPreset>().is_err());
+
+        assert_eq!(ProviderPreset::OpenAi.api_key_env(), "OPENAI_API_KEY");
+        assert_eq!(ProviderPreset::OpenAi.name(), "openai");
+        assert_eq!(ProviderPreset::Ollama.api_key_env(), "");
+        assert_eq!(ProviderPreset::Ollama.name(), "ollama");
+    }
+
+    #[test]
+    fn load_applies_env_overrides_for_agent_and_channels() {
+        let _guard = env_lock().lock().expect("env lock");
+
+        set_env_var("OPENPISTACRAB_API_KEY", "env-api");
+        set_env_var("OPENPISTACRAB_MODEL", "env-model");
+        set_env_var("TELEGRAM_BOT_TOKEN", "env-tg-token");
+        set_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID", "env-client-id");
+        set_env_var("OPENPISTACRAB_MOBILE_TOKEN", "env-mobile-token");
+        set_env_var("OPENPISTACRAB_WORKSPACE", "/tmp/env-workspace");
+
+        let cfg = Config::load(None).expect("config load");
+        assert_eq!(cfg.agent.api_key, "env-api");
+        assert_eq!(cfg.agent.model, "env-model");
+        assert_eq!(cfg.agent.oauth_client_id, "env-client-id");
+        assert!(cfg.channels.telegram.enabled);
+        assert_eq!(cfg.channels.telegram.token, "env-tg-token");
+        assert!(cfg.channels.mobile.enabled);
+        assert_eq!(cfg.channels.mobile.api_token, "env-mobile-token");
+        assert_eq!(cfg.skills.workspace, "/tmp/env-workspace");
+
+        remove_env_var("OPENPISTACRAB_API_KEY");
+        remove_env_var("OPENPISTACRAB_MODEL");
+        remove_env_var("TELEGRAM_BOT_TOKEN");
+        remove_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID");
+        remove_env_var("OPENPISTACRAB_MOBILE_TOKEN");
+        remove_env_var("OPENPISTACRAB_WORKSPACE");
+    }
+
+    #[test]
+    fn resolve_api_key_uses_provider_specific_env_then_legacy_fallback() {
+        let _guard = env_lock().lock().expect("env lock");
+
+        remove_env_var("OPENPISTACRAB_API_KEY");
+        remove_env_var("TOGETHER_API_KEY");
+        remove_env_var("OPENAI_API_KEY");
+
+        let mut cfg = Config::default();
+        cfg.agent.api_key.clear();
+        cfg.agent.provider = ProviderPreset::Together;
+
+        set_env_var("TOGETHER_API_KEY", "provider-key");
+        assert_eq!(cfg.resolve_api_key(), "provider-key");
+
+        remove_env_var("TOGETHER_API_KEY");
+        set_env_var("OPENAI_API_KEY", "legacy-key");
+        assert_eq!(cfg.resolve_api_key(), "legacy-key");
+
+        remove_env_var("OPENAI_API_KEY");
     }
 }

@@ -13,6 +13,7 @@ The format is based on Keep a Changelog.
 - [channels] Added CLI and optional Telegram channel adapters for channel event ingestion.
 - [tools] Added working `browser.navigate`, `browser.click`, `browser.type`, and `browser.screenshot` tools, plus `screen.capture` output support.
 - [tools] Added `container.run` for isolated per-task Docker execution via `bollard`.
+- [tools] Added optional task-scoped short-lived credential injection for `container.run` using in-memory `/run/secrets` upload and automatic credential disposal.
 - [workspace] Added a sample configuration file (`config.example.toml`) covering gateway, agent, channel, database, and skills settings.
 
 ### Changed
