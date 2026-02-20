@@ -1,0 +1,545 @@
+//! Runtime orchestration loop for conversation, tools, and memory.
+
+use std::sync::Arc;
+
+use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId};
+use tracing::{debug, info, warn};
+
+use crate::{
+    llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider},
+    memory::SqliteMemory,
+    tool_registry::ToolRegistry,
+};
+
+const DEFAULT_SYSTEM_PROMPT: &str = r#"You are openpistacrab, an OS Gateway AI Agent.
+You can interact with the operating system through available tools.
+Be helpful, concise, and safe. Always confirm before running potentially destructive commands."#;
+
+/// The main agent runtime: manages the ReAct loop
+pub struct AgentRuntime {
+    llm: Arc<dyn LlmProvider>,
+    tools: Arc<ToolRegistry>,
+    memory: Arc<SqliteMemory>,
+    model: String,
+    max_tool_rounds: usize,
+}
+
+impl AgentRuntime {
+    /// Creates a new agent runtime with LLM provider, tools, and memory.
+    pub fn new(
+        llm: Arc<dyn LlmProvider>,
+        tools: Arc<ToolRegistry>,
+        memory: Arc<SqliteMemory>,
+        model: impl Into<String>,
+        max_tool_rounds: usize,
+    ) -> Self {
+        Self {
+            llm,
+            tools,
+            memory,
+            model: model.into(),
+            max_tool_rounds,
+        }
+    }
+
+    /// Process a user message and return the agent's final text response
+    pub async fn process(
+        &self,
+        channel_id: &ChannelId,
+        session_id: &SessionId,
+        user_message: &str,
+        skills_context: Option<&str>,
+    ) -> Result<String, proto::Error> {
+        // Ensure session exists
+        self.memory
+            .ensure_session(session_id, channel_id.as_str())
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Save user message
+        let user_msg = AgentMessage::new(session_id.clone(), Role::User, user_message);
+        self.memory
+            .save_message(&user_msg)
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Build system prompt
+        let system_prompt = build_system_prompt(skills_context);
+
+        // Load conversation history
+        let history = self
+            .memory
+            .load_session(session_id)
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Convert history to chat messages
+        let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+        for msg in &history {
+            match msg.role {
+                Role::User => messages.push(ChatMessage::user(&msg.content)),
+                Role::Assistant => {
+                    let mut assistant = ChatMessage::assistant(&msg.content);
+                    assistant.tool_calls = msg.tool_calls.clone();
+                    messages.push(assistant);
+                }
+                Role::Tool => {
+                    messages.push(ChatMessage::tool_result(
+                        msg.tool_call_id.as_deref().unwrap_or(""),
+                        msg.tool_name.as_deref().unwrap_or(""),
+                        &msg.content,
+                    ));
+                }
+                Role::System => {} // skip stored system messages
+            }
+        }
+
+        // ReAct loop
+        let tool_defs = self.tools.definitions();
+        let mut round = 0;
+
+        loop {
+            if round >= self.max_tool_rounds {
+                warn!(
+                    "Max tool rounds ({}) reached for session {session_id}",
+                    self.max_tool_rounds
+                );
+                return Err(proto::Error::Llm(LlmError::MaxToolRoundsExceeded));
+            }
+
+            let req = ChatRequest {
+                messages: messages.clone(),
+                tools: tool_defs.clone(),
+                model: self.model.clone(),
+            };
+
+            debug!("LLM call (round {round}) for session {session_id}");
+            let response = self.llm.chat(req).await.map_err(proto::Error::Llm)?;
+
+            match response {
+                ChatResponse::Text(text) => {
+                    info!("Agent final response for session {session_id}: {text:.50}...");
+
+                    // Save assistant response
+                    let assistant_msg =
+                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
+                    self.memory
+                        .save_message(&assistant_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    self.memory
+                        .touch_session(session_id)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    return Ok(text);
+                }
+
+                ChatResponse::ToolCalls(tool_calls) => {
+                    debug!(
+                        "Tool calls requested: {:?}",
+                        tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
+                    );
+
+                    // Persist assistant tool-call message so replayed history remains valid.
+                    let assistant_tool_calls_msg =
+                        AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
+                    self.memory
+                        .save_message(&assistant_tool_calls_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    // Add assistant message with tool calls to history
+                    let assistant_msg = ChatMessage {
+                        role: Role::Assistant,
+                        content: String::new(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_calls: Some(tool_calls.clone()),
+                    };
+                    messages.push(assistant_msg);
+
+                    // Execute each tool call
+                    for tc in &tool_calls {
+                        let result = self
+                            .tools
+                            .execute(&tc.id, &tc.name, tc.arguments.clone())
+                            .await;
+
+                        // Save tool result message to memory
+                        let tool_msg = AgentMessage::tool_result(
+                            session_id.clone(),
+                            &tc.id,
+                            &tc.name,
+                            &result.output,
+                        );
+                        self.memory
+                            .save_message(&tool_msg)
+                            .await
+                            .map_err(proto::Error::Database)?;
+
+                        // Add to in-memory conversation
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                    }
+
+                    round += 1;
+                }
+            }
+        }
+    }
+
+    /// Process a user message with real-time progress events.
+    ///
+    /// Identical to [`process()`](Self::process) but emits [`proto::ProgressEvent`]s
+    /// on the provided channel so a TUI or other consumer can display
+    /// live tool-call status while the ReAct loop runs.
+    pub async fn process_with_progress(
+        &self,
+        channel_id: &ChannelId,
+        session_id: &SessionId,
+        user_message: &str,
+        skills_context: Option<&str>,
+        progress_tx: tokio::sync::mpsc::Sender<proto::ProgressEvent>,
+    ) -> Result<String, proto::Error> {
+        // Ensure session exists
+        self.memory
+            .ensure_session(session_id, channel_id.as_str())
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Save user message
+        let user_msg = AgentMessage::new(session_id.clone(), Role::User, user_message);
+        self.memory
+            .save_message(&user_msg)
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Build system prompt
+        let system_prompt = build_system_prompt(skills_context);
+
+        // Load conversation history
+        let history = self
+            .memory
+            .load_session(session_id)
+            .await
+            .map_err(proto::Error::Database)?;
+
+        // Convert history to chat messages
+        let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+        for msg in &history {
+            match msg.role {
+                Role::User => messages.push(ChatMessage::user(&msg.content)),
+                Role::Assistant => {
+                    let mut assistant = ChatMessage::assistant(&msg.content);
+                    assistant.tool_calls = msg.tool_calls.clone();
+                    messages.push(assistant);
+                }
+                Role::Tool => {
+                    messages.push(ChatMessage::tool_result(
+                        msg.tool_call_id.as_deref().unwrap_or(""),
+                        msg.tool_name.as_deref().unwrap_or(""),
+                        &msg.content,
+                    ));
+                }
+                Role::System => {} // skip stored system messages
+            }
+        }
+
+        // ReAct loop with progress events
+        let tool_defs = self.tools.definitions();
+        let mut round = 0;
+
+        loop {
+            if round >= self.max_tool_rounds {
+                warn!(
+                    "Max tool rounds ({}) reached for session {session_id}",
+                    self.max_tool_rounds
+                );
+                return Err(proto::Error::Llm(LlmError::MaxToolRoundsExceeded));
+            }
+
+            let req = ChatRequest {
+                messages: messages.clone(),
+                tools: tool_defs.clone(),
+                model: self.model.clone(),
+            };
+
+            // Progress: LLM thinking
+            let _ = progress_tx.try_send(proto::ProgressEvent::LlmThinking { round });
+
+            debug!("LLM call (round {round}) for session {session_id}");
+            let response = self.llm.chat(req).await.map_err(proto::Error::Llm)?;
+
+            match response {
+                ChatResponse::Text(text) => {
+                    info!("Agent final response for session {session_id}: {text:.50}...");
+
+                    // Save assistant response
+                    let assistant_msg =
+                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
+                    self.memory
+                        .save_message(&assistant_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    self.memory
+                        .touch_session(session_id)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    return Ok(text);
+                }
+
+                ChatResponse::ToolCalls(tool_calls) => {
+                    debug!(
+                        "Tool calls requested: {:?}",
+                        tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
+                    );
+
+                    // Persist assistant tool-call message
+                    let assistant_tool_calls_msg =
+                        AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
+                    self.memory
+                        .save_message(&assistant_tool_calls_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+
+                    // Add assistant message with tool calls to history
+                    let assistant_msg = ChatMessage {
+                        role: Role::Assistant,
+                        content: String::new(),
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_calls: Some(tool_calls.clone()),
+                    };
+                    messages.push(assistant_msg);
+
+                    // Execute each tool call with progress events
+                    for tc in &tool_calls {
+                        // Progress: tool call started
+                        let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallStarted {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            args: tc.arguments.clone(),
+                        });
+
+                        let result = self
+                            .tools
+                            .execute(&tc.id, &tc.name, tc.arguments.clone())
+                            .await;
+
+                        // Progress: tool call finished
+                        let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallFinished {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            output: result.output.clone(),
+                            is_error: result.is_error,
+                        });
+
+                        // Save tool result message to memory
+                        let tool_msg = AgentMessage::tool_result(
+                            session_id.clone(),
+                            &tc.id,
+                            &tc.name,
+                            &result.output,
+                        );
+                        self.memory
+                            .save_message(&tool_msg)
+                            .await
+                            .map_err(proto::Error::Database)?;
+
+                        // Add to in-memory conversation
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                    }
+
+                    round += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Builds the effective system prompt with optional skills context section.
+fn build_system_prompt(skills_context: Option<&str>) -> String {
+    let mut prompt = DEFAULT_SYSTEM_PROMPT.to_string();
+    if let Some(skills) = skills_context
+        && !skills.is_empty()
+    {
+        prompt.push_str("\n\n## Available Skills\n\n");
+        prompt.push_str(skills);
+    }
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use async_trait::async_trait;
+    use proto::{LlmError, ToolCall, ToolResult};
+
+    use super::*;
+
+    struct MockLlm {
+        queue: Mutex<VecDeque<ChatResponse>>,
+    }
+
+    impl MockLlm {
+        fn new(responses: Vec<ChatResponse>) -> Self {
+            Self {
+                queue: Mutex::new(VecDeque::from(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockLlm {
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            self.queue
+                .lock()
+                .expect("lock queue")
+                .pop_front()
+                .ok_or_else(|| LlmError::InvalidResponse("No mock response left".to_string()))
+        }
+    }
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl tools::Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echo test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type":"object",
+                "properties":{"value":{"type":"string"}},
+                "required":["value"]
+            })
+        }
+
+        async fn execute(&self, call_id: &str, args: serde_json::Value) -> ToolResult {
+            let value = args["value"].as_str().unwrap_or_default();
+            ToolResult::success(call_id, self.name(), format!("echo:{value}"))
+        }
+    }
+
+    async fn open_temp_memory() -> Arc<SqliteMemory> {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tempdir.path().join("memory.db");
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let memory = SqliteMemory::open(&db_path_str).await.expect("memory open");
+        // Keep tempdir alive for test process lifetime.
+        std::mem::forget(tempdir);
+        Arc::new(memory)
+    }
+
+    fn build_registry() -> Arc<ToolRegistry> {
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        Arc::new(registry)
+    }
+
+    #[tokio::test]
+    async fn process_returns_text_and_persists_messages() {
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "assistant reply".to_string(),
+        )]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-1");
+
+        let text = runtime
+            .process(&channel, &session, "hello", None)
+            .await
+            .expect("process should succeed");
+        assert_eq!(text, "assistant reply");
+
+        let history = memory.load_session(&session).await.expect("history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, Role::User);
+        assert_eq!(history[0].content, "hello");
+        assert_eq!(history[1].role, Role::Assistant);
+        assert_eq!(history[1].content, "assistant reply");
+    }
+
+    #[tokio::test]
+    async fn process_executes_tool_calls_then_returns_text() {
+        let tool_call = ToolCall {
+            id: "call-1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value":"pong"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![
+            ChatResponse::ToolCalls(vec![tool_call]),
+            ChatResponse::Text("done".to_string()),
+        ]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-2");
+
+        let text = runtime
+            .process(&channel, &session, "run echo", Some("skill context"))
+            .await
+            .expect("process should succeed");
+        assert_eq!(text, "done");
+
+        let history = memory.load_session(&session).await.expect("history");
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0].role, Role::User);
+        assert_eq!(history[1].role, Role::Assistant);
+        assert_eq!(history[1].content, "");
+        assert_eq!(history[1].tool_calls.as_ref().map(Vec::len), Some(1));
+        assert_eq!(history[2].role, Role::Tool);
+        assert_eq!(history[2].content, "echo:pong");
+        assert_eq!(history[3].role, Role::Assistant);
+        assert_eq!(history[3].content, "done");
+    }
+
+    #[tokio::test]
+    async fn process_errors_when_max_tool_rounds_exceeded() {
+        let tool_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value":"x"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(vec![tool_call])]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 1);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-3");
+
+        let err = runtime
+            .process(&channel, &session, "loop", None)
+            .await
+            .expect_err("should exceed rounds");
+        match err {
+            proto::Error::Llm(LlmError::MaxToolRoundsExceeded) => {}
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn build_system_prompt_includes_skills_when_non_empty() {
+        let prompt = build_system_prompt(Some("### Skill: demo"));
+        assert!(prompt.contains("Available Skills"));
+        assert!(prompt.contains("### Skill: demo"));
+    }
+
+    #[test]
+    fn build_system_prompt_skips_empty_skills() {
+        let base = build_system_prompt(None);
+        assert!(!base.contains("Available Skills"));
+
+        let empty = build_system_prompt(Some(""));
+        assert!(!empty.contains("Available Skills"));
+    }
+}

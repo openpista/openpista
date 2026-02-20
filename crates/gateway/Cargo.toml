@@ -1,0 +1,20 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proto = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = "0.13"
+rustls-pemfile = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
+uuid = { workspace = true }
