@@ -24,10 +24,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 
     // 1. Render Logo
     let logo_style = Style::default().fg(Color::Rgb(115, 138, 172)); // A nice muted blue
-    let logo_str = "  ___  ____  _____  _  _  ___  ___  ____  ____ \n \
-                   / _ \\(  _ \\(  _  )( \\( )/ __)/ _ \\(    \\(  __)\n\
-                  ( (_) )) __/ )(_)(  )  (( (__( (_) )) D ( ) _) \n \
-                   \\___/(__)  (_____)(_)\\_)\\___)\\___/(____/(____)";
+    let logo_str = r#"  ___   ____   _____  _  _   ____   __   ___   ____   __  
+ / _ \ (  _ \ (  _  )( \( ) (  _ \ (  ) / __) (_  _) / _\ 
+( (_) ) ) __/  )(_)(  )  (   ) __/  )(  \__ \   )(  /    \
+ \___/ (__)   (_____)(_)\_) (__)   (__) (___/  (__) \_/\_/"#;
     let logo_text = Text::styled(logo_str, logo_style);
 
     // To center it horizontally
