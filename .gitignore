@@ -6,6 +6,7 @@ Cargo.lock
 # Rust debug / profiling artifacts
 *.pdb
 *.dSYM/
+lcov.info
 
 # Docs build artifacts
 /docs/*
@@ -21,3 +22,4 @@ config.toml
 # OS / local tooling
 .DS_Store
 .sisyphus/
+

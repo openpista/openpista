@@ -54,10 +54,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 
 # 채널
-teloxide = { version = "0.12", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # 스케줄러
@@ -66,8 +66,8 @@ tokio-cron-scheduler = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chromiumoxide = "0.8"
 bollard = "0.19"
-wasmtime = "38.0.4"
-wasmtime-wasi = "38.0.4"
+wasmtime = "40.0.3"
+wasmtime-wasi = "40.0.3"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"

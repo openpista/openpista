@@ -12,6 +12,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use std::collections::HashSet;
 
 /// Spinner animation frames (Braille pattern).
 const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
@@ -401,6 +402,12 @@ impl TuiApp {
     fn visible_model_entries(&self, query: &str) -> Vec<model_catalog::ModelCatalogEntry> {
         let recommended = model_catalog::filtered_entries(&self.model_entries, query, false);
         let all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
+        let recommended_keys: HashSet<&str> =
+            recommended.iter().map(|entry| entry.id.as_str()).collect();
+        let all_models: Vec<_> = all_models
+            .into_iter()
+            .filter(|entry| !recommended_keys.contains(entry.id.as_str()))
+            .collect();
         let mut rows = Vec::new();
         rows.extend(recommended);
         rows.extend(all_models);
@@ -1227,7 +1234,10 @@ impl TuiApp {
 
         let summary = model_catalog::model_summary(&self.model_entries, query, true);
         let recommended = model_catalog::filtered_entries(&self.model_entries, query, false);
-        let all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
+        let mut all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
+        let recommended_ids: HashSet<&str> =
+            recommended.iter().map(|entry| entry.id.as_str()).collect();
+        all_models.retain(|entry| !recommended_ids.contains(entry.id.as_str()));
 
         let chunks = Layout::vertical([
             Constraint::Length(1),

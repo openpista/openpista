@@ -207,7 +207,7 @@ async fn cmd_tui(config: Config) -> anyhow::Result<()> {
         channel_id,
         session_id,
         model_name,
-        config.agent.oauth_client_id.clone(),
+        config.clone(),
     )
     .await
 }
@@ -652,94 +652,9 @@ async fn persist_cli_auth_intent(
     port: u16,
     timeout: u64,
 ) -> anyhow::Result<String> {
-    use crate::config::{LoginAuthMode, ProviderPreset, provider_registry_entry_ci};
-
-    let provider = intent.provider.to_ascii_lowercase();
-    let entry = provider_registry_entry_ci(&provider).ok_or_else(|| {
-        anyhow::anyhow!(
-            "unknown provider '{provider}'. Available providers: {}",
-            crate::config::provider_registry_names()
-        )
-    })?;
-
-    let credential = match entry.auth_mode {
-        LoginAuthMode::None => {
-            anyhow::bail!("Provider '{}' does not require login.", entry.name);
-        }
-        LoginAuthMode::EndpointAndKey => {
-            let endpoint = intent.endpoint.clone().ok_or_else(|| {
-                anyhow::anyhow!("Provider '{}' requires endpoint + key login.", entry.name)
-            })?;
-            let api_key = intent.api_key.clone().ok_or_else(|| {
-                anyhow::anyhow!("Provider '{}' requires API key login.", entry.name)
-            })?;
-            auth::ProviderCredential {
-                access_token: api_key,
-                endpoint: Some(endpoint),
-                refresh_token: None,
-                expires_at: None,
-            }
-        }
-        LoginAuthMode::ApiKey => {
-            let api_key = intent.api_key.clone().ok_or_else(|| {
-                anyhow::anyhow!("Provider '{}' requires API key login.", entry.name)
-            })?;
-            auth::ProviderCredential {
-                access_token: api_key,
-                endpoint: intent.endpoint.clone(),
-                refresh_token: None,
-                expires_at: None,
-            }
-        }
-        LoginAuthMode::OAuth => {
-            if intent.auth_method == AuthMethodChoice::ApiKey {
-                let api_key = intent.api_key.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Provider '{}' requires API key when API-key mode is selected.",
-                        entry.name
-                    )
-                })?;
-                auth::ProviderCredential {
-                    access_token: api_key,
-                    endpoint: intent.endpoint.clone(),
-                    refresh_token: None,
-                    expires_at: None,
-                }
-            } else {
-                let client_id = config.agent.oauth_client_id.trim().to_string();
-                if client_id.is_empty() {
-                    anyhow::bail!(
-                        "No OAuth client ID configured for '{}'. Set OPENPISTACRAB_OAUTH_CLIENT_ID.",
-                        entry.name
-                    );
-                }
-                let preset: ProviderPreset = provider.parse().map_err(|_| {
-                    anyhow::anyhow!("provider '{}' is not OAuth-capable", entry.name)
-                })?;
-                let endpoints = preset.oauth_endpoints().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "provider '{}' does not support OAuth PKCE login",
-                        entry.name
-                    )
-                })?;
-                auth::login(entry.name, &endpoints, &client_id, port, timeout).await?
-            }
-        }
-    };
-
-    let mut creds = auth::Credentials::load();
-    creds.set(provider.clone(), credential);
-    creds.save()?;
-
-    let mut message = format!(
-        "Authenticated as '{}'. Token stored in {}",
-        provider,
-        auth::Credentials::path().display()
-    );
-    if !entry.supports_runtime {
-        message.push_str(" Credential stored; runtime execution not yet wired.");
-    }
-    Ok(message)
+    tui::event::build_and_store_credential(config, intent, port, timeout)
+        .await
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(not(test))]

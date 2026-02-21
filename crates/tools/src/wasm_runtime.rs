@@ -1,8 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use proto::{ToolCall, ToolResult};
@@ -122,22 +119,29 @@ fn run_wasm_skill_sync(req: WasmRunRequest) -> Result<ToolResult, String> {
     let payload_ptr = alloc
         .call(&mut store, payload_len_i32)
         .map_err(|e| format!("WASM alloc failed: {e}"))?;
+    if payload_ptr == 0 {
+        return Err("WASM alloc returned 0".to_string());
+    }
     memory
         .write(&mut store, payload_ptr as usize, &payload)
         .map_err(|e| format!("Failed writing ToolCall into WASM memory: {e}"))?;
 
-    let done = Arc::new(AtomicBool::new(false));
-    let timeout_done = done.clone();
     let timeout_engine = engine.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(timeout_secs));
-        if !timeout_done.load(Ordering::SeqCst) {
-            timeout_engine.increment_epoch();
+    let (timeout_tx, timeout_rx) = mpsc::channel::<()>();
+    let timeout_thread = std::thread::spawn(move || {
+        match timeout_rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+            Err(RecvTimeoutError::Timeout) => {
+                timeout_engine.increment_epoch();
+            }
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
         }
     });
 
     let run_result = run.call(&mut store, (payload_ptr, payload_len_i32));
-    done.store(true, Ordering::SeqCst);
+    let _ = timeout_tx.send(());
+    timeout_thread
+        .join()
+        .map_err(|_| "WASM timeout thread panicked".to_string())?;
 
     let packed = run_result.map_err(|e| {
         let msg = e.to_string();
@@ -158,13 +162,6 @@ fn run_wasm_skill_sync(req: WasmRunRequest) -> Result<ToolResult, String> {
 
     if let Some(dealloc_fn) = dealloc {
         let _ = dealloc_fn.call(&mut store, (payload_ptr, payload_len_i32));
-        let _ = dealloc_fn.call(
-            &mut store,
-            (
-                i32::try_from(result_ptr).unwrap_or_default(),
-                i32::try_from(result_len).unwrap_or_default(),
-            ),
-        );
     }
 
     let mut tool_result: ToolResult = serde_json::from_slice(&result_buf)

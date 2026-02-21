@@ -1,6 +1,7 @@
 use proto::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// OAuth 2.0 PKCE application endpoints for a provider.
 pub struct OAuthEndpoints {
@@ -144,7 +145,8 @@ const EXTENSION_PROVIDER_SLOTS: &[ProviderRegistryEntry] = &[
         sort_order: 90,
         search_aliases: &["aws", "bedrock"],
         auth_mode: LoginAuthMode::EndpointAndKey,
-        api_key_env: "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY",
+        // AWS Bedrock credentials come from ACCESS_KEY_ID + SECRET_ACCESS_KEY.
+        api_key_env: "AWS_SECRET_ACCESS_KEY",
         endpoint_env: Some("AWS_REGION"),
         supports_runtime: false,
     },
@@ -326,14 +328,34 @@ pub enum AuthRequirement {
     None,
 }
 
+fn provider_registry_entries() -> &'static Vec<ProviderRegistryEntry> {
+    static REGISTRY: OnceLock<Vec<ProviderRegistryEntry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut entries: Vec<ProviderRegistryEntry> = ProviderPreset::all()
+            .iter()
+            .map(ProviderPreset::registry_entry)
+            .collect();
+        entries.extend_from_slice(EXTENSION_PROVIDER_SLOTS);
+        entries
+    })
+}
+
+fn provider_registry_for_picker_entries() -> &'static Vec<ProviderRegistryEntry> {
+    static PICKER: OnceLock<Vec<ProviderRegistryEntry>> = OnceLock::new();
+    PICKER.get_or_init(|| {
+        let mut entries = provider_registry_entries().clone();
+        entries.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.display_name.cmp(b.display_name))
+        });
+        entries
+    })
+}
+
 /// Returns the merged provider registry (runtime providers + extension slots).
 pub fn provider_registry() -> Vec<ProviderRegistryEntry> {
-    let mut entries: Vec<ProviderRegistryEntry> = ProviderPreset::all()
-        .iter()
-        .map(ProviderPreset::registry_entry)
-        .collect();
-    entries.extend_from_slice(EXTENSION_PROVIDER_SLOTS);
-    entries
+    provider_registry_entries().clone()
 }
 
 /// Resolves one provider entry by id (case-insensitive).
@@ -344,20 +366,15 @@ pub fn provider_registry_entry(name: &str) -> Option<ProviderRegistryEntry> {
 /// Resolves one provider entry by id (case-insensitive).
 pub fn provider_registry_entry_ci(name: &str) -> Option<ProviderRegistryEntry> {
     let needle = name.trim().to_ascii_lowercase();
-    provider_registry()
-        .into_iter()
+    provider_registry_entries()
+        .iter()
         .find(|entry| entry.name == needle)
+        .cloned()
 }
 
 /// Returns picker-ordered provider entries.
 pub fn provider_registry_for_picker() -> Vec<ProviderRegistryEntry> {
-    let mut entries = provider_registry();
-    entries.sort_by(|a, b| {
-        a.sort_order
-            .cmp(&b.sort_order)
-            .then_with(|| a.display_name.cmp(b.display_name))
-    });
-    entries
+    provider_registry_for_picker_entries().clone()
 }
 
 /// Returns a comma-separated provider name list for user prompts.

@@ -1,6 +1,7 @@
 //! Screen capture tool.
 
 use async_trait::async_trait;
+#[cfg(not(target_env = "musl"))]
 use base64::{Engine as _, engine::general_purpose};
 #[cfg(not(target_env = "musl"))]
 use image::ImageFormat;
@@ -8,6 +9,7 @@ use proto::ToolResult;
 #[cfg(not(target_env = "musl"))]
 use screenshots::Screen;
 use serde::Deserialize;
+#[cfg(not(target_env = "musl"))]
 use std::io::Cursor;
 
 use crate::Tool;
