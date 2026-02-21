@@ -1,4 +1,4 @@
-# openpistacrab
+# openpista
 
 [![CI](https://github.com/openpista/openpista/actions/workflows/ci.yml/badge.svg)](https://github.com/openpista/openpista/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/openpista/openpista/graph/badge.svg)](https://codecov.io/gh/openpista/openpista)
@@ -15,9 +15,9 @@
 
 ---
 
-## openpistacrab이란?
+## openpista이란?
 
-openpistacrab은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
+openpista은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
 - 텔레그램에서 메시지를 보내면 → LLM이 무엇을 할지 결정 → bash가 실행 → 결과가 돌아옴
 - 단일 정적 바이너리, ~10 MB, 최소 메모리 사용
@@ -82,7 +82,7 @@ cd openpista
 cargo build --release
 
 # 바이너리를 PATH에 복사
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Ubuntu / Debian
@@ -100,7 +100,7 @@ git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
 
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Fedora / RHEL
@@ -113,7 +113,7 @@ source "$HOME/.cargo/env"
 git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ---
@@ -145,10 +145,10 @@ token = ""           # 또는 TELEGRAM_BOT_TOKEN 환경변수 사용
 enabled = true
 
 [database]
-url = "~/.openpistacrab/memory.db"
+url = "~/.openpista/memory.db"
 
 [skills]
-workspace = "~/.openpistacrab/workspace"
+workspace = "~/.openpista/workspace"
 ```
 
 ### 환경 변수
@@ -168,7 +168,7 @@ workspace = "~/.openpistacrab/workspace"
 ### 단일 명령 실행
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpistacrab run -e "홈 디렉토리의 파일을 나열해줘"
+OPENPISTACRAB_API_KEY=sk-... openpista run -e "홈 디렉토리의 파일을 나열해줘"
 ```
 
 ### 인증 로그인 Picker
@@ -214,13 +214,13 @@ Esc: (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
 ```bash
 OPENPISTACRAB_API_KEY=sk-... \
 TELEGRAM_BOT_TOKEN=123456:ABC... \
-openpistacrab start
+openpista start
 ```
 
 데몬은:
 - 원격 에이전트 연결을 위해 QUIC 포트 `4433`에서 수신 대기
 - 활성화된 모든 채널 어댑터 시작
-- `~/.openpistacrab/openpistacrab.pid`에 PID 파일 저장
+- `~/.openpista/openpista.pid`에 PID 파일 저장
 - 정상 종료를 위한 `SIGTERM` / `Ctrl-C` 처리
 
 ### Skills
@@ -228,7 +228,7 @@ openpistacrab start
 워크스페이스에 `SKILL.md`를 배치하여 에이전트 기능을 확장하세요:
 
 ```
-~/.openpistacrab/workspace/skills/
+~/.openpista/workspace/skills/
 ├── deploy/
 │   ├── SKILL.md      ← 이 skill이 무엇을 하는지 설명
 │   └── run.sh        ← 에이전트가 이 skill을 호출할 때 실행됨
@@ -242,7 +242,7 @@ openpistacrab start
 ## 워크스페이스 구조
 
 ```
-openpistacrab/
+openpista/
 ├── crates/
 │   ├── proto/      # 공유 타입, 에러 (AgentMessage, ToolCall, …)
 │   ├── gateway/    # QUIC 서버, 세션 라우터, 크론 스케줄러

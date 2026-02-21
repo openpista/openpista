@@ -86,9 +86,9 @@
 
 ### CLI 및 설정 (CLI & Configuration)
 
-- [x] `openpistacrab start` — 전체 데몬 (QUIC + 활성화된 모든 채널)
-- [x] `openpistacrab run -e "..."` — 단발성(single-shot) 에이전트 명령
-- [x] `openpistacrab repl` — 세션 지속성을 갖춘 대화형 REPL
+- [x] `openpista start` — 전체 데몬 (QUIC + 활성화된 모든 채널)
+- [x] `openpista run -e "..."` — 단발성(single-shot) 에이전트 명령
+- [x] `openpista repl` — 세션 지속성을 갖춘 대화형 REPL
 - [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
 - [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
 - [x] 중앙 집중식의 랜딩 페이지 스타일 TUI (전용 Home 및 Chat 화면 포함)
