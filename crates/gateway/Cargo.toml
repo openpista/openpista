@@ -10,7 +10,6 @@ async-trait = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = "0.13"
-rustls-pemfile = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -17,7 +17,9 @@ use tokio::sync::mpsc;
 
 use super::app::{AppState, TuiApp};
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
-use crate::config::{LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry};
+use crate::config::{
+    Config, LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry,
+};
 use crate::model_catalog;
 
 const OAUTH_CALLBACK_PORT: u16 = 9009;
@@ -80,15 +82,10 @@ async fn run_oauth_login(
     provider: &str,
     endpoints: &OAuthEndpoints,
     client_id: &str,
+    port: u16,
+    timeout: u64,
 ) -> anyhow::Result<crate::auth::ProviderCredential> {
-    crate::auth::login(
-        provider,
-        endpoints,
-        client_id,
-        OAUTH_CALLBACK_PORT,
-        OAUTH_TIMEOUT_SECS,
-    )
-    .await
+    crate::auth::login(provider, endpoints, client_id, port, timeout).await
 }
 
 #[cfg(test)]
@@ -97,6 +94,8 @@ async fn run_oauth_login(
     _provider: &str,
     endpoints: &OAuthEndpoints,
     client_id: &str,
+    _port: u16,
+    _timeout: u64,
 ) -> anyhow::Result<crate::auth::ProviderCredential> {
     let _ = (
         endpoints.auth_url,
@@ -107,11 +106,19 @@ async fn run_oauth_login(
     anyhow::bail!("OAuth login is not available in tests")
 }
 
-/// Persists authentication data for OAuth/API-key login paths.
-async fn persist_auth(intent: AuthLoginIntent, oauth_client_id: String) -> Result<String, String> {
+pub(crate) async fn build_and_store_credential(
+    config: &Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+) -> Result<String, String> {
     let provider = intent.provider.to_ascii_lowercase();
-    let entry = provider_registry_entry(&provider)
-        .ok_or_else(|| format!("Unknown provider '{provider}'"))?;
+    let entry = provider_registry_entry(&provider).ok_or_else(|| {
+        format!(
+            "Unknown provider '{provider}'. Available providers: {}",
+            crate::config::provider_registry_names()
+        )
+    })?;
     let provider_name = entry.name.to_string();
     let resolved_method = if entry.name == "openai" {
         intent.auth_method
@@ -144,22 +151,21 @@ async fn persist_auth(intent: AuthLoginIntent, oauth_client_id: String) -> Resul
                         "Provider '{provider_name}' is an extension slot and does not yet support runtime OAuth"
                     )
                 })?;
-
                 let endpoints = preset.oauth_endpoints().ok_or_else(|| {
                     format!("Provider '{provider_name}' does not support OAuth login")
                 })?;
 
-                let client_id = oauth_client_id.trim().to_string();
+                let client_id = config.agent.oauth_client_id.trim().to_string();
                 if client_id.is_empty() {
                     return Err(
-                        "No OAuth client ID configured. Set OPENPISTACRAB_OAUTH_CLIENT_ID or agent.oauth_client_id."
+                        "No OAuth client ID configured. Set OPENPISTACRAB_OAUTH_CLIENT_ID."
                             .to_string(),
                     );
                 }
-
-                let credential = run_oauth_login(&provider_name, &endpoints, &client_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let credential =
+                    run_oauth_login(&provider_name, &endpoints, &client_id, port, timeout)
+                        .await
+                        .map_err(|e| e.to_string())?;
                 (
                     credential,
                     format!(
@@ -231,6 +237,16 @@ async fn persist_auth(intent: AuthLoginIntent, oauth_client_id: String) -> Resul
     }
 }
 
+/// Persists authentication data for OAuth/API-key login paths.
+async fn persist_auth(
+    config: Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+) -> Result<String, String> {
+    build_and_store_credential(&config, intent, port, timeout).await
+}
+
 /// RAII guard that restores the terminal on drop (even on panic).
 struct TerminalGuard;
 
@@ -248,7 +264,7 @@ pub async fn run_tui(
     channel_id: ChannelId,
     session_id: SessionId,
     model_name: String,
-    oauth_client_id: String,
+    config: Config,
 ) -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
@@ -377,7 +393,7 @@ pub async fn run_tui(
                         {
                             if intent.provider == "openai"
                                 && intent.auth_method == AuthMethodChoice::OAuth
-                                && oauth_client_id.trim().is_empty()
+                                && config.agent.oauth_client_id.trim().is_empty()
                             {
                                 app.reopen_openai_method_with_error(
                                     "No OAuth client ID configured. Choose API key mode or set OPENPISTACRAB_OAUTH_CLIENT_ID.".to_string(),
@@ -385,9 +401,15 @@ pub async fn run_tui(
                                 app.scroll_to_bottom();
                                 continue;
                             }
-                            let oauth_client_id_for_task = oauth_client_id.clone();
+                            let config_for_task = config.clone();
                             auth_task = Some(tokio::spawn(async move {
-                                persist_auth(intent, oauth_client_id_for_task).await
+                                persist_auth(
+                                    config_for_task,
+                                    intent,
+                                    OAUTH_CALLBACK_PORT,
+                                    OAUTH_TIMEOUT_SECS,
+                                )
+                                .await
                             }));
                         }
                     }
@@ -491,21 +513,34 @@ pub async fn run_tui(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-    use tokio::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Tests that mutate process environment must use `env_lock()` and execute with
+    /// `--test-threads=1` or process-isolated harnesses.
+    ///
+    /// Helper calls are synchronized via `env_lock()` and use `std::env` mutators.
     fn set_env_var(key: &str, value: &str) {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: required for this toolchain's `std::env` API and serialized by
+        // `env_lock()`.
         unsafe {
             std::env::set_var(key, value);
         }
     }
 
+    /// Tests that mutate process environment must use `env_lock()` and execute with
+    /// `--test-threads=1` or process-isolated harnesses.
+    ///
+    /// Helper calls are synchronized via `env_lock()` and use `std::env` mutators.
     fn remove_env_var(key: &str) {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: required for this toolchain's `std::env` API and serialized by
+        // `env_lock()`.
         unsafe {
             std::env::remove_var(key);
         }
@@ -550,7 +585,6 @@ mod tests {
 
     #[tokio::test]
     async fn persist_auth_api_key_saves_credential() {
-        let _guard = env_lock().lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let cred_path = tmp.path().join("credentials.toml");
         set_env_var(
@@ -559,13 +593,15 @@ mod tests {
         );
 
         let result = persist_auth(
+            Config::default(),
             AuthLoginIntent {
                 provider: "together".to_string(),
                 auth_method: AuthMethodChoice::ApiKey,
                 endpoint: None,
                 api_key: Some("tok-together".to_string()),
             },
-            String::new(),
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
         )
         .await;
 
@@ -581,7 +617,6 @@ mod tests {
 
     #[tokio::test]
     async fn persist_auth_endpoint_and_key_saves_endpoint() {
-        let _guard = env_lock().lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let cred_path = tmp.path().join("credentials.toml");
         set_env_var(
@@ -590,13 +625,15 @@ mod tests {
         );
 
         let result = persist_auth(
+            Config::default(),
             AuthLoginIntent {
                 provider: "azure-openai".to_string(),
                 auth_method: AuthMethodChoice::ApiKey,
                 endpoint: Some("https://example.azure.com".to_string()),
                 api_key: Some("tok-azure".to_string()),
             },
-            String::new(),
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
         )
         .await;
 
@@ -613,13 +650,15 @@ mod tests {
     #[tokio::test]
     async fn persist_auth_oauth_requires_client_id() {
         let err = persist_auth(
+            Config::default(),
             AuthLoginIntent {
                 provider: "openai".to_string(),
                 auth_method: AuthMethodChoice::OAuth,
                 endpoint: None,
                 api_key: None,
             },
-            String::new(),
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
         )
         .await
         .expect_err("missing oauth client id should fail");

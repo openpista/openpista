@@ -287,11 +287,12 @@ impl Tool for ContainerTool {
             return ToolResult::error(call_id, self.name(), "command must not be empty");
         }
 
-        if resolve_image(&parsed).is_none() {
+        let image_opt = resolve_image(&parsed);
+        if image_opt.is_none() {
             return ToolResult::error(call_id, self.name(), "image must not be empty");
         }
 
-        if let Some(image) = resolve_image(&parsed) {
+        if let Some(image) = image_opt {
             parsed.image = Some(image);
         }
 

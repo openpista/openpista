@@ -261,8 +261,7 @@ pub fn merge_seed_with_remote(
         .collect();
 
     for remote_id in &remote_set {
-        if let Some(entry) = by_id.get_mut(remote_id) {
-            entry.available = true;
+        if by_id.contains_key(remote_id) {
             continue;
         }
 
@@ -279,8 +278,13 @@ pub fn merge_seed_with_remote(
     }
 
     for entry in by_id.values_mut() {
-        if entry.source == ModelSource::Docs {
-            entry.available = remote_set.contains(&entry.id);
+        match entry.source {
+            ModelSource::Docs => {
+                entry.available = remote_set.contains(&entry.id);
+            }
+            ModelSource::Api => {
+                entry.available = true;
+            }
         }
     }
 

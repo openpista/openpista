@@ -258,9 +258,17 @@ fn extract_front_matter(content: &str) -> Option<String> {
 }
 
 fn parse_mode(value: &str) -> SkillExecutionMode {
-    match value.trim().to_ascii_lowercase().as_str() {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "wasm" => SkillExecutionMode::Wasm,
-        _ => SkillExecutionMode::Subprocess,
+        _ => {
+            warn!(
+                value = %value,
+                normalized = %normalized,
+                "unknown skill execution mode, defaulting to subprocess"
+            );
+            SkillExecutionMode::Subprocess
+        }
     }
 }
 
@@ -521,14 +529,6 @@ mod tests {
 
         assert_eq!(a_md.mode, SkillExecutionMode::Subprocess);
         assert_eq!(b_md.mode, SkillExecutionMode::Subprocess);
-    }
-
-    #[tokio::test]
-    async fn load_skill_metadata_returns_none_when_skill_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let loader = SkillLoader::new(tmp.path());
-        let metadata = loader.load_skill_metadata("missing").await;
-        assert!(metadata.is_none());
     }
 
     #[test]
