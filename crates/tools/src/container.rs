@@ -1569,6 +1569,11 @@ mod tests {
 
     #[tokio::test]
     async fn execute_wasm_skill_path_end_to_end() {
+        if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+            eprintln!("skipping wasm e2e under coverage instrumentation");
+            return;
+        }
+
         let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let skill_dir = repo_root.join("skills/hello-wasm");
         let manifest_path = skill_dir.join("Cargo.toml");
