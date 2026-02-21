@@ -100,7 +100,13 @@ struct ContainerExecution {
 }
 
 impl ContainerTool {
-    /// Creates a new container execution tool instance.
+    /// Constructs a new ContainerTool.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tool = ContainerTool::new();
+    /// ```
     pub fn new() -> Self {
         Self
     }
@@ -122,6 +128,20 @@ impl Tool for ContainerTool {
         "Run a command in an isolated Docker container and return stdout, stderr, and exit code"
     }
 
+    /// Provide the JSON Schema describing valid parameters for the container tool.
+    ///
+    /// The schema enumerates all accepted top-level properties (image, command, skill-related
+    /// fields, resource limits, credential and reporting options, etc.), sets no required fields,
+    /// and disallows additional properties.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tool = ContainerTool::new();
+    /// let schema = tool.parameters_schema();
+    /// // basic sanity check: schema contains a "properties" object
+    /// assert!(schema.get("properties").is_some());
+    /// ```
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -224,6 +244,37 @@ impl Tool for ContainerTool {
         })
     }
 
+    /// Execute a container command or run a WASM skill based on the provided JSON arguments, and return a ToolResult containing either the formatted execution output or an error message.
+    ///
+    /// The function:
+    /// - Deserializes `args` into `ContainerArgs`.
+    /// - Resolves the runtime mode; if the skill metadata indicates WASM mode, it requires `workspace_dir` and `skill_name` and runs the skill via the WASM runtime, returning the skill's output.
+    /// - Otherwise, validates and resolves the container image and command, runs the workload in Docker (or falls back to a local subprocess if allowed), optionally reports the worker result via QUIC, and returns the combined stdout/stderr and exit code.
+    ///
+    /// Parameters:
+    /// - `call_id`: identifier used for container naming, reporting and correlating the execution.
+    /// - `args`: a JSON value conforming to `ContainerArgs` specifying image, command, WASM skill fields, resource limits, and reporting/fallback options.
+    ///
+    /// Returns:
+    /// - On success: a `ToolResult::success` containing the formatted stdout, stderr and exit code.
+    /// - On failure: a `ToolResult::error` containing a diagnostic message describing the failure.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use serde_json::json;
+    /// # use crate::container::ContainerTool;
+    /// # tokio_test::block_on(async {
+    /// let tool = ContainerTool::new();
+    /// let args = json!({
+    ///     "image": "alpine:latest",
+    ///     "command": "echo hello",
+    ///     "timeout_secs": 10
+    /// });
+    /// let res = tool.execute("call-123", args).await;
+    /// // inspect `res` for success or error
+    /// # });
+    /// ```
     async fn execute(&self, call_id: &str, args: serde_json::Value) -> ToolResult {
         let mut parsed: ContainerArgs = match serde_json::from_value(args) {
             Ok(v) => v,
@@ -350,6 +401,55 @@ impl Tool for ContainerTool {
     }
 }
 
+/// Determine whether the provided container arguments should run as a Docker container or as a WASM skill.
+///
+/// If `skill_name` is not provided or is empty, this returns `RuntimeMode::Docker`.
+/// When `skill_name` is present, `workspace_dir` must also be provided; the function loads the skill's metadata
+/// from the workspace and returns `RuntimeMode::Wasm` when the skill's execution mode is WASM, otherwise
+/// it returns `RuntimeMode::Docker`.
+///
+/// # Errors
+///
+/// Returns `Err` if `skill_name` is present but `workspace_dir` is missing or empty, or if the skill metadata
+/// (SKILL.md) cannot be found for the given `skill_name`.
+///
+/// # Examples
+///
+/// ```
+/// # use crate::ContainerArgs;
+/// # use crate::RuntimeMode;
+/// # tokio_test::block_on(async {
+/// let args = ContainerArgs {
+///     skill_name: None,
+///     workspace_dir: None,
+///     image: None,
+///     command: None,
+///     skill_image: None,
+///     skill_args: None,
+///     timeout_secs: None,
+///     working_dir: None,
+///     env: None,
+///     allow_network: None,
+///     workspace_dir: None,
+///     memory_mb: None,
+///     cpu_millis: None,
+///     pull: None,
+///     inject_task_token: None,
+///     token_ttl_secs: None,
+///     token_env_name: None,
+///     report_via_quic: None,
+///     report_timeout_secs: None,
+///     orchestrator_quic_addr: None,
+///     orchestrator_channel_id: None,
+///     orchestrator_session_id: None,
+///     orchestrator_quic_insecure_skip_verify: None,
+///     allow_subprocess_fallback: None,
+/// };
+///
+/// let mode = crate::resolve_runtime_mode(&args).await.unwrap();
+/// assert_eq!(mode, RuntimeMode::Docker);
+/// # });
+/// ```
 async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, String> {
     let Some(skill_name) = args.skill_name.as_deref().and_then(non_empty) else {
         return Ok(RuntimeMode::Docker);
@@ -374,6 +474,15 @@ async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, Strin
     }
 }
 
+/// Trim whitespace and yield the input slice when it contains non-empty content.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(non_empty("  hello  "), Some("hello"));
+/// assert_eq!(non_empty("   "), None);
+/// assert_eq!(non_empty("world"), Some("world"));
+/// ```
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -383,6 +492,39 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
+/// Creates and runs a Docker container from the resolved image and returns its captured output and exit code.
+///
+/// The function resolves the image from `args.image` or `args.skill_image`, validates the command,
+/// optionally pulls the image if `args.pull` is true, and starts a container configured with the
+/// resource limits and mounts derived from `args`. If `credential` is provided it is injected into
+/// the container at the configured secure mount path. The container is removed/cleaned up after
+/// execution completes (or on error).
+///
+/// # Returns
+///
+/// `Ok(ContainerExecution)` containing `stdout`, `stderr`, and `exit_code` on success; `Err(String)` with
+/// a human-readable error message on failure.
+///
+/// # Examples
+///
+/// ```
+/// # tokio_test::block_on(async {
+/// use bollard::Docker;
+/// // Construct a Docker client (adjust connection as appropriate for the environment).
+/// let docker = Docker::connect_with_socket_defaults().unwrap();
+///
+/// let args = crate::ContainerArgs {
+///     image: Some("alpine:latest".into()),
+///     command: Some("echo hello".into()),
+///     ..Default::default()
+/// };
+///
+/// // Run the container and inspect the captured output.
+/// let result = crate::run_container(&docker, "example-container", &args, None).await;
+/// let exec = result.expect("container run failed");
+/// assert!(exec.stdout.contains("hello"));
+/// # });
+/// ```
 async fn run_container(
     docker: &Docker,
     container_name: &str,
@@ -551,6 +693,50 @@ async fn run_container(
     run_result
 }
 
+/// Execute the requested workload using the Docker daemon when available; if Docker is unavailable and
+/// `args.allow_subprocess_fallback` is true, fall back to running the command as a local subprocess.
+///
+/// This function:
+/// - Requires a resolved image when using Docker and returns an error if none is provided.
+/// - May mint a per-task credential (when requested) and uploads it into the container; the credential is
+///   always cleaned up after the run attempt.
+/// - Applies `timeout_duration` to the container execution; on timeout it attempts to clean up the created
+///   container and returns a timeout error.
+/// - When Docker is unavailable and fallback is allowed, runs the command via the local shell with the same
+///   timeout semantics.
+///
+/// # Parameters
+///
+/// - `call_id`: identifier used for container naming and logging.
+/// - `args`: container run arguments and runtime options.
+/// - `timeout_duration`: maximum allowed duration for the workload execution.
+/// - `container_name`: sanitized container name to use when creating the container.
+/// - `docker_result`: the result of attempting to connect to Docker; `Ok` branch runs in Docker, `Err` branch
+///   triggers optional subprocess fallback.
+///
+/// # Returns
+///
+/// `ContainerExecution` on success; an error `String` describing why execution failed otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::time::Duration;
+/// # async fn example() -> Result<(), String> {
+/// let call_id = "call-123";
+/// let args = /* construct ContainerArgs with desired fields */ todo!();
+/// let timeout = Duration::from_secs(30);
+/// let container_name = "call-123-container";
+/// let docker_conn: Result<_, String> = Err("docker connect failed".to_string());
+///
+/// let result = run_with_docker_or_subprocess(call_id, &args, timeout, container_name, docker_conn).await;
+/// match result {
+///     Ok(exec) => println!("exit={} stdout={}", exec.exit_code, exec.stdout),
+///     Err(e) => eprintln!("execution failed: {}", e),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 async fn run_with_docker_or_subprocess(
     call_id: &str,
     args: &ContainerArgs,
@@ -596,6 +782,58 @@ async fn run_with_docker_or_subprocess(
     }
 }
 
+/// Execute the configured command locally as a subprocess when Docker is unavailable.
+///
+/// Attempts to spawn `/bin/sh -c <command>` using the provided `ContainerArgs`, applies
+/// optional working directory and environment entries, enforces the provided timeout,
+/// and captures stdout, stderr, and the process exit code. This fallback does not
+/// enforce Docker resource limits.
+///
+/// # Errors
+///
+/// Returns an `Err(String)` when the command is missing or empty, when environment
+/// entries are malformed, when the subprocess cannot be spawned or run, or when the
+/// execution exceeds `timeout_duration`.
+///
+/// # Examples
+///
+/// ```
+/// # use std::time::Duration;
+/// # use tokio::runtime::Runtime;
+/// # use crate::ContainerArgs;
+/// # use crate::run_as_subprocess;
+/// let rt = Runtime::new().unwrap();
+/// rt.block_on(async {
+///     let args = ContainerArgs {
+///         image: None,
+///         skill_image: None,
+///         command: Some("echo hello".to_string()),
+///         skill_name: None,
+///         skill_args: None,
+///         timeout_secs: None,
+///         working_dir: None,
+///         env: None,
+///         allow_network: None,
+///         workspace_dir: None,
+///         memory_mb: None,
+///         cpu_millis: None,
+///         pull: None,
+///         inject_task_token: None,
+///         token_ttl_secs: None,
+///         token_env_name: None,
+///         report_via_quic: None,
+///         report_timeout_secs: None,
+///         orchestrator_quic_addr: None,
+///         orchestrator_channel_id: None,
+///         orchestrator_session_id: None,
+///         orchestrator_quic_insecure_skip_verify: None,
+///         allow_subprocess_fallback: None,
+///     };
+///     let res = run_as_subprocess(&args, Duration::from_secs(5)).await.unwrap();
+///     assert!(res.stdout.contains("hello"));
+///     assert_eq!(res.exit_code, 0);
+/// });
+/// ```
 async fn run_as_subprocess(
     args: &ContainerArgs,
     timeout_duration: Duration,
@@ -659,6 +897,39 @@ async fn run_as_subprocess(
     })
 }
 
+/// Sends the worker's execution result to an orchestrator over QUIC when reporting is enabled.
+///
+/// This function no-ops when `args.report_via_quic` is false or unset. When reporting is enabled,
+/// it validates required orchestrator fields from `args`, resolves the orchestrator address via DNS,
+/// builds a `WorkerReport` and `ChannelEvent` containing the call metadata and command output, and
+/// submits the event to the orchestrator over a QUIC connection within the provided timeout.
+///
+/// # Errors
+///
+/// Returns an `Err(String)` with a human-readable message if any required orchestrator argument is
+/// missing or empty, DNS resolution fails, report serialization fails, or the QUIC submission fails
+/// or times out.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// # async fn example() {
+/// // Construct `args` and `execution` with the necessary reporting fields set,
+/// // then call the helper. This example uses `no_run` to avoid requiring a running
+/// // orchestrator or full test harness.
+/// let args = unimplemented!(); // ContainerArgs with reporting enabled and orchestrator fields
+/// let execution = unimplemented!(); // ContainerExecution with stdout/stderr/exit_code
+/// let _ = crate::maybe_report_worker_result(
+///     "call-123",
+///     &args,
+///     "container-name",
+///     "registry.example/image:tag",
+///     &execution,
+///     Duration::from_secs(10),
+/// ).await;
+/// # }
+/// ```
 async fn maybe_report_worker_result(
     call_id: &str,
     args: &ContainerArgs,
@@ -961,6 +1232,18 @@ fn is_valid_env_name(name: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+/// Returns the current Unix timestamp in seconds.
+///
+/// Produces the number of seconds elapsed since 1970-01-01 00:00:00 UTC.
+/// Returns an `Err(String)` if the system clock is earlier than the Unix epoch
+/// or another system time error occurs.
+///
+/// # Examples
+///
+/// ```
+/// let ts = unix_now_secs().expect("failed to read system time");
+/// assert!(ts > 0);
+/// ```
 fn unix_now_secs() -> Result<u64, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -968,6 +1251,30 @@ fn unix_now_secs() -> Result<u64, String> {
     Ok(now.as_secs())
 }
 
+/// Prepends credential sourcing to a shell command when a task credential is provided.
+///
+/// When `credential` is `Some`, the returned string first sources the credential file
+/// mounted at the tool's token mount directory and suppresses its output, then runs
+/// the provided `command`. When `credential` is `None`, the original `command` is
+/// returned unchanged.
+///
+/// # Examples
+///
+/// ```
+/// // No credential: command unchanged
+/// let cmd = build_shell_command("echo hello", None);
+/// assert_eq!(cmd, "echo hello");
+///
+/// // With credential: result contains the original command and a sourcing prefix
+/// let cred = TaskCredential {
+///     token: "token".into(),
+///     expires_at_unix: 0,
+///     env_name: "OPENPISTACRAB_TASK_TOKEN".into(),
+/// };
+/// let cmd_with_cred = build_shell_command("echo secret", Some(&cred));
+/// assert!(cmd_with_cred.ends_with("echo secret"));
+/// assert!(cmd_with_cred.starts_with(". "));
+/// ```
 fn build_shell_command(command: &str, credential: Option<&TaskCredential>) -> String {
     if credential.is_some() {
         format!(
@@ -979,6 +1286,26 @@ fn build_shell_command(command: &str, credential: Option<&TaskCredential>) -> St
     }
 }
 
+/// Selects the container image to use from the provided arguments.
+///
+/// Prefers an explicit `args.image` when present and non-empty (after trimming);
+/// otherwise falls back to `args.skill_image` if that is present and non-empty.
+///
+/// # Returns
+///
+/// `Some(String)` containing the chosen image (trimmed), or `None` if neither
+/// field contains a non-empty value.
+///
+/// # Examples
+///
+/// ```
+/// let args = ContainerArgs {
+///     image: Some("  alpine:3.18  ".into()),
+///     skill_image: Some("fallback:latest".into()),
+///     ..Default::default()
+/// };
+/// assert_eq!(resolve_image(&args), Some("alpine:3.18".to_string()));
+/// ```
 fn resolve_image(args: &ContainerArgs) -> Option<String> {
     if let Some(explicit) = args.image.as_deref().map(str::trim)
         && !explicit.is_empty()
@@ -1123,6 +1450,17 @@ mod tests {
 
     use super::*;
 
+    /// Writes `content` to `path`, creating parent directories if they do not exist.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// let tmp = tempfile::tempdir().unwrap();
+    /// let file_path = tmp.path().join("sub/dir/file.txt");
+    /// write_file(&file_path, "hello");
+    /// assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello");
+    /// ```
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent dir");
@@ -1260,6 +1598,17 @@ mod tests {
         );
     }
 
+    /// Create a minimal ContainerArgs preset for tests with the given shell command and a default image of `alpine:3`.
+    ///
+    /// The returned struct has `command` set to the provided value, `image` set to `"alpine:3"`, and all other optional fields left as `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let args = base_args("echo hello");
+    /// assert_eq!(args.image.as_deref(), Some("alpine:3"));
+    /// assert_eq!(args.command.as_deref(), Some("echo hello"));
+    /// ```
     fn base_args(command: &str) -> ContainerArgs {
         ContainerArgs {
             image: Some("alpine:3".to_string()),
@@ -1474,6 +1823,14 @@ mod tests {
         assert!(!result.output.is_empty());
     }
 
+    /// Verifies that a skill with SKILL.md declaring `mode: wasm` is resolved to `RuntimeMode::Wasm`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Given a workspace containing "skills/hello/SKILL.md" with front matter `mode: wasm`,
+    /// // calling `resolve_runtime_mode(&args).await` returns `RuntimeMode::Wasm`.
+    /// ```
     #[tokio::test]
     async fn resolve_runtime_mode_detects_wasm_skill_metadata() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1584,6 +1941,11 @@ mod tests {
         let build = Command::new("cargo")
             .current_dir(&skill_dir)
             .env("CARGO_TARGET_DIR", build_target.path())
+            // Avoid inheriting coverage instrumentation flags when building the wasm fixture.
+            .env_remove("RUSTFLAGS")
+            .env_remove("RUSTDOCFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("LLVM_PROFILE_FILE")
             .args(["build", "--target", "wasm32-wasip1", "--release"])
             .output()
             .await
@@ -1812,6 +2174,20 @@ mod tests {
         assert!(fail.contains("exit_code=1"));
     }
 
+    /// Verifies that worker reporting is skipped when QUIC reporting is not enabled on the args.
+    ///
+    /// The test constructs ContainerArgs without `report_via_quic` and ensures
+    /// `maybe_report_worker_result` completes successfully without attempting to send a report.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Build args with reporting disabled (None)
+    /// let args = ContainerArgs { report_via_quic: None, ..Default::default() };
+    /// let exec = ContainerExecution { stdout: "ok".into(), stderr: "".into(), exit_code: 0 };
+    /// let res = maybe_report_worker_result("call-1", &args, "ctr", "alpine", &exec, Duration::from_secs(10)).await;
+    /// assert!(res.is_ok());
+    /// ```
     #[tokio::test]
     async fn maybe_report_worker_result_skips_when_disabled() {
         let args = ContainerArgs {
