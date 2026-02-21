@@ -50,11 +50,11 @@ impl SkillLoader {
         }
     }
 
-    /// Creates a loader using `OPENPISTACRAB_WORKSPACE` or default workspace path.
+    /// Creates a loader using `openpista_WORKSPACE` or default workspace path.
     pub fn from_env_or_default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let default_workspace = format!("{home}/.openpistacrab/workspace");
-        let workspace = std::env::var("OPENPISTACRAB_WORKSPACE").unwrap_or(default_workspace);
+        let default_workspace = format!("{home}/.openpista/workspace");
+        let workspace = std::env::var("openpista_WORKSPACE").unwrap_or(default_workspace);
         Self::new(workspace)
     }
 

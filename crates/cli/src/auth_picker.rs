@@ -1,5 +1,6 @@
 use crate::config::{
-    LoginAuthMode, ProviderRegistryEntry, provider_registry_entry_ci, provider_registry_for_picker,
+    LoginAuthMode, ProviderCategory, ProviderRegistryEntry, provider_registry_entry_ci,
+    provider_registry_for_picker,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,21 @@ pub fn filtered_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
         .collect()
 }
 
+fn grouped_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
+    let mut runtime = Vec::new();
+    let mut extension = Vec::new();
+
+    for entry in filtered_provider_entries(query) {
+        match entry.category {
+            ProviderCategory::Runtime => runtime.push(entry),
+            ProviderCategory::Extension => extension.push(entry),
+        }
+    }
+
+    runtime.extend(extension);
+    runtime
+}
+
 pub fn provider_step_for_entry(entry: &ProviderRegistryEntry) -> LoginBrowseStep {
     if entry.name == "openai" {
         LoginBrowseStep::SelectMethod
@@ -83,11 +99,31 @@ pub fn api_key_method_for_provider(
 }
 
 #[cfg(not(test))]
-fn category_label(entry: &ProviderRegistryEntry) -> &'static str {
-    match entry.category {
-        crate::config::ProviderCategory::Runtime => "runtime",
-        crate::config::ProviderCategory::Extension => "extension",
+fn truncate_for_width(line: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
     }
+
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= width {
+        return line.to_string();
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let head: String = chars.into_iter().take(width - 3).collect();
+    format!("{head}...")
+}
+
+fn lines_to_crlf(lines: &[String]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out
 }
 
 #[cfg(not(test))]
@@ -130,11 +166,12 @@ struct CliPickerState {
     input_buffer: String,
     masked_buffer: String,
     last_error: Option<String>,
+    config_oauth_client_id: String,
 }
 
 #[cfg(not(test))]
 impl CliPickerState {
-    fn new(seed: Option<&str>) -> Self {
+    fn new(seed: Option<&str>, config_oauth_client_id: String) -> Self {
         Self {
             query: parse_provider_seed(seed),
             cursor: 0,
@@ -145,11 +182,16 @@ impl CliPickerState {
             input_buffer: String::new(),
             masked_buffer: String::new(),
             last_error: None,
+            config_oauth_client_id,
         }
     }
 
+    fn oauth_available_for(&self, provider_name: &str) -> bool {
+        crate::config::oauth_available_for(provider_name, &self.config_oauth_client_id)
+    }
+
     fn providers(&self) -> Vec<ProviderRegistryEntry> {
-        filtered_provider_entries(&self.query)
+        grouped_provider_entries(&self.query)
     }
 
     fn clamp_cursor(&mut self, len: usize) {
@@ -184,36 +226,48 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
 
     let mut out = stdout();
     execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
-
-    println!("┌  Add credential");
-    println!("│");
-
+    let mut lines = vec!["Add credential".to_string(), String::new()];
     match state.step {
         LoginBrowseStep::SelectProvider => {
-            println!("◆  Select provider");
-            println!("│");
-            println!("│  Search: {}", state.query);
+            lines.push("Select provider".to_string());
+            lines.push(format!("Search: {}", state.query));
+            lines.push(String::new());
 
             let providers = state.providers();
             if providers.is_empty() {
-                println!("│  No matches for '{}'.", state.query);
+                lines.push(format!("No matches for '{}'.", state.query));
             } else {
-                let max_rows = 10usize;
-                let end = providers.len().min(max_rows);
-                for (idx, entry) in providers.iter().take(max_rows).enumerate() {
-                    let bullet = if idx == state.cursor { "●" } else { "○" };
-                    println!(
-                        "│  {} {} [{}]",
-                        bullet,
-                        entry.display_name,
-                        category_label(entry)
-                    );
+                lines.push("Runtime".to_string());
+                let mut runtime_count = 0usize;
+                for (idx, entry) in providers.iter().enumerate() {
+                    if !matches!(entry.category, ProviderCategory::Runtime) {
+                        continue;
+                    }
+                    runtime_count += 1;
+                    let marker = if idx == state.cursor { ">" } else { " " };
+                    lines.push(format!("{marker} {}", entry.display_name));
                 }
-                if providers.len() > end {
-                    println!("│  ... ({} more)", providers.len() - end);
+                if runtime_count == 0 {
+                    lines.push("  (none)".to_string());
+                }
+
+                lines.push(String::new());
+                lines.push("Extension".to_string());
+                let mut extension_count = 0usize;
+                for (idx, entry) in providers.iter().enumerate() {
+                    if !matches!(entry.category, ProviderCategory::Extension) {
+                        continue;
+                    }
+                    extension_count += 1;
+                    let marker = if idx == state.cursor { ">" } else { " " };
+                    lines.push(format!("{marker} {}", entry.display_name));
+                }
+                if extension_count == 0 {
+                    lines.push("  (none)".to_string());
                 }
             }
-            println!("│  ↑/↓ to select • Enter: confirm • Type: to search • Esc: cancel");
+            lines.push(String::new());
+            lines.push("Up/Down move | Enter select | Type search | Esc cancel".to_string());
         }
         LoginBrowseStep::SelectMethod => {
             let provider = state
@@ -221,15 +275,15 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|p| p.display_name)
                 .unwrap_or("OpenAI");
-            println!("◆  Select auth method");
-            println!("│");
-            println!("│  Provider: {}", provider);
+            lines.push("Select auth method".to_string());
+            lines.push(format!("Provider: {provider}"));
             let options = [AuthMethodChoice::OAuth, AuthMethodChoice::ApiKey];
             for (idx, choice) in options.iter().enumerate() {
-                let bullet = if idx == state.cursor { "●" } else { "○" };
-                println!("│  {} {}", bullet, choice.label());
+                let marker = if idx == state.cursor { ">" } else { " " };
+                lines.push(format!("{marker} {}", choice.label()));
             }
-            println!("│  ↑/↓ to select • Enter: confirm • Esc: back");
+            lines.push(String::new());
+            lines.push("Up/Down move | Enter select | Esc back".to_string());
         }
         LoginBrowseStep::InputEndpoint => {
             let provider = state
@@ -237,11 +291,11 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|p| p.display_name)
                 .unwrap_or("provider");
-            println!("◆  Enter endpoint");
-            println!("│");
-            println!("│  Provider: {}", provider);
-            println!("│  Endpoint: {}", state.input_buffer);
-            println!("│  Enter: confirm • Type: input • Backspace: delete • Esc: back");
+            lines.push("Enter endpoint".to_string());
+            lines.push(format!("Provider: {provider}"));
+            lines.push(format!("Endpoint: {}", state.input_buffer));
+            lines.push(String::new());
+            lines.push("Type input | Enter confirm | Backspace delete | Esc back".to_string());
         }
         LoginBrowseStep::InputApiKey => {
             let provider = state
@@ -254,23 +308,30 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|p| p.api_key_env)
                 .unwrap_or("API_KEY");
-            println!("◆  Enter API key");
-            println!("│");
-            println!("│  Provider: {}", provider);
+            lines.push("Enter API key".to_string());
+            lines.push(format!("Provider: {provider}"));
             if let Some(endpoint) = &state.endpoint {
-                println!("│  Endpoint: {}", endpoint);
+                lines.push(format!("Endpoint: {endpoint}"));
             }
-            println!("│  {}: {}", env_name, state.masked_buffer);
-            println!("│  Enter: confirm • Type: input • Backspace: delete • Esc: back");
+            lines.push(format!("{env_name}: {}", state.masked_buffer));
+            lines.push(String::new());
+            lines.push("Type input | Enter confirm | Backspace delete | Esc back".to_string());
         }
     }
-
     if let Some(err) = &state.last_error {
-        println!("│");
-        println!("│  Error: {}", err);
+        lines.push(String::new());
+        lines.push(format!("Error: {err}"));
     }
-    println!("└");
 
+    let width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let truncated: Vec<String> = lines
+        .iter()
+        .map(|line| truncate_for_width(line, width))
+        .collect();
+    let payload = lines_to_crlf(&truncated);
+    out.write_all(payload.as_bytes())?;
     out.flush()?;
     Ok(())
 }
@@ -278,6 +339,7 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
 #[cfg(not(test))]
 pub fn run_cli_auth_picker(
     initial_provider_seed: Option<&str>,
+    config_oauth_client_id: String,
 ) -> anyhow::Result<Option<AuthLoginIntent>> {
     use crossterm::{
         cursor::Hide,
@@ -290,7 +352,7 @@ pub fn run_cli_auth_picker(
     execute!(std::io::stdout(), EnterAlternateScreen, Hide)?;
     let _guard = TerminalUiGuard;
 
-    let mut state = CliPickerState::new(initial_provider_seed);
+    let mut state = CliPickerState::new(initial_provider_seed, config_oauth_client_id);
 
     loop {
         if matches!(state.step, LoginBrowseStep::SelectProvider) {
@@ -344,6 +406,13 @@ pub fn run_cli_auth_picker(
                             LoginBrowseStep::InputApiKey => LoginBrowseStep::InputApiKey,
                             LoginBrowseStep::SelectProvider => match selected.auth_mode {
                                 LoginAuthMode::OAuth => {
+                                    if !state.oauth_available_for(selected.name) {
+                                        state.last_error = Some(
+                                            "openpista_OAUTH_CLIENT_ID not set. Set the env var to use browser login.".to_string(),
+                                        );
+                                        state.selected_provider = None;
+                                        continue;
+                                    }
                                     return Ok(Some(AuthLoginIntent {
                                         provider: selected.name.to_string(),
                                         auth_method: AuthMethodChoice::OAuth,
@@ -392,6 +461,13 @@ pub fn run_cli_auth_picker(
                     };
                     state.selected_method = Some(method);
                     if method == AuthMethodChoice::OAuth {
+                        if !state.oauth_available_for(provider.name) {
+                            state.last_error = Some(
+                                "openpista_OAUTH_CLIENT_ID not set. Set the env var or choose API key.".to_string(),
+                            );
+                            state.selected_method = None;
+                            continue;
+                        }
                         return Ok(Some(AuthLoginIntent {
                             provider: provider.name.to_string(),
                             auth_method: AuthMethodChoice::OAuth,
@@ -510,6 +586,84 @@ mod tests {
         assert!(entries.iter().any(|entry| entry.name == "github-copilot"));
         let entries = filtered_provider_entries("OPEN");
         assert!(entries.iter().any(|entry| entry.name == "openai"));
+    }
+
+    #[test]
+    fn grouped_provider_entries_runtime_then_extension_with_order_preserved() {
+        let filtered = filtered_provider_entries("");
+        let grouped = grouped_provider_entries("");
+
+        let expected_runtime: Vec<&str> = filtered
+            .iter()
+            .filter(|entry| matches!(entry.category, ProviderCategory::Runtime))
+            .map(|entry| entry.name)
+            .collect();
+        let expected_extension: Vec<&str> = filtered
+            .iter()
+            .filter(|entry| matches!(entry.category, ProviderCategory::Extension))
+            .map(|entry| entry.name)
+            .collect();
+
+        let actual_runtime: Vec<&str> = grouped
+            .iter()
+            .filter(|entry| matches!(entry.category, ProviderCategory::Runtime))
+            .map(|entry| entry.name)
+            .collect();
+        let actual_extension: Vec<&str> = grouped
+            .iter()
+            .filter(|entry| matches!(entry.category, ProviderCategory::Extension))
+            .map(|entry| entry.name)
+            .collect();
+
+        assert_eq!(actual_runtime, expected_runtime);
+        assert_eq!(actual_extension, expected_extension);
+
+        let first_extension = grouped
+            .iter()
+            .position(|entry| matches!(entry.category, ProviderCategory::Extension))
+            .unwrap_or(grouped.len());
+        assert!(
+            grouped[..first_extension]
+                .iter()
+                .all(|entry| matches!(entry.category, ProviderCategory::Runtime))
+        );
+        assert!(
+            grouped[first_extension..]
+                .iter()
+                .all(|entry| matches!(entry.category, ProviderCategory::Extension))
+        );
+    }
+
+    #[test]
+    fn grouped_provider_entries_with_query_keeps_groups_and_matches() {
+        let grouped = grouped_provider_entries("open");
+        assert!(!grouped.is_empty());
+        assert!(
+            grouped
+                .iter()
+                .all(|entry| provider_matches_query(entry, "open"))
+        );
+
+        let first_extension = grouped
+            .iter()
+            .position(|entry| matches!(entry.category, ProviderCategory::Extension))
+            .unwrap_or(grouped.len());
+        assert!(
+            grouped[..first_extension]
+                .iter()
+                .all(|entry| matches!(entry.category, ProviderCategory::Runtime))
+        );
+        assert!(
+            grouped[first_extension..]
+                .iter()
+                .all(|entry| matches!(entry.category, ProviderCategory::Extension))
+        );
+    }
+
+    #[test]
+    fn lines_to_crlf_uses_crlf_line_endings() {
+        let lines = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(lines_to_crlf(&lines), "alpha\r\nbeta\r\n");
     }
 
     #[test]

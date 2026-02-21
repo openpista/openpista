@@ -17,7 +17,7 @@
 
 ## openpista이란?
 
-openpistacrab은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, WhatsApp)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
+openpista은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, WhatsApp)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
 - 텔레그램에서 메시지를 보내면 → LLM이 무엇을 할지 결정 → bash가 실행 → 결과가 돌아옴
 - 단일 정적 바이너리, ~10 MB, 최소 메모리 사용
@@ -134,7 +134,7 @@ tls_cert = ""        # 비워두면 자체 서명 인증서 자동 생성
 [agent]
 provider = "openai"
 model = "gpt-4o"
-api_key = ""         # 또는 OPENPISTACRAB_API_KEY 환경변수 사용
+api_key = ""         # 또는 openpista_API_KEY 환경변수 사용
 max_tool_rounds = 10
 
 [channels.telegram]
@@ -155,11 +155,11 @@ workspace = "~/.openpista/workspace"
 
 | 변수 | 설명 |
 |---|---|
-| `OPENPISTACRAB_API_KEY` | OpenAI 호환 API 키 (설정 파일 덮어씀) |
+| `openpista_API_KEY` | OpenAI 호환 API 키 (설정 파일 덮어씀) |
 | `OPENAI_API_KEY` | 대체 API 키 |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (텔레그램 채널 활성화) |
-| `OPENPISTACRAB_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
+| `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
 
 ---
 
@@ -168,7 +168,7 @@ workspace = "~/.openpista/workspace"
 ### 단일 명령 실행
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpista run -e "홈 디렉토리의 파일을 나열해줘"
+openpista_API_KEY=sk-... openpista run -e "홈 디렉토리의 파일을 나열해줘"
 ```
 
 ### 인증 로그인 Picker
@@ -212,7 +212,7 @@ Esc: (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
 ### 데몬 모드 (텔레그램 + CLI + QUIC 게이트웨이)
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... \
+openpista_API_KEY=sk-... \
 TELEGRAM_BOT_TOKEN=123456:ABC... \
 openpista start
 ```

@@ -19,7 +19,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ## What is openpista?
 
-openpistacrab is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI,WhatApp) to your **operating system** via an AI agent loop.
+openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI,WhatApp) to your **operating system** via an AI agent loop.
 
 - Send a message in Telegram → the LLM decides what to do → bash runs it → reply comes back
 - Single static binary, ~10 MB, minimal memory footprint
@@ -137,7 +137,7 @@ tls_cert = ""        # Leave empty to auto-generate a self-signed cert
 [agent]
 provider = "openai"
 model = "gpt-4o"
-api_key = ""         # Or set OPENPISTACRAB_API_KEY env var
+api_key = ""         # Or set openpista_API_KEY env var
 max_tool_rounds = 10
 
 [channels.telegram]
@@ -158,11 +158,11 @@ workspace = "~/.openpista/workspace"
 
 | Variable | Description |
 |---|---|
-| `OPENPISTACRAB_API_KEY` | OpenAI-compatible API key (overrides config) |
+| `openpista_API_KEY` | OpenAI-compatible API key (overrides config) |
 | `OPENAI_API_KEY` | Fallback API key |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (enables Telegram channel) |
-| `OPENPISTACRAB_WORKSPACE` | Custom skills workspace path |
+| `openpista_WORKSPACE` | Custom skills workspace path |
 
 ---
 
@@ -171,7 +171,7 @@ workspace = "~/.openpista/workspace"
 ### Run a single command
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpista run -e "list files in my home directory"
+openpista_API_KEY=sk-... openpista run -e "list files in my home directory"
 ```
 
 ### Auth Login Picker
@@ -214,7 +214,7 @@ Esc: exit search mode (first) or close browser
 ### Daemon mode (Telegram + CLI + QUIC gateway)
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... \
+openpista_API_KEY=sk-... \
 TELEGRAM_BOT_TOKEN=123456:ABC... \
 openpista start
 ```

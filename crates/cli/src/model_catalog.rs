@@ -136,13 +136,13 @@ pub fn seed_models() -> Vec<ModelCatalogEntry> {
 }
 
 pub fn default_cache_path() -> PathBuf {
-    if let Ok(path) = std::env::var("OPENPISTACRAB_MODELS_CACHE_PATH") {
+    if let Ok(path) = std::env::var("openpista_MODELS_CACHE_PATH") {
         return PathBuf::from(path);
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
-        .join(".openpistacrab")
+        .join(".openpista")
         .join("cache")
         .join("models")
         .join("opencode.json")

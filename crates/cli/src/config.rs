@@ -11,6 +11,25 @@ pub struct OAuthEndpoints {
     pub token_url: &'static str,
     /// Space-separated OAuth scopes to request.
     pub scope: &'static str,
+    /// Built-in public client ID (PKCE — not secret).
+    /// Users can override via `oauth_client_id` config or `openpista_OAUTH_CLIENT_ID`.
+    pub default_client_id: Option<&'static str>,
+    /// Default local callback port registered with the OAuth provider.
+    /// `None` means use the globally configured port.
+    pub default_callback_port: Option<u16>,
+}
+
+impl OAuthEndpoints {
+    /// Returns the effective client ID: user config takes priority, then built-in default.
+    /// Returns `None` if neither is available.
+    pub fn effective_client_id<'a>(&'a self, configured: &'a str) -> Option<&'a str> {
+        let trimmed = configured.trim();
+        if !trimmed.is_empty() {
+            Some(trimmed)
+        } else {
+            self.default_client_id
+        }
+    }
 }
 
 /// Known LLM provider presets.
@@ -230,15 +249,19 @@ impl ProviderPreset {
     pub fn oauth_endpoints(&self) -> Option<OAuthEndpoints> {
         match self {
             Self::OpenAi => Some(OAuthEndpoints {
-                auth_url: "https://auth.openai.com/authorize",
+                auth_url: "https://auth.openai.com/oauth/authorize",
                 token_url: "https://auth.openai.com/oauth/token",
-                scope: "openid email profile",
+                scope: "openid profile email offline_access",
+                default_client_id: Some("app_EMoamEEZ73f0CkXaXp7hrann"),
+                default_callback_port: Some(1455),
             }),
             Self::GlueGoogle => None,
             Self::OpenRouter => Some(OAuthEndpoints {
                 auth_url: "https://openrouter.ai/auth",
                 token_url: "https://openrouter.ai/api/v1/auth/keys",
                 scope: "",
+                default_client_id: None,
+                default_callback_port: None,
             }),
             Self::OpenCode => None,
             _ => None,
@@ -271,7 +294,7 @@ impl ProviderPreset {
         };
 
         let endpoint_env = if matches!(self, Self::Custom) {
-            Some("OPENPISTACRAB_BASE_URL")
+            Some("openpista_BASE_URL")
         } else {
             None
         };
@@ -455,6 +478,20 @@ impl std::str::FromStr for ProviderPreset {
     }
 }
 
+/// Returns true if OAuth login is available for the given provider name.
+/// Checks user-configured client ID first, then provider's built-in default.
+pub fn oauth_available_for(provider_name: &str, config_client_id: &str) -> bool {
+    if !config_client_id.trim().is_empty() {
+        return true;
+    }
+    provider_name
+        .parse::<ProviderPreset>()
+        .ok()
+        .and_then(|p| p.oauth_endpoints())
+        .and_then(|e| e.default_client_id)
+        .is_some()
+}
+
 /// Agent model/provider config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -473,9 +510,9 @@ pub struct AgentConfig {
     /// Explicit API base URL. Overrides the preset URL when non-empty.
     /// Required for `provider = "custom"`; optional for others.
     pub base_url: Option<String>,
-    /// OAuth 2.0 client ID for `openpistacrab auth login`.
+    /// OAuth 2.0 client ID for `openpista auth login`.
     /// Must be registered with the provider. Also read from
-    /// `OPENPISTACRAB_OAUTH_CLIENT_ID` environment variable.
+    /// `openpista_OAUTH_CLIENT_ID` environment variable.
     #[serde(default)]
     pub oauth_client_id: String,
 }
@@ -582,7 +619,7 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
-            url: format!("{home}/.openpistacrab/memory.db"),
+            url: format!("{home}/.openpista/memory.db"),
         }
     }
 }
@@ -598,7 +635,7 @@ impl Default for SkillsConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
-            workspace: format!("{home}/.openpistacrab/workspace"),
+            workspace: format!("{home}/.openpista/workspace"),
         }
     }
 }
@@ -614,7 +651,7 @@ impl Config {
             }
             let home = std::env::var("HOME").ok()?;
             let home_config = PathBuf::from(home)
-                .join(".openpistacrab")
+                .join(".openpista")
                 .join("config.toml");
             if home_config.exists() {
                 return Some(home_config);
@@ -630,24 +667,24 @@ impl Config {
         };
 
         // Environment variable overrides (highest priority → lowest)
-        if let Ok(key) = std::env::var("OPENPISTACRAB_API_KEY") {
+        if let Ok(key) = std::env::var("openpista_API_KEY") {
             config.agent.api_key = key;
         }
-        if let Ok(model) = std::env::var("OPENPISTACRAB_MODEL") {
+        if let Ok(model) = std::env::var("openpista_MODEL") {
             config.agent.model = model;
         }
         if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
             config.channels.telegram.token = token;
             config.channels.telegram.enabled = true;
         }
-        if let Ok(client_id) = std::env::var("OPENPISTACRAB_OAUTH_CLIENT_ID") {
+        if let Ok(client_id) = std::env::var("openpista_OAUTH_CLIENT_ID") {
             config.agent.oauth_client_id = client_id;
         }
-        if let Ok(token) = std::env::var("OPENPISTACRAB_MOBILE_TOKEN") {
+        if let Ok(token) = std::env::var("openpista_MOBILE_TOKEN") {
             config.channels.mobile.api_token = token;
             config.channels.mobile.enabled = true;
         }
-        if let Ok(workspace) = std::env::var("OPENPISTACRAB_WORKSPACE") {
+        if let Ok(workspace) = std::env::var("openpista_WORKSPACE") {
             config.skills.workspace = workspace;
         }
 
@@ -657,8 +694,8 @@ impl Config {
     /// Resolves the API key to use for the configured provider.
     ///
     /// Priority:
-    /// 1. `agent.api_key` in config file (or `OPENPISTACRAB_API_KEY` applied at load time)
-    /// 2. Valid (non-expired) token stored by `openpistacrab auth login`
+    /// 1. `agent.api_key` in config file (or `openpista_API_KEY` applied at load time)
+    /// 2. Valid (non-expired) token stored by `openpista auth login`
     /// 3. Provider-specific environment variable (e.g. `TOGETHER_API_KEY`)
     /// 4. `OPENAI_API_KEY` (legacy fallback)
     pub fn resolve_api_key(&self) -> String {
@@ -869,7 +906,7 @@ token = "tg-token"
 enabled = false
 
 [database]
-url = "/tmp/openpistacrab-test.db"
+url = "/tmp/openpista-test.db"
 
 [skills]
 workspace = "/tmp/workspace"
@@ -893,7 +930,7 @@ workspace = "/tmp/workspace"
             assert!(cfg.channels.telegram.enabled);
             assert_eq!(cfg.channels.telegram.token, "tg-token");
             assert!(!cfg.channels.cli.enabled);
-            assert_eq!(cfg.database.url, "/tmp/openpistacrab-test.db");
+            assert_eq!(cfg.database.url, "/tmp/openpista-test.db");
             assert_eq!(cfg.skills.workspace, "/tmp/workspace");
         });
     }
@@ -971,12 +1008,12 @@ api_key = "tg-key"
     #[test]
     fn load_applies_env_overrides_for_agent_and_channels() {
         with_locked_env(|| {
-            set_env_var("OPENPISTACRAB_API_KEY", "env-api");
-            set_env_var("OPENPISTACRAB_MODEL", "env-model");
+            set_env_var("openpista_API_KEY", "env-api");
+            set_env_var("openpista_MODEL", "env-model");
             set_env_var("TELEGRAM_BOT_TOKEN", "env-tg-token");
-            set_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID", "env-client-id");
-            set_env_var("OPENPISTACRAB_MOBILE_TOKEN", "env-mobile-token");
-            set_env_var("OPENPISTACRAB_WORKSPACE", "/tmp/env-workspace");
+            set_env_var("openpista_OAUTH_CLIENT_ID", "env-client-id");
+            set_env_var("openpista_MOBILE_TOKEN", "env-mobile-token");
+            set_env_var("openpista_WORKSPACE", "/tmp/env-workspace");
 
             let cfg = Config::load(None).expect("config load");
             assert_eq!(cfg.agent.api_key, "env-api");
@@ -988,19 +1025,19 @@ api_key = "tg-key"
             assert_eq!(cfg.channels.mobile.api_token, "env-mobile-token");
             assert_eq!(cfg.skills.workspace, "/tmp/env-workspace");
 
-            remove_env_var("OPENPISTACRAB_API_KEY");
-            remove_env_var("OPENPISTACRAB_MODEL");
+            remove_env_var("openpista_API_KEY");
+            remove_env_var("openpista_MODEL");
             remove_env_var("TELEGRAM_BOT_TOKEN");
-            remove_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID");
-            remove_env_var("OPENPISTACRAB_MOBILE_TOKEN");
-            remove_env_var("OPENPISTACRAB_WORKSPACE");
+            remove_env_var("openpista_OAUTH_CLIENT_ID");
+            remove_env_var("openpista_MOBILE_TOKEN");
+            remove_env_var("openpista_WORKSPACE");
         });
     }
 
     #[test]
     fn resolve_api_key_uses_provider_specific_env_then_legacy_fallback() {
         with_locked_env(|| {
-            remove_env_var("OPENPISTACRAB_API_KEY");
+            remove_env_var("openpista_API_KEY");
             remove_env_var("TOGETHER_API_KEY");
             remove_env_var("OPENAI_API_KEY");
 
@@ -1022,7 +1059,7 @@ api_key = "tg-key"
     #[test]
     fn resolve_api_key_uses_opencode_env() {
         with_locked_env(|| {
-            remove_env_var("OPENPISTACRAB_API_KEY");
+            remove_env_var("openpista_API_KEY");
             remove_env_var("OPENCODE_API_KEY");
             remove_env_var("OPENAI_API_KEY");
 

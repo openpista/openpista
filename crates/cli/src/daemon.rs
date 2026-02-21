@@ -17,12 +17,12 @@ impl PidFile {
         Self { path: path.into() }
     }
 
-    /// Returns the default PID file path under `~/.openpistacrab/`.
+    /// Returns the default PID file path under `~/.openpista/`.
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home)
-            .join(".openpistacrab")
-            .join("openpistacrab.pid")
+            .join(".openpista")
+            .join("openpista.pid")
     }
 
     pub async fn write(&self) -> std::io::Result<()> {
@@ -74,17 +74,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_path_points_to_openpistacrab_pid() {
+    fn default_path_points_to_openpista_pid() {
         let path = PidFile::default_path();
         let text = path.to_string_lossy();
-        assert!(text.contains(".openpistacrab"));
-        assert!(text.ends_with("openpistacrab.pid"));
+        assert!(text.contains(".openpista"));
+        assert!(text.ends_with("openpista.pid"));
     }
 
     #[tokio::test]
     async fn write_and_remove_pid_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let pid_path = tmp.path().join("nested/openpistacrab.pid");
+        let pid_path = tmp.path().join("nested/openpista.pid");
         let pid_file = PidFile::new(&pid_path);
 
         pid_file.write().await.expect("pid write");

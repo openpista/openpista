@@ -5,7 +5,7 @@
 //! 2. It builds the authorization URL and opens the browser.
 //! 3. A one-shot local HTTP server receives the OAuth redirect callback.
 //! 4. The authorization code is exchanged for tokens at the token endpoint.
-//! 5. Credentials are persisted to `~/.openpistacrab/credentials.toml`.
+//! 5. Credentials are persisted to `~/.openpista/credentials.toml`.
 
 #[cfg(not(test))]
 use crate::config::OAuthEndpoints;
@@ -41,7 +41,7 @@ impl ProviderCredential {
     }
 }
 
-/// All provider credentials, backed by `~/.openpistacrab/credentials.toml`.
+/// All provider credentials, backed by `~/.openpista/credentials.toml`.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Credentials {
     #[serde(flatten)]
@@ -53,7 +53,7 @@ impl Credentials {
     pub fn path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home)
-            .join(".openpistacrab")
+            .join(".openpista")
             .join("credentials.toml")
     }
 
@@ -79,7 +79,7 @@ impl Credentials {
         Ok(())
     }
 
-    /// Persists credentials to the default path (`~/.openpistacrab/credentials.toml`).
+    /// Persists credentials to the default path (`~/.openpista/credentials.toml`).
     #[cfg(not(test))]
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&Self::path())
@@ -333,11 +333,12 @@ pub async fn login(
     let code_verifier = generate_code_verifier();
     let code_challenge = compute_code_challenge(&code_verifier);
     let state = generate_state();
-    let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
+    let redirect_uri = format!("http://localhost:{callback_port}/auth/callback");
 
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}\
-         &code_challenge={}&code_challenge_method=S256&state={}",
+         &code_challenge={}&code_challenge_method=S256&state={}\
+         &id_token_add_organizations=true&codex_cli_simplified_flow=true",
         endpoints.auth_url,
         percent_encode(client_id),
         percent_encode(&redirect_uri),

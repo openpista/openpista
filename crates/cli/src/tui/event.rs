@@ -172,15 +172,15 @@ async fn build_and_store_credential_with_path(
                     format!("Provider '{provider_name}' does not support OAuth login")
                 })?;
 
-                let client_id = config.agent.oauth_client_id.trim().to_string();
-                if client_id.is_empty() {
-                    return Err(
-                        "No OAuth client ID configured. Set OPENPISTACRAB_OAUTH_CLIENT_ID."
-                            .to_string(),
-                    );
-                }
+                let client_id = endpoints
+                    .effective_client_id(&config.agent.oauth_client_id)
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        "No OAuth client ID configured. Set openpista_OAUTH_CLIENT_ID environment variable or add oauth_client_id to [agent] in config.toml.".to_string()
+                    })?;
+                let effective_port = endpoints.default_callback_port.unwrap_or(port);
                 let credential =
-                    run_oauth_login(&provider_name, &endpoints, &client_id, port, timeout)
+                    run_oauth_login(&provider_name, &endpoints, &client_id, effective_port, timeout)
                         .await
                         .map_err(|e| e.to_string())?;
                 (
@@ -419,13 +419,21 @@ pub async fn run_tui(
                         if auth_task.is_none()
                             && let Some(intent) = app.take_pending_auth_intent()
                         {
-                            if intent.provider == "openai"
-                                && intent.auth_method == AuthMethodChoice::OAuth
-                                && config.agent.oauth_client_id.trim().is_empty()
+                            if intent.auth_method == AuthMethodChoice::OAuth
+                                && !crate::config::oauth_available_for(
+                                    &intent.provider,
+                                    &config.agent.oauth_client_id,
+                                )
                             {
-                                app.reopen_openai_method_with_error(
-                                    "No OAuth client ID configured. Choose API key mode or set OPENPISTACRAB_OAUTH_CLIENT_ID.".to_string(),
-                                );
+                                if intent.provider == "openai" {
+                                    app.reopen_openai_method_with_error(
+                                        "No OAuth client ID configured. Choose API key mode or set openpista_OAUTH_CLIENT_ID.".to_string(),
+                                    );
+                                } else {
+                                    app.reopen_provider_selection_with_error(
+                                        "No OAuth client ID configured. Set openpista_OAUTH_CLIENT_ID to use browser login.".to_string(),
+                                    );
+                                }
                                 app.scroll_to_bottom();
                                 continue;
                             }

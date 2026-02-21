@@ -12,7 +12,7 @@ use crate::{
     tool_registry::ToolRegistry,
 };
 
-const DEFAULT_SYSTEM_PROMPT: &str = r#"You are openpistacrab, an OS Gateway AI Agent.
+const DEFAULT_SYSTEM_PROMPT: &str = r#"You are openpista, an OS Gateway AI Agent.
 You can interact with the operating system through available tools.
 Be helpful, concise, and safe. Always confirm before running potentially destructive commands."#;
 

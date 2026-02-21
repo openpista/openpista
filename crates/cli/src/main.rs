@@ -240,7 +240,7 @@ async fn build_runtime(
     // LLM provider
     let api_key = config.resolve_api_key();
     if api_key.is_empty() {
-        warn!("No API key configured. Set OPENPISTACRAB_API_KEY or OPENAI_API_KEY.");
+        warn!("No API key configured. Set openpista_API_KEY or OPENAI_API_KEY.");
     }
 
     let model = config.agent.effective_model().to_string();
@@ -260,7 +260,7 @@ async fn build_runtime(
 #[cfg(not(test))]
 /// Starts daemon mode with enabled channel adapters.
 async fn cmd_start(config: Config) -> anyhow::Result<()> {
-    info!("Starting openpistacrab daemon");
+    info!("Starting openpista daemon");
 
     let report_host = config.gateway.report_host.as_deref().unwrap_or("127.0.0.1");
     let report_addr = format!("{report_host}:{}", config.gateway.port);
@@ -436,7 +436,7 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     }
 
     pid_file.remove().await;
-    info!("openpistacrab stopped");
+    info!("openpista stopped");
     Ok(())
 }
 
@@ -558,7 +558,7 @@ async fn cmd_auth_login(
         let resolved_api_key = api_key
             .filter(|value| !value.trim().is_empty())
             .or_else(|| lookup_env(entry.api_key_env))
-            .or_else(|| lookup_env("OPENPISTACRAB_API_KEY"));
+            .or_else(|| lookup_env("openpista_API_KEY"));
 
         let resolved_endpoint = endpoint
             .filter(|value| !value.trim().is_empty())
@@ -599,7 +599,7 @@ async fn cmd_auth_login(
             LoginAuthMode::ApiKey => {
                 let api_key = resolved_api_key.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Provider '{}' requires API key. Set --api-key, {}, or OPENPISTACRAB_API_KEY.",
+                        "Provider '{}' requires API key. Set --api-key, {}, or openpista_API_KEY.",
                         entry.name,
                         entry.api_key_env
                     )
@@ -618,10 +618,13 @@ async fn cmd_auth_login(
                     AuthMethodChoice::OAuth
                 };
                 if method == AuthMethodChoice::OAuth
-                    && config.agent.oauth_client_id.trim().is_empty()
+                    && !crate::config::oauth_available_for(
+                        entry.name,
+                        &config.agent.oauth_client_id,
+                    )
                 {
                     anyhow::bail!(
-                        "No OAuth client ID configured for '{}'. Set OPENPISTACRAB_OAUTH_CLIENT_ID or provide --api-key for API-key fallback.",
+                        "No OAuth client ID configured for '{}'. Set openpista_OAUTH_CLIENT_ID or provide --api-key for API-key fallback.",
                         entry.name
                     );
                 }
@@ -634,7 +637,10 @@ async fn cmd_auth_login(
             }
         }
     } else {
-        let intent = auth_picker::run_cli_auth_picker(provider.as_deref())?;
+        let intent = auth_picker::run_cli_auth_picker(
+            provider.as_deref(),
+            config.agent.oauth_client_id.clone(),
+        )?;
         let Some(intent) = intent else {
             println!("Login cancelled.");
             return Ok(());
@@ -677,7 +683,7 @@ fn cmd_auth_logout(provider: String) -> anyhow::Result<()> {
 fn cmd_auth_status() -> anyhow::Result<()> {
     let creds = auth::Credentials::load();
     if creds.providers.is_empty() {
-        println!("No stored credentials. Run `openpistacrab auth login` to authenticate.");
+        println!("No stored credentials. Run `openpista auth login` to authenticate.");
         return Ok(());
     }
     println!(
