@@ -1,8 +1,10 @@
 //! CLI entrypoint and subcommand orchestration.
 
 mod auth;
+mod auth_picker;
 mod config;
 mod daemon;
+mod model_catalog;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -13,6 +15,8 @@ use std::net::SocketAddr;
 #[cfg(not(test))]
 use std::sync::Arc;
 
+#[cfg(not(test))]
+use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 #[cfg(not(test))]
 use agent::{AgentRuntime, OpenAiProvider, SqliteMemory, ToolRegistry};
 #[cfg(not(test))]
@@ -32,17 +36,6 @@ use tools::{
 use tracing::{error, info, warn};
 #[cfg(not(test))]
 use tracing_subscriber::{EnvFilter, fmt};
-
-/// Parsed REPL line classification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ReplInput {
-    /// Empty or whitespace-only input line.
-    Empty,
-    /// Exit command (`/quit` or `/exit`).
-    Exit,
-    /// Normal user message content.
-    Message(String),
-}
 
 /// Top-level command-line arguments for the openpista application.
 #[derive(Parser)]
@@ -77,8 +70,11 @@ enum Commands {
         exec: String,
     },
 
-    /// Start interactive REPL session
-    Repl,
+    /// Browse model catalog entries
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommands,
+    },
 
     /// Manage provider credentials via OAuth 2.0 PKCE browser login
     Auth {
@@ -87,14 +83,29 @@ enum Commands {
     },
 }
 
+/// `models` sub-subcommands.
+#[derive(Subcommand)]
+enum ModelsCommands {
+    /// List recommended coding models
+    List,
+}
+
 /// `auth` sub-subcommands.
 #[derive(Subcommand)]
 enum AuthCommands {
     /// Authenticate with a provider via browser-based OAuth PKCE flow
     Login {
-        /// Provider to authenticate with (openai, openrouter)
-        #[arg(short, long, default_value = "openai")]
-        provider: String,
+        /// Provider to authenticate with
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// API key value to persist for API-key or fallback auth modes
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Endpoint value for endpoint+key providers (azure-openai, custom, etc.)
+        #[arg(long)]
+        endpoint: Option<String>,
 
         /// Local port for the OAuth callback server
         #[arg(long, default_value_t = 9009)]
@@ -103,6 +114,10 @@ enum AuthCommands {
         /// Seconds to wait for the browser authorization before timing out
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+
+        /// Skip interactive picker and require flags/env inputs only
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
 
     /// Remove stored credentials for a provider
@@ -150,13 +165,27 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui => cmd_tui(config).await,
         Commands::Start => cmd_start(config).await,
         Commands::Run { exec } => cmd_run(config, exec).await,
-        Commands::Repl => cmd_repl(config).await,
+        Commands::Models { command } => cmd_models(command).await,
         Commands::Auth { command } => match command {
             AuthCommands::Login {
                 provider,
+                api_key,
+                endpoint,
                 port,
                 timeout,
-            } => cmd_auth_login(config, provider, port, timeout).await,
+                non_interactive,
+            } => {
+                cmd_auth_login(
+                    config,
+                    provider,
+                    api_key,
+                    endpoint,
+                    port,
+                    timeout,
+                    non_interactive,
+                )
+                .await
+            }
             AuthCommands::Logout { provider } => cmd_auth_logout(provider),
             AuthCommands::Status => cmd_auth_status(),
         },
@@ -172,7 +201,15 @@ async fn cmd_tui(config: Config) -> anyhow::Result<()> {
     let session_id = SessionId::new();
     let model_name = config.agent.effective_model().to_string();
 
-    tui::run_tui(runtime, skill_loader, channel_id, session_id, model_name).await
+    tui::run_tui(
+        runtime,
+        skill_loader,
+        channel_id,
+        session_id,
+        model_name,
+        config.agent.oauth_client_id.clone(),
+    )
+    .await
 }
 
 #[cfg(not(test))]
@@ -431,98 +468,278 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
-/// Runs interactive REPL mode.
-async fn cmd_repl(config: Config) -> anyhow::Result<()> {
-    let runtime = build_runtime(&config, None).await?;
-    let skill_loader = SkillLoader::new(&config.skills.workspace);
+async fn cmd_models(command: ModelsCommands) -> anyhow::Result<()> {
+    match command {
+        ModelsCommands::List => {
+            let catalog = model_catalog::load_opencode_catalog(false).await;
+            let summary = model_catalog::model_summary(&catalog.entries, "", false);
+            let sections = model_catalog::model_sections(&catalog.entries, "", false);
 
-    let channel_id = ChannelId::new("cli", "repl");
-    let session_id = SessionId::new();
+            println!(
+                "Models | provider:{} | total:{} | matched:{} | recommended:{} | available:{}",
+                catalog.provider,
+                summary.total,
+                summary.matched,
+                summary.recommended,
+                summary.available
+            );
+            println!("{}", catalog.sync_status);
+            println!();
 
-    println!("openpistacrab REPL (session: {})", session_id);
-    println!("Type /quit to exit\n");
-
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
-
-    loop {
-        stdout.write_all(b"> ").await?;
-        stdout.flush().await?;
-
-        match reader.next_line().await? {
-            None => break,
-            Some(line) => {
-                let line = match parse_repl_input(&line) {
-                    ReplInput::Empty => continue,
-                    ReplInput::Exit => break,
-                    ReplInput::Message(text) => text,
-                };
-
-                let skills_ctx = skill_loader.load_context().await;
-
-                match runtime
-                    .process(&channel_id, &session_id, &line, Some(&skills_ctx))
-                    .await
-                {
-                    Ok(text) => {
-                        println!("\n{text}\n");
-                    }
-                    Err(e) => {
-                        eprintln!("\nError: {e}\n");
-                    }
-                }
-            }
+            print_model_section("Recommended + Available", &sections.recommended_available);
+            print_model_section(
+                "Recommended + Unavailable",
+                &sections.recommended_unavailable,
+            );
         }
     }
 
-    println!("Goodbye!");
     Ok(())
 }
 
 #[cfg(not(test))]
-/// Runs the OAuth PKCE login flow for `provider` and persists the token.
+fn print_model_section(title: &str, entries: &[model_catalog::ModelCatalogEntry]) {
+    println!("{title} ({})", entries.len());
+    for entry in entries {
+        println!(
+            "- {}  [status:{}]  [available:{}]  [source:{}]",
+            entry.id,
+            entry.status.as_str(),
+            if entry.available { "yes" } else { "no" },
+            entry.source.as_str()
+        );
+    }
+    println!();
+}
+
+#[cfg(not(test))]
 async fn cmd_auth_login(
     config: Config,
-    provider: String,
+    provider: Option<String>,
+    api_key: Option<String>,
+    endpoint: Option<String>,
     port: u16,
     timeout: u64,
+    non_interactive: bool,
 ) -> anyhow::Result<()> {
-    let preset: crate::config::ProviderPreset = provider
-        .parse()
-        .map_err(|_| anyhow::anyhow!("unknown provider '{provider}'"))?;
+    use crate::config::{LoginAuthMode, provider_registry_entry_ci, provider_registry_names};
 
-    let endpoints = preset.oauth_endpoints().ok_or_else(|| {
+    let lookup_env = |env_name: &str| -> Option<String> {
+        if env_name.is_empty() {
+            None
+        } else {
+            std::env::var(env_name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        }
+    };
+
+    let intent = if non_interactive {
+        let provider = provider
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if provider.is_empty() {
+            anyhow::bail!(
+                "--non-interactive requires --provider <name>. Available providers: {}",
+                provider_registry_names()
+            );
+        }
+        let entry = provider_registry_entry_ci(&provider).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown provider '{provider}'. Available providers: {}",
+                provider_registry_names()
+            )
+        })?;
+
+        let resolved_api_key = api_key
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup_env(entry.api_key_env))
+            .or_else(|| lookup_env("OPENPISTACRAB_API_KEY"));
+
+        let resolved_endpoint = endpoint
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                entry
+                    .endpoint_env
+                    .and_then(lookup_env)
+                    .filter(|value| !value.trim().is_empty())
+            });
+
+        match entry.auth_mode {
+            LoginAuthMode::None => {
+                println!("Provider '{}' does not require login.", entry.name);
+                return Ok(());
+            }
+            LoginAuthMode::EndpointAndKey => {
+                let endpoint = resolved_endpoint.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires endpoint. Set --endpoint or {}.",
+                        entry.name,
+                        entry.endpoint_env.unwrap_or("PROVIDER_ENDPOINT")
+                    )
+                })?;
+                let api_key = resolved_api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires API key. Set --api-key or {}.",
+                        entry.name,
+                        entry.api_key_env
+                    )
+                })?;
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: AuthMethodChoice::ApiKey,
+                    endpoint: Some(endpoint),
+                    api_key: Some(api_key),
+                }
+            }
+            LoginAuthMode::ApiKey => {
+                let api_key = resolved_api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires API key. Set --api-key, {}, or OPENPISTACRAB_API_KEY.",
+                        entry.name,
+                        entry.api_key_env
+                    )
+                })?;
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: AuthMethodChoice::ApiKey,
+                    endpoint: resolved_endpoint,
+                    api_key: Some(api_key),
+                }
+            }
+            LoginAuthMode::OAuth => {
+                let method = if resolved_api_key.is_some() {
+                    AuthMethodChoice::ApiKey
+                } else {
+                    AuthMethodChoice::OAuth
+                };
+                if method == AuthMethodChoice::OAuth
+                    && config.agent.oauth_client_id.trim().is_empty()
+                {
+                    anyhow::bail!(
+                        "No OAuth client ID configured for '{}'. Set OPENPISTACRAB_OAUTH_CLIENT_ID or provide --api-key for API-key fallback.",
+                        entry.name
+                    );
+                }
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: method,
+                    endpoint: resolved_endpoint,
+                    api_key: resolved_api_key,
+                }
+            }
+        }
+    } else {
+        let intent = auth_picker::run_cli_auth_picker(provider.as_deref())?;
+        let Some(intent) = intent else {
+            println!("Login cancelled.");
+            return Ok(());
+        };
+        intent
+    };
+
+    let message = persist_cli_auth_intent(&config, intent, port, timeout).await?;
+    println!("\n{message}");
+    Ok(())
+}
+
+#[cfg(not(test))]
+async fn persist_cli_auth_intent(
+    config: &Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+) -> anyhow::Result<String> {
+    use crate::config::{LoginAuthMode, ProviderPreset, provider_registry_entry_ci};
+
+    let provider = intent.provider.to_ascii_lowercase();
+    let entry = provider_registry_entry_ci(&provider).ok_or_else(|| {
         anyhow::anyhow!(
-            "provider '{provider}' does not support OAuth PKCE login.\n\
-             Supported providers: openai, openrouter\n\
-             For API-key-only providers (together, ollama), set api_key in config.toml."
+            "unknown provider '{provider}'. Available providers: {}",
+            crate::config::provider_registry_names()
         )
     })?;
 
-    let client_id = if !config.agent.oauth_client_id.is_empty() {
-        config.agent.oauth_client_id.clone()
-    } else {
-        anyhow::bail!(
-            "No OAuth client ID configured for '{provider}'.\n\
-             Register an OAuth app with the provider and set one of:\n\
-             • agent.oauth_client_id in config.toml\n\
-             • OPENPISTACRAB_OAUTH_CLIENT_ID environment variable"
-        )
+    let credential = match entry.auth_mode {
+        LoginAuthMode::None => {
+            anyhow::bail!("Provider '{}' does not require login.", entry.name);
+        }
+        LoginAuthMode::EndpointAndKey => {
+            let endpoint = intent.endpoint.clone().ok_or_else(|| {
+                anyhow::anyhow!("Provider '{}' requires endpoint + key login.", entry.name)
+            })?;
+            let api_key = intent.api_key.clone().ok_or_else(|| {
+                anyhow::anyhow!("Provider '{}' requires API key login.", entry.name)
+            })?;
+            auth::ProviderCredential {
+                access_token: api_key,
+                endpoint: Some(endpoint),
+                refresh_token: None,
+                expires_at: None,
+            }
+        }
+        LoginAuthMode::ApiKey => {
+            let api_key = intent.api_key.clone().ok_or_else(|| {
+                anyhow::anyhow!("Provider '{}' requires API key login.", entry.name)
+            })?;
+            auth::ProviderCredential {
+                access_token: api_key,
+                endpoint: intent.endpoint.clone(),
+                refresh_token: None,
+                expires_at: None,
+            }
+        }
+        LoginAuthMode::OAuth => {
+            if intent.auth_method == AuthMethodChoice::ApiKey {
+                let api_key = intent.api_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires API key when API-key mode is selected.",
+                        entry.name
+                    )
+                })?;
+                auth::ProviderCredential {
+                    access_token: api_key,
+                    endpoint: intent.endpoint.clone(),
+                    refresh_token: None,
+                    expires_at: None,
+                }
+            } else {
+                let client_id = config.agent.oauth_client_id.trim().to_string();
+                if client_id.is_empty() {
+                    anyhow::bail!(
+                        "No OAuth client ID configured for '{}'. Set OPENPISTACRAB_OAUTH_CLIENT_ID.",
+                        entry.name
+                    );
+                }
+                let preset: ProviderPreset = provider.parse().map_err(|_| {
+                    anyhow::anyhow!("provider '{}' is not OAuth-capable", entry.name)
+                })?;
+                let endpoints = preset.oauth_endpoints().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "provider '{}' does not support OAuth PKCE login",
+                        entry.name
+                    )
+                })?;
+                auth::login(entry.name, &endpoints, &client_id, port, timeout).await?
+            }
+        }
     };
 
-    let cred = auth::login(&provider, &endpoints, &client_id, port, timeout).await?;
-
     let mut creds = auth::Credentials::load();
-    creds.set(provider.clone(), cred);
+    creds.set(provider.clone(), credential);
     creds.save()?;
 
-    println!(
-        "\nAuthenticated as '{provider}'. Token stored in {}",
+    let mut message = format!(
+        "Authenticated as '{}'. Token stored in {}",
+        provider,
         auth::Credentials::path().display()
     );
-    Ok(())
+    if !entry.supports_runtime {
+        message.push_str(" Credential stored; runtime execution not yet wired.");
+    }
+    Ok(message)
 }
 
 #[cfg(not(test))]
@@ -561,18 +778,6 @@ fn cmd_auth_status() -> anyhow::Result<()> {
         println!("  {provider}: {status}");
     }
     Ok(())
-}
-
-/// Parses one REPL input line into semantic input kind.
-fn parse_repl_input(line: &str) -> ReplInput {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        ReplInput::Empty
-    } else if trimmed == "/quit" || trimmed == "/exit" {
-        ReplInput::Exit
-    } else {
-        ReplInput::Message(trimmed.to_string())
-    }
 }
 
 /// Returns whether a response should be routed to the mobile QUIC adapter.
@@ -623,17 +828,6 @@ fn format_run_header(exec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_repl_input_classifies_lines() {
-        assert_eq!(parse_repl_input("   "), ReplInput::Empty);
-        assert_eq!(parse_repl_input("/quit"), ReplInput::Exit);
-        assert_eq!(parse_repl_input("/exit"), ReplInput::Exit);
-        assert_eq!(
-            parse_repl_input("  hello world  "),
-            ReplInput::Message("hello world".to_string())
-        );
-    }
 
     #[test]
     fn should_send_mobile_response_checks_prefix() {

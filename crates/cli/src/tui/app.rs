@@ -1,6 +1,9 @@
 //! TUI application state, rendering, and input handling.
 #![allow(dead_code)]
 
+use crate::auth_picker::{self, AuthLoginIntent, AuthMethodChoice, LoginBrowseStep};
+use crate::config::{LoginAuthMode, ProviderCategory};
+use crate::model_catalog;
 use proto::{ChannelId, ProgressEvent, SessionId};
 use ratatui::{
     Frame,
@@ -9,9 +12,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use std::str::FromStr;
-
-use crate::config::ProviderPreset;
 
 /// Spinner animation frames (Braille pattern).
 const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
@@ -51,6 +51,71 @@ pub enum AppState {
     Thinking { round: usize },
     /// A tool call is executing.
     ExecutingTool { tool_name: String },
+    /// Waiting for API key input for selected provider.
+    AuthPrompting {
+        /// Provider id selected from registry.
+        provider: String,
+        /// API key env variable name shown in prompt.
+        env_name: String,
+        /// Optional endpoint captured for endpoint+key providers.
+        endpoint: Option<String>,
+        /// Optional endpoint env hint shown to users.
+        endpoint_env: Option<String>,
+    },
+    /// Running auth validation or OAuth callback flow.
+    AuthValidating {
+        /// Provider currently being validated.
+        provider: String,
+    },
+    /// Searchable login browser for provider/method/key flow.
+    LoginBrowsing {
+        /// Provider list search query.
+        query: String,
+        /// Current cursor position.
+        cursor: usize,
+        /// Scroll offset.
+        scroll: u16,
+        /// Active browser step.
+        step: LoginBrowseStep,
+        /// Selected provider id.
+        selected_provider: Option<String>,
+        /// Selected auth method.
+        selected_method: Option<AuthMethodChoice>,
+        /// Raw input for endpoint/API key steps.
+        input_buffer: String,
+        /// Masked API-key display buffer.
+        masked_buffer: String,
+        /// Last error shown in browser.
+        last_error: Option<String>,
+        /// Endpoint captured from endpoint step.
+        endpoint: Option<String>,
+    },
+    /// Browse model catalog in a dedicated TUI screen.
+    ModelBrowsing {
+        /// Case-insensitive substring query.
+        query: String,
+        /// Selected row index among visible model entries.
+        cursor: usize,
+        /// Scroll offset for model list.
+        scroll: u16,
+        /// Last sync/fallback status text.
+        last_sync_status: String,
+        /// Whether in-browser search mode is active.
+        search_active: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Auth submission payload extracted from the TUI prompt.
+pub struct AuthSubmission {
+    /// Provider id.
+    pub provider: String,
+    /// API key env hint.
+    pub env_name: String,
+    /// Optional endpoint value.
+    pub endpoint: Option<String>,
+    /// Raw API key value entered by user.
+    pub api_key: String,
 }
 
 // ─── TuiApp ──────────────────────────────────────────────────
@@ -78,6 +143,14 @@ pub struct TuiApp {
     pub spinner_tick: u8,
     /// Whether the user requested exit.
     pub should_quit: bool,
+    /// Last loaded model catalog entries.
+    pub model_entries: Vec<model_catalog::ModelCatalogEntry>,
+    /// Provider backing the current model catalog.
+    pub model_provider: String,
+    /// Set when user pressed `r` inside model browser.
+    model_refresh_requested: bool,
+    /// Pending auth submission from login browser.
+    pending_auth_intent: Option<AuthLoginIntent>,
 }
 
 impl TuiApp {
@@ -98,6 +171,10 @@ impl TuiApp {
             channel_id,
             spinner_tick: 0,
             should_quit: false,
+            model_entries: Vec::new(),
+            model_provider: model_catalog::OPENCODE_PROVIDER.to_string(),
+            model_refresh_requested: false,
+            pending_auth_intent: None,
         }
     }
 
@@ -124,6 +201,7 @@ impl TuiApp {
         std::mem::take(&mut self.input)
     }
 
+    /// Parses and executes a local slash command.
     pub fn handle_slash_command(&mut self, raw: &str) -> bool {
         let trimmed = raw.trim();
         if !trimmed.starts_with('/') {
@@ -142,36 +220,23 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login [provider] - auth guide for provider\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/models - browse model catalog (search with s, refresh with r)\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
-            "/login" => {
-                let provider = parts.next().unwrap_or("openai").to_ascii_lowercase();
-                match ProviderPreset::from_str(&provider) {
-                    Ok(ProviderPreset::OpenAi) | Ok(ProviderPreset::OpenRouter) => {
-                        self.push_assistant(format!(
-                            "OAuth login:\nopenpista auth login --provider {provider}\n\nIf needed, set OPENPISTACRAB_OAUTH_CLIENT_ID first."
-                        ));
-                    }
-                    Ok(preset) => {
-                        let env_name = preset.api_key_env();
-                        if env_name.is_empty() {
-                            self.push_assistant(format!(
-                                "Provider '{provider}' does not require OAuth login. Use its local endpoint/base_url configuration."
-                            ));
-                        } else {
-                            self.push_assistant(format!(
-                                "Provider '{provider}' uses API key auth. Set {env_name} (or OPENPISTACRAB_API_KEY) and run again."
-                            ));
-                        }
-                    }
-                    Err(_) => {
-                        self.push_error(format!(
-                            "Unknown provider: {provider}. Try one of: openai, openrouter, glue-gpt, glue-google, together, ollama, custom."
-                        ));
-                    }
-                }
+            "/login" | "/connection" => {
+                let seed = parts.collect::<Vec<_>>().join(" ");
+                self.open_login_browser(if seed.trim().is_empty() {
+                    None
+                } else {
+                    Some(seed)
+                });
+            }
+            "/models" => {
+                self.push_assistant(
+                    "Loading model catalog... (inside browser: s or / to search, r to refresh)"
+                        .to_string(),
+                );
             }
             other => {
                 self.push_error(format!(
@@ -181,6 +246,228 @@ impl TuiApp {
         }
 
         true
+    }
+
+    /// Converts current auth input state into a submission payload.
+    pub fn take_auth_submission(&mut self) -> Option<AuthSubmission> {
+        let (provider, env_name, endpoint) = match &self.state {
+            AppState::AuthPrompting {
+                provider,
+                env_name,
+                endpoint,
+                endpoint_env: _,
+            } => (provider.clone(), env_name.clone(), endpoint.clone()),
+            _ => return None,
+        };
+
+        if self.input.trim().is_empty() {
+            return None;
+        }
+
+        let api_key = self.take_input().trim().to_string();
+        self.state = AppState::AuthValidating {
+            provider: provider.clone(),
+        };
+
+        Some(AuthSubmission {
+            provider,
+            env_name,
+            endpoint,
+            api_key,
+        })
+    }
+
+    pub fn complete_auth_validation(
+        &mut self,
+        provider: String,
+        env_name: String,
+        result: Result<(), String>,
+    ) {
+        match result {
+            Ok(()) => self.push_assistant(format!(
+                "Saved API key for '{provider}'. It will be used on the next launch (equivalent to setting {env_name})."
+            )),
+            Err(err) => self.push_error(format!("Failed to save API key for '{provider}': {err}")),
+        }
+        self.state = AppState::Idle;
+    }
+
+    fn cancel_auth_prompt(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.state = AppState::Idle;
+        self.push_assistant("Login cancelled.".to_string());
+    }
+
+    pub fn open_login_browser(&mut self, seed: Option<String>) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.state = AppState::LoginBrowsing {
+            query: auth_picker::parse_provider_seed(seed.as_deref()),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::SelectProvider,
+            selected_provider: None,
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+    }
+
+    pub fn take_pending_auth_intent(&mut self) -> Option<AuthLoginIntent> {
+        self.pending_auth_intent.take()
+    }
+
+    pub fn reopen_openai_method_with_error(&mut self, message: String) {
+        self.state = AppState::LoginBrowsing {
+            query: "openai".to_string(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::SelectMethod,
+            selected_provider: Some("openai".to_string()),
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: Some(message),
+            endpoint: None,
+        };
+    }
+
+    /// Opens/updates model browser with new catalog data.
+    pub fn open_model_browser(
+        &mut self,
+        provider: String,
+        entries: Vec<model_catalog::ModelCatalogEntry>,
+        query: String,
+        sync_status: String,
+    ) {
+        self.model_provider = provider;
+        self.model_entries = entries;
+        self.state = AppState::ModelBrowsing {
+            query,
+            cursor: 0,
+            scroll: 0,
+            last_sync_status: sync_status,
+            search_active: false,
+        };
+    }
+
+    /// Updates only model entries and sync status while keeping browse options.
+    pub fn update_model_browser_catalog(
+        &mut self,
+        provider: String,
+        entries: Vec<model_catalog::ModelCatalogEntry>,
+        sync_status: String,
+    ) {
+        self.model_provider = provider;
+        self.model_entries = entries;
+        if let AppState::ModelBrowsing {
+            cursor,
+            scroll,
+            last_sync_status,
+            ..
+        } = &mut self.state
+        {
+            *last_sync_status = sync_status;
+            *cursor = 0;
+            *scroll = 0;
+        }
+    }
+
+    pub fn model_browser_query(&self) -> Option<String> {
+        match &self.state {
+            AppState::ModelBrowsing { query, .. } => Some(query.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn mark_model_refreshing(&mut self) {
+        if let AppState::ModelBrowsing {
+            last_sync_status, ..
+        } = &mut self.state
+        {
+            *last_sync_status = "Refreshing models...".to_string();
+        }
+    }
+
+    pub fn take_model_refresh_request(&mut self) -> bool {
+        let requested = self.model_refresh_requested;
+        self.model_refresh_requested = false;
+        requested
+    }
+
+    fn visible_model_entries(&self, query: &str) -> Vec<model_catalog::ModelCatalogEntry> {
+        let recommended = model_catalog::filtered_entries(&self.model_entries, query, false);
+        let all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
+        let mut rows = Vec::new();
+        rows.extend(recommended);
+        rows.extend(all_models);
+        rows
+    }
+
+    fn clamp_model_cursor(&mut self) {
+        let query = match &self.state {
+            AppState::ModelBrowsing { query, .. } => query.clone(),
+            _ => return,
+        };
+
+        let visible_len = self.visible_model_entries(&query).len();
+        if let AppState::ModelBrowsing { cursor, scroll, .. } = &mut self.state {
+            if visible_len == 0 {
+                *cursor = 0;
+                *scroll = 0;
+                return;
+            }
+            *cursor = (*cursor).min(visible_len.saturating_sub(1));
+            if (*cursor as u16) < *scroll {
+                *scroll = *cursor as u16;
+            } else {
+                *scroll = (*cursor as u16).saturating_sub(2);
+            }
+        }
+    }
+
+    fn visible_login_provider_entries(
+        &self,
+        query: &str,
+    ) -> Vec<crate::config::ProviderRegistryEntry> {
+        auth_picker::filtered_provider_entries(query)
+    }
+
+    fn clamp_login_cursor(&mut self) {
+        if let AppState::LoginBrowsing {
+            query,
+            cursor,
+            scroll,
+            step,
+            ..
+        } = &mut self.state
+        {
+            match step {
+                LoginBrowseStep::SelectProvider => {
+                    let visible_len = auth_picker::filtered_provider_entries(query).len();
+                    if visible_len == 0 {
+                        *cursor = 0;
+                        *scroll = 0;
+                        return;
+                    }
+                    *cursor = (*cursor).min(visible_len.saturating_sub(1));
+                }
+                LoginBrowseStep::SelectMethod => {
+                    *cursor = (*cursor).min(1);
+                }
+                LoginBrowseStep::InputEndpoint | LoginBrowseStep::InputApiKey => {
+                    *cursor = 0;
+                }
+            }
+            if (*cursor as u16) < *scroll {
+                *scroll = *cursor as u16;
+            } else {
+                *scroll = (*cursor as u16).saturating_sub(3);
+            }
+        }
     }
 
     /// Apply a progress event from the agent runtime.
@@ -260,19 +547,360 @@ impl TuiApp {
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        let login_browsing = matches!(self.state, AppState::LoginBrowsing { .. });
+        if login_browsing {
+            let mut should_clamp = false;
+            let mut pending_intent: Option<AuthLoginIntent> = None;
+            let mut close_browser = false;
+
+            if let AppState::LoginBrowsing {
+                query,
+                cursor,
+                step,
+                selected_provider,
+                selected_method,
+                input_buffer,
+                masked_buffer,
+                last_error,
+                endpoint,
+                ..
+            } = &mut self.state
+            {
+                match step {
+                    LoginBrowseStep::SelectProvider => {
+                        let providers = auth_picker::filtered_provider_entries(query);
+                        match (key.modifiers, key.code) {
+                            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+                                close_browser = true;
+                            }
+                            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                                *cursor = cursor.saturating_sub(1);
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                                *cursor = cursor.saturating_add(1);
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::PageUp) => {
+                                *cursor = cursor.saturating_sub(10);
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::PageDown) => {
+                                *cursor = cursor.saturating_add(10);
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::Backspace) => {
+                                query.pop();
+                                *cursor = 0;
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::Char(c)) => {
+                                query.push(c);
+                                *cursor = 0;
+                                should_clamp = true;
+                            }
+                            (_, KeyCode::Enter) => {
+                                if providers.is_empty() {
+                                    *last_error = Some(format!("No matches for '{}'.", query));
+                                } else if let Some(selected) = providers.get(*cursor).copied() {
+                                    *selected_provider = Some(selected.name.to_string());
+                                    *selected_method = None;
+                                    input_buffer.clear();
+                                    masked_buffer.clear();
+                                    *endpoint = None;
+                                    *last_error = None;
+                                    *cursor = 0;
+                                    match selected.auth_mode {
+                                        LoginAuthMode::None => {
+                                            *last_error = Some(format!(
+                                                "Provider '{}' does not require login.",
+                                                selected.display_name
+                                            ));
+                                        }
+                                        LoginAuthMode::OAuth => {
+                                            if selected.name == "openai" {
+                                                *step = LoginBrowseStep::SelectMethod;
+                                            } else {
+                                                pending_intent = Some(AuthLoginIntent {
+                                                    provider: selected.name.to_string(),
+                                                    auth_method: AuthMethodChoice::OAuth,
+                                                    endpoint: None,
+                                                    api_key: None,
+                                                });
+                                            }
+                                        }
+                                        LoginAuthMode::ApiKey => {
+                                            *step = LoginBrowseStep::InputApiKey;
+                                        }
+                                        LoginAuthMode::EndpointAndKey => {
+                                            *step = LoginBrowseStep::InputEndpoint;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    LoginBrowseStep::SelectMethod => match (key.modifiers, key.code) {
+                        (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
+                        (_, KeyCode::Esc) => {
+                            *step = LoginBrowseStep::SelectProvider;
+                            *cursor = 0;
+                            should_clamp = true;
+                        }
+                        (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                            *cursor = cursor.saturating_sub(1);
+                            should_clamp = true;
+                        }
+                        (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                            *cursor = cursor.saturating_add(1);
+                            should_clamp = true;
+                        }
+                        (_, KeyCode::Enter) => {
+                            let provider = selected_provider.clone().unwrap_or_default();
+                            if provider.is_empty() {
+                                *step = LoginBrowseStep::SelectProvider;
+                                *last_error = Some(
+                                    "Provider selection was cleared. Select provider again."
+                                        .to_string(),
+                                );
+                            } else if *cursor == 0 {
+                                *selected_method = Some(AuthMethodChoice::OAuth);
+                                pending_intent = Some(AuthLoginIntent {
+                                    provider,
+                                    auth_method: AuthMethodChoice::OAuth,
+                                    endpoint: None,
+                                    api_key: None,
+                                });
+                            } else {
+                                *selected_method = Some(AuthMethodChoice::ApiKey);
+                                input_buffer.clear();
+                                masked_buffer.clear();
+                                *step = LoginBrowseStep::InputApiKey;
+                            }
+                        }
+                        _ => {}
+                    },
+                    LoginBrowseStep::InputEndpoint => match (key.modifiers, key.code) {
+                        (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
+                        (_, KeyCode::Esc) => {
+                            *step = LoginBrowseStep::SelectProvider;
+                            *cursor = 0;
+                            input_buffer.clear();
+                        }
+                        (_, KeyCode::Backspace) => {
+                            input_buffer.pop();
+                        }
+                        (_, KeyCode::Enter) => {
+                            let value = input_buffer.trim().to_string();
+                            if value.is_empty() {
+                                *last_error = Some("Endpoint is required.".to_string());
+                            } else {
+                                *endpoint = Some(value);
+                                input_buffer.clear();
+                                *step = LoginBrowseStep::InputApiKey;
+                                *last_error = None;
+                            }
+                        }
+                        (_, KeyCode::Char(c)) => {
+                            input_buffer.push(c);
+                        }
+                        _ => {}
+                    },
+                    LoginBrowseStep::InputApiKey => match (key.modifiers, key.code) {
+                        (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
+                        (_, KeyCode::Esc) => {
+                            let provider = selected_provider.clone().unwrap_or_default();
+                            if provider == "openai"
+                                && matches!(selected_method, Some(AuthMethodChoice::ApiKey))
+                            {
+                                *step = LoginBrowseStep::SelectMethod;
+                                *cursor = 1;
+                            } else if let Some(entry) = auth_picker::provider_by_name(&provider) {
+                                if matches!(entry.auth_mode, LoginAuthMode::EndpointAndKey) {
+                                    *step = LoginBrowseStep::InputEndpoint;
+                                    input_buffer.clear();
+                                    if let Some(saved_endpoint) = endpoint.as_ref() {
+                                        input_buffer.push_str(saved_endpoint);
+                                    }
+                                } else {
+                                    *step = LoginBrowseStep::SelectProvider;
+                                    *cursor = 0;
+                                }
+                            } else {
+                                *step = LoginBrowseStep::SelectProvider;
+                                *cursor = 0;
+                            }
+                            masked_buffer.clear();
+                        }
+                        (_, KeyCode::Backspace) => {
+                            if input_buffer.pop().is_some() {
+                                masked_buffer.pop();
+                            }
+                        }
+                        (_, KeyCode::Enter) => {
+                            let provider = selected_provider.clone().unwrap_or_default();
+                            let api_key = input_buffer.trim().to_string();
+                            if provider.is_empty() {
+                                *last_error = Some(
+                                    "Provider selection was cleared. Select provider again."
+                                        .to_string(),
+                                );
+                                *step = LoginBrowseStep::SelectProvider;
+                            } else if api_key.is_empty() {
+                                *last_error = Some("API key is required.".to_string());
+                            } else {
+                                pending_intent = Some(AuthLoginIntent {
+                                    provider: provider.clone(),
+                                    auth_method: auth_picker::api_key_method_for_provider(
+                                        &provider,
+                                        *selected_method,
+                                    ),
+                                    endpoint: endpoint.clone(),
+                                    api_key: Some(api_key),
+                                });
+                            }
+                        }
+                        (_, KeyCode::Char(c)) => {
+                            input_buffer.push(c);
+                            masked_buffer.push('*');
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
+            if close_browser {
+                self.state = AppState::Idle;
+                self.push_assistant("Login cancelled.".to_string());
+                return;
+            }
+            if should_clamp {
+                self.clamp_login_cursor();
+            }
+            if let Some(intent) = pending_intent {
+                self.pending_auth_intent = Some(intent.clone());
+                self.state = AppState::AuthValidating {
+                    provider: intent.provider,
+                };
+            }
+            return;
+        }
+
+        let browsing = matches!(self.state, AppState::ModelBrowsing { .. });
+        if browsing {
+            let mut close_browser = false;
+            let mut apply_selected = false;
+            let mut should_clamp = false;
+
+            if let AppState::ModelBrowsing {
+                query,
+                cursor,
+                scroll,
+                search_active,
+                ..
+            } = &mut self.state
+            {
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
+                    (_, KeyCode::Esc) => {
+                        if *search_active {
+                            *search_active = false;
+                        } else {
+                            close_browser = true;
+                        }
+                    }
+                    (_, KeyCode::Char('s')) | (_, KeyCode::Char('/')) if !*search_active => {
+                        *search_active = true
+                    }
+                    (_, KeyCode::Enter) if !*search_active => apply_selected = true,
+                    (_, KeyCode::Char('r')) if !*search_active => {
+                        self.model_refresh_requested = true;
+                    }
+                    (_, KeyCode::Char('j')) if !*search_active => {
+                        *cursor = cursor.saturating_add(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Char('k')) if !*search_active => {
+                        *cursor = cursor.saturating_sub(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Down) if !*search_active => {
+                        *cursor = cursor.saturating_add(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Up) if !*search_active => {
+                        *cursor = cursor.saturating_sub(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::PageDown) if !*search_active => {
+                        *cursor = cursor.saturating_add(10);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::PageUp) if !*search_active => {
+                        *cursor = cursor.saturating_sub(10);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Backspace) if *search_active => {
+                        query.pop();
+                        *cursor = 0;
+                        *scroll = 0;
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Char(c)) if *search_active => {
+                        query.push(c);
+                        *cursor = 0;
+                        *scroll = 0;
+                        should_clamp = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            if close_browser {
+                self.state = AppState::Idle;
+                return;
+            }
+
+            if apply_selected {
+                if let Some((query, cursor)) = match &self.state {
+                    AppState::ModelBrowsing { query, cursor, .. } => Some((query.clone(), *cursor)),
+                    _ => None,
+                } {
+                    let visible = self.visible_model_entries(&query);
+                    if let Some(selected) = visible.get(cursor) {
+                        self.model_name = selected.id.clone();
+                        self.push_assistant(format!(
+                            "Selected model '{}' for this session.",
+                            selected.id
+                        ));
+                    }
+                }
+                return;
+            }
+
+            if should_clamp {
+                self.clamp_model_cursor();
+            }
+            return;
+        }
+
+        let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
                 if self.state == AppState::Idle {
                     self.should_quit = true;
+                } else if matches!(self.state, AppState::AuthPrompting { .. }) {
+                    self.cancel_auth_prompt();
                 }
             }
-            (_, KeyCode::Char(c)) if self.state == AppState::Idle => {
+            (_, KeyCode::Char(c)) if is_input_active => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
             }
-            (_, KeyCode::Backspace) if self.state == AppState::Idle => {
+            (_, KeyCode::Backspace) if is_input_active => {
                 if self.cursor_pos > 0 {
-                    // Find the previous character boundary
                     let prev = self.input[..self.cursor_pos]
                         .char_indices()
                         .last()
@@ -282,7 +910,7 @@ impl TuiApp {
                     self.cursor_pos = prev;
                 }
             }
-            (_, KeyCode::Left) if self.state == AppState::Idle => {
+            (_, KeyCode::Left) if is_input_active => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos = self.input[..self.cursor_pos]
                         .char_indices()
@@ -291,7 +919,7 @@ impl TuiApp {
                         .unwrap_or(0);
                 }
             }
-            (_, KeyCode::Right) if self.state == AppState::Idle => {
+            (_, KeyCode::Right) if is_input_active => {
                 if self.cursor_pos < self.input.len() {
                     self.cursor_pos = self.input[self.cursor_pos..]
                         .char_indices()
@@ -322,6 +950,16 @@ impl TuiApp {
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
+        if matches!(self.state, AppState::LoginBrowsing { .. }) {
+            self.render_login_browser(frame, area);
+            return;
+        }
+
+        if matches!(self.state, AppState::ModelBrowsing { .. }) {
+            self.render_model_browser(frame, area);
+            return;
+        }
+
         // Layout: title(1) | history(fill) | status(1) | input(3)
         let chunks = Layout::vertical([
             Constraint::Length(1),
@@ -335,6 +973,451 @@ impl TuiApp {
         self.render_history(frame, chunks[1]);
         self.render_status(frame, chunks[2]);
         self.render_input(frame, chunks[3]);
+    }
+
+    fn render_login_browser(&self, frame: &mut Frame<'_>, area: Rect) {
+        let AppState::LoginBrowsing {
+            query,
+            cursor,
+            scroll,
+            step,
+            selected_provider,
+            selected_method: _,
+            input_buffer,
+            masked_buffer,
+            last_error,
+            endpoint,
+        } = &self.state
+        else {
+            return;
+        };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " Add credential ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " /login or /connection ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])),
+            chunks[0],
+        );
+
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        match step {
+            LoginBrowseStep::SelectProvider => {
+                lines.push(Line::from(Span::styled(
+                    " Select provider ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" Search: {}", query),
+                    Style::default().fg(Color::DarkGray),
+                )));
+
+                let providers = self.visible_login_provider_entries(query);
+                if providers.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" No matches for '{}'.", query),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                } else {
+                    for (idx, entry) in providers.iter().enumerate() {
+                        let selected = idx == *cursor;
+                        let marker = if selected { "●" } else { "○" };
+                        let badge = match entry.category {
+                            ProviderCategory::Runtime => "runtime",
+                            ProviderCategory::Extension => "extension",
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!(" {} ", marker),
+                                if selected {
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                },
+                            ),
+                            Span::styled(
+                                entry.display_name,
+                                if selected {
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::White)
+                                },
+                            ),
+                            Span::styled(
+                                format!(" [{}]", badge),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                    }
+                }
+            }
+            LoginBrowseStep::SelectMethod => {
+                lines.push(Line::from(Span::styled(
+                    " Select auth method ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " Provider: {}",
+                        selected_provider.as_deref().unwrap_or("openai")
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                let methods = [AuthMethodChoice::OAuth, AuthMethodChoice::ApiKey];
+                for (idx, method) in methods.iter().enumerate() {
+                    let selected = idx == *cursor;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if selected { " ● " } else { " ○ " },
+                            if selected {
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            },
+                        ),
+                        Span::styled(
+                            method.label(),
+                            if selected {
+                                Style::default().add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]));
+                }
+            }
+            LoginBrowseStep::InputEndpoint => {
+                lines.push(Line::from(Span::styled(
+                    " Enter endpoint ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " Provider: {}",
+                        selected_provider.as_deref().unwrap_or("provider")
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::raw(format!(
+                    " Endpoint: {}",
+                    input_buffer
+                ))));
+            }
+            LoginBrowseStep::InputApiKey => {
+                lines.push(Line::from(Span::styled(
+                    " Enter API key ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " Provider: {}",
+                        selected_provider.as_deref().unwrap_or("provider")
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                if let Some(endpoint) = endpoint {
+                    lines.push(Line::from(Span::styled(
+                        format!(" Endpoint: {}", endpoint),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                lines.push(Line::from(Span::raw(format!(
+                    " API key: {}",
+                    masked_buffer
+                ))));
+            }
+        }
+
+        if let Some(error) = last_error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("Error: {}", error),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        let content_height = lines.len() as u16;
+        let visible_height = chunks[1].height.saturating_sub(2);
+        let max_scroll = content_height.saturating_sub(visible_height);
+        let effective_scroll = (*scroll).min(max_scroll);
+        let body = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((effective_scroll, 0));
+        frame.render_widget(body, chunks[1]);
+
+        let footer =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[2]);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " ↑/↓ to select • Enter: confirm • Type: to search/input ",
+                Style::default().fg(Color::DarkGray),
+            )),
+            footer[0],
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " Esc: back/close • j/k: move • PgUp/PgDn: page ",
+                Style::default().fg(Color::DarkGray),
+            )),
+            footer[1],
+        );
+
+        match step {
+            LoginBrowseStep::SelectProvider => {
+                let cursor_col = query.chars().count() as u16;
+                frame.set_cursor_position((chunks[1].x + 10 + cursor_col, chunks[1].y + 3));
+            }
+            LoginBrowseStep::InputEndpoint => {
+                let cursor_col = input_buffer.chars().count() as u16;
+                frame.set_cursor_position((chunks[1].x + 12 + cursor_col, chunks[1].y + 4));
+            }
+            LoginBrowseStep::InputApiKey => {
+                let cursor_col = masked_buffer.chars().count() as u16;
+                let endpoint_offset = if endpoint.is_some() { 1 } else { 0 };
+                frame.set_cursor_position((
+                    chunks[1].x + 11 + cursor_col,
+                    chunks[1].y + 4 + endpoint_offset,
+                ));
+            }
+            LoginBrowseStep::SelectMethod => {}
+        }
+    }
+
+    fn render_model_browser(&self, frame: &mut Frame<'_>, area: Rect) {
+        let AppState::ModelBrowsing {
+            query,
+            cursor,
+            scroll,
+            last_sync_status,
+            search_active,
+        } = &self.state
+        else {
+            return;
+        };
+
+        let summary = model_catalog::model_summary(&self.model_entries, query, true);
+        let recommended = model_catalog::filtered_entries(&self.model_entries, query, false);
+        let all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+        let header = Line::from(vec![
+            Span::styled(
+                " Models ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    " provider:{}  total:{} matched:{} recommended:{} available:{} ",
+                    self.model_provider,
+                    summary.total,
+                    summary.matched,
+                    summary.recommended,
+                    summary.available
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!(" {} ", last_sync_status),
+                Style::default().fg(Color::Green),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(header), chunks[0]);
+
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        let mut visible_index = 0usize;
+        let no_matches =
+            !query.trim().is_empty() && recommended.is_empty() && all_models.is_empty();
+        if no_matches {
+            lines.push(Line::from(Span::styled(
+                format!("No matches for '{}'.", query),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                " Recommended ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if recommended.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (none)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for entry in recommended {
+                    let selected = visible_index == *cursor;
+                    let id_color = if query.trim().is_empty() {
+                        Color::White
+                    } else {
+                        Color::Yellow
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            if selected {
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            },
+                        ),
+                        Span::styled(
+                            entry.id,
+                            Style::default().fg(id_color).add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  [status:{}] [available:{}] [source:{}]",
+                                entry.status.as_str(),
+                                if entry.available { "yes" } else { "no" },
+                                entry.source.as_str()
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    visible_index += 1;
+                }
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " All Models ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            if all_models.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (none)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for entry in all_models {
+                    let selected = visible_index == *cursor;
+                    let id_color = if query.trim().is_empty() {
+                        Color::White
+                    } else {
+                        Color::Yellow
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            if selected {
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            },
+                        ),
+                        Span::styled(
+                            entry.id,
+                            Style::default().fg(id_color).add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  [status:{}] [available:{}] [source:{}]",
+                                entry.status.as_str(),
+                                if entry.available { "yes" } else { "no" },
+                                entry.source.as_str()
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    visible_index += 1;
+                }
+            }
+        }
+
+        let content_height = lines.len() as u16;
+        let visible_height = chunks[1].height.saturating_sub(2);
+        let max_scroll = content_height.saturating_sub(visible_height);
+        let effective_scroll = (*scroll).min(max_scroll);
+
+        let list = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((effective_scroll, 0));
+        frame.render_widget(list, chunks[1]);
+
+        let footer =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[2]);
+        let query_label = if *search_active {
+            format!(" Search (typing): {}", query)
+        } else {
+            format!(" Search: {}", query)
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                query_label,
+                Style::default().fg(Color::DarkGray),
+            )),
+            footer[0],
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " s or /:search  j/k,↑/↓:move  PgUp/PgDn:page  Enter:use model  r:refresh  Esc:back/close ",
+                Style::default().fg(Color::DarkGray),
+            )),
+            footer[1],
+        );
+
+        if *search_active {
+            let cursor_col = query.chars().count() as u16;
+            frame.set_cursor_position((footer[0].x + 18 + cursor_col, footer[0].y));
+        }
     }
 
     fn render_title(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -456,7 +1539,7 @@ impl TuiApp {
     fn render_status(&self, frame: &mut Frame<'_>, area: Rect) {
         let status_text = match &self.state {
             AppState::Idle => Line::from(Span::styled(
-                " Enter:send  /help:commands  ↑↓:scroll  Ctrl+C:quit",
+                " Enter:send  /help:commands  /models:browse models  ↑↓:scroll  Ctrl+C:quit",
                 Style::default().fg(Color::DarkGray),
             )),
             AppState::Thinking { round } => {
@@ -482,24 +1565,68 @@ impl TuiApp {
                     Span::styled(tool_name, Style::default().fg(Color::Cyan)),
                 ])
             }
+            AppState::AuthPrompting {
+                provider,
+                env_name,
+                endpoint,
+                endpoint_env,
+            } => {
+                let endpoint_hint = if let (Some(value), Some(key)) = (endpoint, endpoint_env) {
+                    format!(" endpoint[{key}]={value}")
+                } else {
+                    String::new()
+                };
+                Line::from(Span::styled(
+                    format!(
+                        " Enter API key for {provider} ({env_name}){endpoint_hint}  Ctrl+C:cancel"
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            }
+            AppState::AuthValidating { provider } => {
+                let spinner = SPINNER[(self.spinner_tick as usize) % SPINNER.len()];
+                Line::from(vec![Span::styled(
+                    format!(" {spinner} Saving credential for {provider}... "),
+                    Style::default().fg(Color::Yellow),
+                )])
+            }
+            AppState::LoginBrowsing { .. } => Line::from(Span::styled(
+                " Login browser active ",
+                Style::default().fg(Color::DarkGray),
+            )),
+            AppState::ModelBrowsing { .. } => Line::from(Span::styled(
+                " Model browser active ",
+                Style::default().fg(Color::DarkGray),
+            )),
         };
         frame.render_widget(Paragraph::new(status_text), area);
     }
 
     fn render_input(&self, frame: &mut Frame<'_>, area: Rect) {
-        let border_color = if self.state == AppState::Idle {
+        let is_idle_or_prompting =
+            matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+        let border_color = if is_idle_or_prompting {
             Color::Cyan
         } else {
             Color::DarkGray
         };
 
-        let display_text = if self.input.is_empty() && self.state == AppState::Idle {
-            "Type a message..."
+        let mut display_text = if self.input.is_empty() && is_idle_or_prompting {
+            if matches!(self.state, AppState::AuthPrompting { .. }) {
+                "Paste your API key here..."
+            } else {
+                "Type a message..."
+            }
+            .to_string()
         } else {
-            &self.input
+            self.input.clone()
         };
 
-        let input_style = if self.input.is_empty() && self.state == AppState::Idle {
+        if matches!(self.state, AppState::AuthPrompting { .. }) && !self.input.is_empty() {
+            display_text = "*".repeat(self.input.chars().count());
+        }
+
+        let input_style = if self.input.is_empty() && is_idle_or_prompting {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default()
@@ -509,14 +1636,16 @@ impl TuiApp {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
-                .title(" Input "),
+                .title(if matches!(self.state, AppState::AuthPrompting { .. }) {
+                    " Auth "
+                } else {
+                    " Input "
+                }),
         );
 
         frame.render_widget(input, area);
 
-        // Show cursor when idle
-        if self.state == AppState::Idle {
-            // Calculate cursor column (char width up to cursor_pos)
+        if is_idle_or_prompting {
             let cursor_col = self.input[..self.cursor_pos].chars().count() as u16;
             frame.set_cursor_position((area.x + 1 + cursor_col, area.y + 1));
         }
@@ -536,6 +1665,25 @@ mod tests {
 
     fn make_app() -> TuiApp {
         TuiApp::new("gpt-4o", SessionId::new(), ChannelId::from("cli:tui"))
+    }
+
+    fn sample_models() -> Vec<model_catalog::ModelCatalogEntry> {
+        vec![
+            model_catalog::ModelCatalogEntry {
+                id: "gpt-5-codex".to_string(),
+                recommended_for_coding: true,
+                status: model_catalog::ModelStatus::Stable,
+                source: model_catalog::ModelSource::Docs,
+                available: true,
+            },
+            model_catalog::ModelCatalogEntry {
+                id: "claude-sonnet-4.6".to_string(),
+                recommended_for_coding: true,
+                status: model_catalog::ModelStatus::Stable,
+                source: model_catalog::ModelSource::Docs,
+                available: true,
+            },
+        ]
     }
 
     #[test]
@@ -627,6 +1775,72 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn handle_key_accepts_input_when_auth_prompting() {
+        let mut app = make_app();
+        app.state = AppState::AuthPrompting {
+            provider: "together".to_string(),
+            env_name: "TOGETHER_API_KEY".to_string(),
+            endpoint: None,
+            endpoint_env: None,
+        };
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.input, "sk");
+    }
+
+    #[test]
+    fn handle_key_escape_cancels_auth_prompt() {
+        let mut app = make_app();
+        app.state = AppState::AuthPrompting {
+            provider: "together".to_string(),
+            env_name: "TOGETHER_API_KEY".to_string(),
+            endpoint: None,
+            endpoint_env: None,
+        };
+        app.input = "secret".to_string();
+        app.cursor_pos = app.input.len();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.state, AppState::Idle);
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor_pos, 0);
+        assert!(
+            matches!(app.messages.last(), Some(TuiMessage::Assistant(text)) if text.contains("cancelled"))
+        );
+    }
+
+    #[test]
+    fn take_auth_submission_moves_to_validating() {
+        let mut app = make_app();
+        app.state = AppState::AuthPrompting {
+            provider: "together".to_string(),
+            env_name: "TOGETHER_API_KEY".to_string(),
+            endpoint: None,
+            endpoint_env: None,
+        };
+        app.input = "  sk-test  ".to_string();
+        app.cursor_pos = app.input.len();
+
+        let submission = app.take_auth_submission().expect("submission expected");
+
+        assert_eq!(submission.provider, "together");
+        assert_eq!(submission.env_name, "TOGETHER_API_KEY");
+        assert_eq!(submission.endpoint, None);
+        assert_eq!(submission.api_key, "sk-test");
+        assert_eq!(app.input, "");
+        assert_eq!(
+            app.state,
+            AppState::AuthValidating {
+                provider: "together".to_string()
+            }
+        );
     }
 
     #[test]
@@ -724,6 +1938,97 @@ mod tests {
     }
 
     #[test]
+    fn model_browser_enter_selects_model_for_session() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "opencode".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.model_name, "gpt-5-codex");
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Assistant(text)) if text.contains("Selected model")
+        ));
+    }
+
+    #[test]
+    fn model_browser_refresh_hotkey_sets_request_flag() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "opencode".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.take_model_refresh_request());
+        assert!(!app.take_model_refresh_request());
+    }
+
+    #[test]
+    fn model_browser_search_mode_esc_then_close() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "opencode".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::ModelBrowsing {
+                search_active: true,
+                ..
+            }
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::ModelBrowsing {
+                search_active: false,
+                ..
+            }
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn model_browser_slash_starts_search_mode() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "opencode".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::ModelBrowsing {
+                search_active: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn render_draws_all_message_variants_without_mutating_state() {
         let mut app = make_app();
         app.push_user("user line".into());
@@ -792,23 +2097,53 @@ mod tests {
     }
 
     #[test]
-    fn handle_slash_command_login_oauth_provider_pushes_auth_hint() {
+    fn handle_slash_command_login_opens_login_browser_with_seed() {
         let mut app = make_app();
         let handled = app.handle_slash_command("/login openai");
         assert!(handled);
-        assert!(
-            matches!(&app.messages[0], TuiMessage::Assistant(text) if text.contains("openpista auth login --provider openai"))
-        );
+        assert!(matches!(
+            &app.state,
+            AppState::LoginBrowsing { query, step, .. } if query == "openai" && *step == LoginBrowseStep::SelectProvider
+        ));
+        assert!(app.messages.is_empty());
     }
 
     #[test]
-    fn handle_slash_command_login_api_key_provider_pushes_env_hint() {
+    fn handle_slash_command_login_without_provider_opens_browser() {
         let mut app = make_app();
-        let handled = app.handle_slash_command("/login together");
+        let handled = app.handle_slash_command("/login");
         assert!(handled);
-        assert!(
-            matches!(&app.messages[0], TuiMessage::Assistant(text) if text.contains("TOGETHER_API_KEY"))
-        );
+        assert!(matches!(&app.state, AppState::LoginBrowsing { query, .. } if query.is_empty()));
+    }
+
+    #[test]
+    fn handle_slash_command_connection_alias_opens_login_browser() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/connection copilot");
+        assert!(handled);
+        assert!(matches!(
+            &app.state,
+            AppState::LoginBrowsing { query, .. } if query == "copilot"
+        ));
+    }
+
+    #[test]
+    fn handle_key_login_browser_enter_opens_method_step_for_openai() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(
+            &app.state,
+            AppState::LoginBrowsing {
+                step,
+                selected_provider,
+                ..
+            } if *step == LoginBrowseStep::SelectMethod
+                && selected_provider.as_deref() == Some("openai")
+        ));
     }
 
     #[test]
