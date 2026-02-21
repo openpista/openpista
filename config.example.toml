@@ -73,7 +73,7 @@ api_token = ""      # 또는 환경 변수 OPENPISTACRAB_MOBILE_TOKEN
 # 데이터베이스 / 스킬 경로
 # ─────────────────────────────────────────────
 [database]
-url = "~/.openpistacrab/memory.db"
+url = "~/.openpista/memory.db"
 
 [skills]
-workspace = "~/.openpistacrab/workspace"
+workspace = "~/.openpista/workspace"

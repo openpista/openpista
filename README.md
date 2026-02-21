@@ -1,4 +1,4 @@
-# openpistacrab
+# openpista
 
 [![CI](https://github.com/openpista/openpista/actions/workflows/ci.yml/badge.svg)](https://github.com/openpista/openpista/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/openpista/openpista/graph/badge.svg)](https://codecov.io/gh/openpista/openpista)
@@ -17,9 +17,9 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ---
 
-## What is openpistacrab?
+## What is openpista?
 
-openpistacrab is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI) to your **operating system** via an AI agent loop.
+openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI) to your **operating system** via an AI agent loop.
 
 - Send a message in Telegram → the LLM decides what to do → bash runs it → reply comes back
 - Single static binary, ~10 MB, minimal memory footprint
@@ -84,7 +84,7 @@ cd openpista
 cargo build --release
 
 # Move binary to PATH
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Ubuntu / Debian
@@ -102,7 +102,7 @@ git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
 
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Fedora / RHEL
@@ -115,7 +115,7 @@ source "$HOME/.cargo/env"
 git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 
@@ -148,10 +148,10 @@ token = ""           # Or set TELEGRAM_BOT_TOKEN env var
 enabled = true
 
 [database]
-url = "~/.openpistacrab/memory.db"
+url = "~/.openpista/memory.db"
 
 [skills]
-workspace = "~/.openpistacrab/workspace"
+workspace = "~/.openpista/workspace"
 ```
 
 ### Environment Variables
@@ -171,7 +171,7 @@ workspace = "~/.openpistacrab/workspace"
 ### Run a single command
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpistacrab run -e "list files in my home directory"
+OPENPISTACRAB_API_KEY=sk-... openpista run -e "list files in my home directory"
 ```
 
 ### Auth Login Picker
@@ -216,13 +216,13 @@ Esc: exit search mode (first) or close browser
 ```bash
 OPENPISTACRAB_API_KEY=sk-... \
 TELEGRAM_BOT_TOKEN=123456:ABC... \
-openpistacrab start
+openpista start
 ```
 
 The daemon:
 - Listens on QUIC port `4433` for remote agent connections
 - Starts all enabled channel adapters
-- Writes a PID file to `~/.openpistacrab/openpistacrab.pid`
+- Writes a PID file to `~/.openpista/openpista.pid`
 - Handles `SIGTERM` / `Ctrl-C` for graceful shutdown
 
 ### Skills
@@ -230,7 +230,7 @@ The daemon:
 Place a `SKILL.md` in your workspace to extend the agent's capabilities:
 
 ```
-~/.openpistacrab/workspace/skills/
+~/.openpista/workspace/skills/
 ├── deploy/
 │   ├── SKILL.md      ← describes what this skill does
 │   └── run.sh        ← executed when the agent calls this skill
@@ -244,7 +244,7 @@ Place a `SKILL.md` in your workspace to extend the agent's capabilities:
 ## Workspace Structure
 
 ```
-openpistacrab/
+openpista/
 ├── crates/
 │   ├── proto/      # Shared types, errors (AgentMessage, ToolCall, …)
 │   ├── gateway/    # QUIC server, session router, cron scheduler
