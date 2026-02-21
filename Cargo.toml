@@ -9,6 +9,9 @@ members = [
     "crates/skills",
     "crates/cli", "quinn-test",
 ]
+exclude = [
+    "skills/hello-wasm"
+]
 
 [workspace.dependencies]
 # 비동기 런타임
@@ -63,6 +66,8 @@ tokio-cron-scheduler = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chromiumoxide = "0.8"
 bollard = "0.19"
+wasmtime = "40.0.3"
+wasmtime-wasi = "40.0.3"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
