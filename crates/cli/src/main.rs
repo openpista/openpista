@@ -5,6 +5,8 @@ mod auth_picker;
 mod config;
 mod daemon;
 mod model_catalog;
+#[cfg(test)]
+mod test_support;
 mod tui;
 
 use clap::{Parser, Subcommand};

@@ -690,24 +690,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn set_env_var(key: &str, value: &str) {
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-
-    fn remove_env_var(key: &str) {
-        unsafe {
-            std::env::remove_var(key);
-        }
-    }
+    use crate::test_support::{remove_env_var, set_env_var, with_locked_env};
 
     fn write_file(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
@@ -860,13 +843,12 @@ mod tests {
 
     #[test]
     fn load_reads_explicit_file_path() {
-        let _guard = env_lock().lock().expect("env lock");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_path = tmp.path().join("config.toml");
-        write_file(
-            &config_path,
-            r#"
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let config_path = tmp.path().join("config.toml");
+            write_file(
+                &config_path,
+                r#"
 [gateway]
 port = 5555
 report_host = "host.docker.internal"
@@ -892,75 +874,74 @@ url = "/tmp/openpistacrab-test.db"
 [skills]
 workspace = "/tmp/workspace"
 "#,
-        );
-
-        let cfg = Config::load(Some(&config_path)).expect("config should parse");
-        assert_eq!(cfg.gateway.port, 5555);
-        assert_eq!(
-            cfg.gateway.report_host.as_deref(),
-            Some("host.docker.internal")
-        );
-        assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
-        assert_eq!(cfg.agent.model, "gpt-4.1-mini");
-        assert_eq!(cfg.agent.effective_model(), "gpt-4.1-mini");
-        assert_eq!(cfg.agent.api_key, "from_file");
-        assert_eq!(cfg.agent.max_tool_rounds, 7);
-        assert_eq!(
-            cfg.agent.effective_base_url(),
-            Some("https://example.com/v1")
-        );
-        assert!(cfg.channels.telegram.enabled);
-        assert_eq!(cfg.channels.telegram.token, "tg-token");
-        assert!(!cfg.channels.cli.enabled);
-        assert_eq!(cfg.database.url, "/tmp/openpistacrab-test.db");
-        assert_eq!(cfg.skills.workspace, "/tmp/workspace");
+            );
+            let cfg = Config::load(Some(&config_path)).expect("config should parse");
+            assert_eq!(cfg.gateway.port, 5555);
+            assert_eq!(
+                cfg.gateway.report_host.as_deref(),
+                Some("host.docker.internal")
+            );
+            assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
+            assert_eq!(cfg.agent.model, "gpt-4.1-mini");
+            assert_eq!(cfg.agent.effective_model(), "gpt-4.1-mini");
+            assert_eq!(cfg.agent.api_key, "from_file");
+            assert_eq!(cfg.agent.max_tool_rounds, 7);
+            assert_eq!(
+                cfg.agent.effective_base_url(),
+                Some("https://example.com/v1")
+            );
+            assert!(cfg.channels.telegram.enabled);
+            assert_eq!(cfg.channels.telegram.token, "tg-token");
+            assert!(!cfg.channels.cli.enabled);
+            assert_eq!(cfg.database.url, "/tmp/openpistacrab-test.db");
+            assert_eq!(cfg.skills.workspace, "/tmp/workspace");
+        });
     }
 
     #[test]
     fn load_together_preset_auto_configures_url() {
-        let _guard = env_lock().lock().expect("env lock");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_path = tmp.path().join("config.toml");
-        write_file(
-            &config_path,
-            r#"
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let config_path = tmp.path().join("config.toml");
+            write_file(
+                &config_path,
+                r#"
 [agent]
 provider = "together"
 api_key = "tg-key"
 "#,
-        );
-
-        let cfg = Config::load(Some(&config_path)).expect("config should parse");
-        assert_eq!(cfg.agent.provider, ProviderPreset::Together);
-        assert_eq!(
-            cfg.agent.effective_model(),
-            "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-        );
-        assert_eq!(
-            cfg.agent.effective_base_url(),
-            Some("https://api.together.xyz/v1")
-        );
+            );
+            let cfg = Config::load(Some(&config_path)).expect("config should parse");
+            assert_eq!(cfg.agent.provider, ProviderPreset::Together);
+            assert_eq!(
+                cfg.agent.effective_model(),
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+            );
+            assert_eq!(
+                cfg.agent.effective_base_url(),
+                Some("https://api.together.xyz/v1")
+            );
+        });
     }
 
     #[test]
     fn load_returns_toml_error_for_invalid_content() {
-        let _guard = env_lock().lock().expect("env lock");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_path = tmp.path().join("config.toml");
-        write_file(&config_path, "[agent\nmodel = \"broken\"");
-        let err = Config::load(Some(&config_path)).expect_err("invalid toml must fail");
-        assert!(err.to_string().contains("TOML parse error"));
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let config_path = tmp.path().join("config.toml");
+            write_file(&config_path, "[agent\nmodel = \"broken\"");
+            let err = Config::load(Some(&config_path)).expect_err("invalid toml must fail");
+            assert!(err.to_string().contains("TOML parse error"));
+        });
     }
 
     #[test]
     fn resolve_api_key_prefers_config_key() {
-        let _guard = env_lock().lock().expect("env lock");
-
-        let mut cfg = Config::default();
-        cfg.agent.api_key = "abc123".to_string();
-        assert_eq!(cfg.resolve_api_key(), "abc123");
+        with_locked_env(|| {
+            let mut cfg = Config::default();
+            cfg.agent.api_key = "abc123".to_string();
+            assert_eq!(cfg.resolve_api_key(), "abc123");
+        });
     }
 
     #[test]
@@ -989,70 +970,70 @@ api_key = "tg-key"
 
     #[test]
     fn load_applies_env_overrides_for_agent_and_channels() {
-        let _guard = env_lock().lock().expect("env lock");
+        with_locked_env(|| {
+            set_env_var("OPENPISTACRAB_API_KEY", "env-api");
+            set_env_var("OPENPISTACRAB_MODEL", "env-model");
+            set_env_var("TELEGRAM_BOT_TOKEN", "env-tg-token");
+            set_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID", "env-client-id");
+            set_env_var("OPENPISTACRAB_MOBILE_TOKEN", "env-mobile-token");
+            set_env_var("OPENPISTACRAB_WORKSPACE", "/tmp/env-workspace");
 
-        set_env_var("OPENPISTACRAB_API_KEY", "env-api");
-        set_env_var("OPENPISTACRAB_MODEL", "env-model");
-        set_env_var("TELEGRAM_BOT_TOKEN", "env-tg-token");
-        set_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID", "env-client-id");
-        set_env_var("OPENPISTACRAB_MOBILE_TOKEN", "env-mobile-token");
-        set_env_var("OPENPISTACRAB_WORKSPACE", "/tmp/env-workspace");
+            let cfg = Config::load(None).expect("config load");
+            assert_eq!(cfg.agent.api_key, "env-api");
+            assert_eq!(cfg.agent.model, "env-model");
+            assert_eq!(cfg.agent.oauth_client_id, "env-client-id");
+            assert!(cfg.channels.telegram.enabled);
+            assert_eq!(cfg.channels.telegram.token, "env-tg-token");
+            assert!(cfg.channels.mobile.enabled);
+            assert_eq!(cfg.channels.mobile.api_token, "env-mobile-token");
+            assert_eq!(cfg.skills.workspace, "/tmp/env-workspace");
 
-        let cfg = Config::load(None).expect("config load");
-        assert_eq!(cfg.agent.api_key, "env-api");
-        assert_eq!(cfg.agent.model, "env-model");
-        assert_eq!(cfg.agent.oauth_client_id, "env-client-id");
-        assert!(cfg.channels.telegram.enabled);
-        assert_eq!(cfg.channels.telegram.token, "env-tg-token");
-        assert!(cfg.channels.mobile.enabled);
-        assert_eq!(cfg.channels.mobile.api_token, "env-mobile-token");
-        assert_eq!(cfg.skills.workspace, "/tmp/env-workspace");
-
-        remove_env_var("OPENPISTACRAB_API_KEY");
-        remove_env_var("OPENPISTACRAB_MODEL");
-        remove_env_var("TELEGRAM_BOT_TOKEN");
-        remove_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID");
-        remove_env_var("OPENPISTACRAB_MOBILE_TOKEN");
-        remove_env_var("OPENPISTACRAB_WORKSPACE");
+            remove_env_var("OPENPISTACRAB_API_KEY");
+            remove_env_var("OPENPISTACRAB_MODEL");
+            remove_env_var("TELEGRAM_BOT_TOKEN");
+            remove_env_var("OPENPISTACRAB_OAUTH_CLIENT_ID");
+            remove_env_var("OPENPISTACRAB_MOBILE_TOKEN");
+            remove_env_var("OPENPISTACRAB_WORKSPACE");
+        });
     }
 
     #[test]
     fn resolve_api_key_uses_provider_specific_env_then_legacy_fallback() {
-        let _guard = env_lock().lock().expect("env lock");
+        with_locked_env(|| {
+            remove_env_var("OPENPISTACRAB_API_KEY");
+            remove_env_var("TOGETHER_API_KEY");
+            remove_env_var("OPENAI_API_KEY");
 
-        remove_env_var("OPENPISTACRAB_API_KEY");
-        remove_env_var("TOGETHER_API_KEY");
-        remove_env_var("OPENAI_API_KEY");
+            let mut cfg = Config::default();
+            cfg.agent.api_key.clear();
+            cfg.agent.provider = ProviderPreset::Together;
 
-        let mut cfg = Config::default();
-        cfg.agent.api_key.clear();
-        cfg.agent.provider = ProviderPreset::Together;
+            set_env_var("TOGETHER_API_KEY", "provider-key");
+            assert_eq!(cfg.resolve_api_key(), "provider-key");
 
-        set_env_var("TOGETHER_API_KEY", "provider-key");
-        assert_eq!(cfg.resolve_api_key(), "provider-key");
+            remove_env_var("TOGETHER_API_KEY");
+            set_env_var("OPENAI_API_KEY", "legacy-key");
+            assert_eq!(cfg.resolve_api_key(), "legacy-key");
 
-        remove_env_var("TOGETHER_API_KEY");
-        set_env_var("OPENAI_API_KEY", "legacy-key");
-        assert_eq!(cfg.resolve_api_key(), "legacy-key");
-
-        remove_env_var("OPENAI_API_KEY");
+            remove_env_var("OPENAI_API_KEY");
+        });
     }
 
     #[test]
     fn resolve_api_key_uses_opencode_env() {
-        let _guard = env_lock().lock().expect("env lock");
+        with_locked_env(|| {
+            remove_env_var("OPENPISTACRAB_API_KEY");
+            remove_env_var("OPENCODE_API_KEY");
+            remove_env_var("OPENAI_API_KEY");
 
-        remove_env_var("OPENPISTACRAB_API_KEY");
-        remove_env_var("OPENCODE_API_KEY");
-        remove_env_var("OPENAI_API_KEY");
+            let mut cfg = Config::default();
+            cfg.agent.api_key.clear();
+            cfg.agent.provider = ProviderPreset::OpenCode;
 
-        let mut cfg = Config::default();
-        cfg.agent.api_key.clear();
-        cfg.agent.provider = ProviderPreset::OpenCode;
+            set_env_var("OPENCODE_API_KEY", "opencode-key");
+            assert_eq!(cfg.resolve_api_key(), "opencode-key");
 
-        set_env_var("OPENCODE_API_KEY", "opencode-key");
-        assert_eq!(cfg.resolve_api_key(), "opencode-key");
-
-        remove_env_var("OPENCODE_API_KEY");
+            remove_env_var("OPENCODE_API_KEY");
+        });
     }
 }

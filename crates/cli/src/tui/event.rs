@@ -62,18 +62,25 @@ fn validate_api_key(api_key: String) -> Result<String, String> {
 fn persist_credential(
     provider: String,
     credential: crate::auth::ProviderCredential,
+    path: std::path::PathBuf,
 ) -> Result<(), String> {
-    let mut creds = crate::auth::Credentials::load();
+    let mut creds = load_credentials(&path);
     creds.set(provider, credential);
-    creds
-        .save_to(&credentials_path())
-        .map_err(|e| e.to_string())
+    creds.save_to(&path).map_err(|e| e.to_string())
+}
+
+fn load_credentials(path: &std::path::Path) -> crate::auth::Credentials {
+    if !path.exists() {
+        return crate::auth::Credentials::default();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| toml::from_str(&content).ok())
+        .unwrap_or_default()
 }
 
 fn credentials_path() -> std::path::PathBuf {
-    std::env::var("OPENPISTACRAB_CREDENTIALS_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| crate::auth::Credentials::path())
+    crate::auth::Credentials::path()
 }
 
 #[cfg(not(test))]
@@ -111,6 +118,16 @@ pub(crate) async fn build_and_store_credential(
     intent: AuthLoginIntent,
     port: u16,
     timeout: u64,
+) -> Result<String, String> {
+    build_and_store_credential_with_path(config, intent, port, timeout, credentials_path()).await
+}
+
+async fn build_and_store_credential_with_path(
+    config: &Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+    cred_path: std::path::PathBuf,
 ) -> Result<String, String> {
     let provider = intent.provider.to_ascii_lowercase();
     let entry = provider_registry_entry(&provider).ok_or_else(|| {
@@ -170,7 +187,7 @@ pub(crate) async fn build_and_store_credential(
                     credential,
                     format!(
                         "Authenticated as '{provider_name}'. Token stored in {}",
-                        credentials_path().display()
+                        cred_path.display()
                     ),
                 )
             }
@@ -224,7 +241,7 @@ pub(crate) async fn build_and_store_credential(
         }
     };
 
-    tokio::task::spawn_blocking(move || persist_credential(provider_name, credential))
+    tokio::task::spawn_blocking(move || persist_credential(provider_name, credential, cred_path))
         .await
         .map_err(|e| format!("Auth task join failed: {e}"))??;
     if entry.supports_runtime {
@@ -245,6 +262,17 @@ async fn persist_auth(
     timeout: u64,
 ) -> Result<String, String> {
     build_and_store_credential(&config, intent, port, timeout).await
+}
+
+#[cfg(test)]
+async fn persist_auth_with_path(
+    config: Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+    cred_path: std::path::PathBuf,
+) -> Result<String, String> {
+    build_and_store_credential_with_path(&config, intent, port, timeout, cred_path).await
 }
 
 /// RAII guard that restores the terminal on drop (even on panic).
@@ -513,38 +541,6 @@ pub async fn run_tui(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    /// Tests that mutate process environment must use `env_lock()` and execute with
-    /// `--test-threads=1` or process-isolated harnesses.
-    ///
-    /// Helper calls are synchronized via `env_lock()` and use `std::env` mutators.
-    fn set_env_var(key: &str, value: &str) {
-        let _guard = env_lock().lock().unwrap();
-        // SAFETY: required for this toolchain's `std::env` API and serialized by
-        // `env_lock()`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-
-    /// Tests that mutate process environment must use `env_lock()` and execute with
-    /// `--test-threads=1` or process-isolated harnesses.
-    ///
-    /// Helper calls are synchronized via `env_lock()` and use `std::env` mutators.
-    fn remove_env_var(key: &str) {
-        let _guard = env_lock().lock().unwrap();
-        // SAFETY: required for this toolchain's `std::env` API and serialized by
-        // `env_lock()`.
-        unsafe {
-            std::env::remove_var(key);
-        }
-    }
 
     #[test]
     fn terminal_guard_drop_path_is_safe() {
@@ -587,12 +583,8 @@ mod tests {
     async fn persist_auth_api_key_saves_credential() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cred_path = tmp.path().join("credentials.toml");
-        set_env_var(
-            "OPENPISTACRAB_CREDENTIALS_PATH",
-            cred_path.to_string_lossy().as_ref(),
-        );
 
-        let result = persist_auth(
+        let result = persist_auth_with_path(
             Config::default(),
             AuthLoginIntent {
                 provider: "together".to_string(),
@@ -602,6 +594,7 @@ mod tests {
             },
             OAUTH_CALLBACK_PORT,
             OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
         )
         .await;
 
@@ -611,20 +604,14 @@ mod tests {
         let saved = creds.get("together").expect("credential saved");
         assert_eq!(saved.access_token, "tok-together");
         assert_eq!(saved.endpoint, None);
-
-        remove_env_var("OPENPISTACRAB_CREDENTIALS_PATH");
     }
 
     #[tokio::test]
     async fn persist_auth_endpoint_and_key_saves_endpoint() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cred_path = tmp.path().join("credentials.toml");
-        set_env_var(
-            "OPENPISTACRAB_CREDENTIALS_PATH",
-            cred_path.to_string_lossy().as_ref(),
-        );
 
-        let result = persist_auth(
+        let result = persist_auth_with_path(
             Config::default(),
             AuthLoginIntent {
                 provider: "azure-openai".to_string(),
@@ -634,6 +621,7 @@ mod tests {
             },
             OAUTH_CALLBACK_PORT,
             OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
         )
         .await;
 
@@ -643,8 +631,6 @@ mod tests {
         let saved = creds.get("azure-openai").expect("credential saved");
         assert_eq!(saved.access_token, "tok-azure");
         assert_eq!(saved.endpoint.as_deref(), Some("https://example.azure.com"));
-
-        remove_env_var("OPENPISTACRAB_CREDENTIALS_PATH");
     }
 
     #[tokio::test]
