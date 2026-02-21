@@ -50,7 +50,6 @@ struct WasmStoreData {
 /// // Call asynchronously (in an async context)
 /// // let result = run_wasm_skill(req).await;
 /// ```
-pub async fn run_wasm_skill(req: WasmRunRequest) -> Result<ToolResult, String>;
 pub async fn run_wasm_skill(req: WasmRunRequest) -> Result<ToolResult, String> {
     tokio::task::spawn_blocking(move || run_wasm_skill_sync(req))
         .await
