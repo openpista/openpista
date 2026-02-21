@@ -474,21 +474,13 @@ async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, Strin
 }
 
 /// Trim whitespace and yield the input slice when it contains non-empty content.
-
 ///
-
 /// # Examples
-
 ///
-
 /// ```
-
 /// assert_eq!(non_empty("  hello  "), Some("hello"));
-
 /// assert_eq!(non_empty("   "), None);
-
 /// assert_eq!(non_empty("world"), Some("world"));
-
 /// ```
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
@@ -1943,6 +1935,11 @@ mod tests {
         let build = Command::new("cargo")
             .current_dir(&skill_dir)
             .env("CARGO_TARGET_DIR", build_target.path())
+            // Avoid inheriting coverage instrumentation flags when building the wasm fixture.
+            .env_remove("RUSTFLAGS")
+            .env_remove("RUSTDOCFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("LLVM_PROFILE_FILE")
             .args(["build", "--target", "wasm32-wasip1", "--release"])
             .output()
             .await
