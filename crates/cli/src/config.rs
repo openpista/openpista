@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// OAuth 2.0 PKCE application endpoints for a provider.
-#[cfg(not(test))]
 pub struct OAuthEndpoints {
     /// Authorization endpoint (browser redirect target).
     pub auth_url: &'static str,
@@ -17,7 +16,7 @@ pub struct OAuthEndpoints {
 ///
 /// Each preset auto-configures `base_url` and supplies a default model ID so
 /// that users only have to specify what differs from the preset defaults.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderPreset {
     /// OpenAI API (api.openai.com). Default.
@@ -31,11 +30,141 @@ pub enum ProviderPreset {
     Ollama,
     /// OpenRouter – aggregates many providers; base_url auto-set.
     OpenRouter,
+    /// OpenCode Zen endpoint – OpenAI-compatible; base_url auto-set.
+    OpenCode,
     /// Fully custom: set `base_url` and `model` manually.
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Authentication UX mode used by TUI `/login`.
+pub enum LoginAuthMode {
+    /// Browser-based OAuth/PKCE flow.
+    OAuth,
+    /// API-key-only provider.
+    ApiKey,
+    /// Endpoint + key provider.
+    EndpointAndKey,
+    /// No login required.
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Provider classification for picker badges.
+pub enum ProviderCategory {
+    /// Provider is wired into runtime model execution.
+    Runtime,
+    /// Provider is a credential slot only (runtime pending).
+    Extension,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Registry metadata for one provider entry.
+pub struct ProviderRegistryEntry {
+    /// Canonical provider id used in `/login`.
+    pub name: &'static str,
+    /// Human-readable provider label used by pickers.
+    pub display_name: &'static str,
+    /// Provider category badge shown in pickers.
+    pub category: ProviderCategory,
+    /// Sort order for provider picker (lower first).
+    pub sort_order: u16,
+    /// Additional keywords matched by picker search.
+    pub search_aliases: &'static [&'static str],
+    /// Authentication mode used by this provider.
+    pub auth_mode: LoginAuthMode,
+    /// API key env name for this provider.
+    pub api_key_env: &'static str,
+    /// Optional endpoint env name for endpoint+key providers.
+    pub endpoint_env: Option<&'static str>,
+    /// Whether the provider is currently wired into runtime model execution.
+    pub supports_runtime: bool,
+}
+
+const EXTENSION_PROVIDER_SLOTS: &[ProviderRegistryEntry] = &[
+    ProviderRegistryEntry {
+        name: "anthropic",
+        display_name: "Anthropic",
+        category: ProviderCategory::Extension,
+        sort_order: 20,
+        search_aliases: &["claude", "anthropic"],
+        auth_mode: LoginAuthMode::ApiKey,
+        api_key_env: "ANTHROPIC_API_KEY",
+        endpoint_env: None,
+        supports_runtime: false,
+    },
+    ProviderRegistryEntry {
+        name: "github-copilot",
+        display_name: "GitHub Copilot",
+        category: ProviderCategory::Extension,
+        sort_order: 30,
+        search_aliases: &["github", "copilot", "gh"],
+        auth_mode: LoginAuthMode::ApiKey,
+        api_key_env: "GITHUB_COPILOT_TOKEN",
+        endpoint_env: None,
+        supports_runtime: false,
+    },
+    ProviderRegistryEntry {
+        name: "google",
+        display_name: "Google",
+        category: ProviderCategory::Extension,
+        sort_order: 50,
+        search_aliases: &["google", "gemini"],
+        auth_mode: LoginAuthMode::ApiKey,
+        api_key_env: "GOOGLE_API_KEY",
+        endpoint_env: None,
+        supports_runtime: false,
+    },
+    ProviderRegistryEntry {
+        name: "vercel-ai-gateway",
+        display_name: "Vercel AI Gateway",
+        category: ProviderCategory::Extension,
+        sort_order: 70,
+        search_aliases: &["vercel", "ai gateway"],
+        auth_mode: LoginAuthMode::ApiKey,
+        api_key_env: "VERCEL_AI_GATEWAY_API_KEY",
+        endpoint_env: None,
+        supports_runtime: false,
+    },
+    ProviderRegistryEntry {
+        name: "azure-openai",
+        display_name: "Azure OpenAI",
+        category: ProviderCategory::Extension,
+        sort_order: 80,
+        search_aliases: &["azure", "aoai", "openai azure"],
+        auth_mode: LoginAuthMode::EndpointAndKey,
+        api_key_env: "AZURE_OPENAI_API_KEY",
+        endpoint_env: Some("AZURE_OPENAI_ENDPOINT"),
+        supports_runtime: false,
+    },
+    ProviderRegistryEntry {
+        name: "bedrock",
+        display_name: "AWS Bedrock",
+        category: ProviderCategory::Extension,
+        sort_order: 90,
+        search_aliases: &["aws", "bedrock"],
+        auth_mode: LoginAuthMode::EndpointAndKey,
+        api_key_env: "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY",
+        endpoint_env: Some("AWS_REGION"),
+        supports_runtime: false,
+    },
+];
+
 impl ProviderPreset {
+    /// Returns all currently supported runtime provider presets.
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::OpenAi,
+            Self::GlueGoogle,
+            Self::GlueGpt,
+            Self::Together,
+            Self::Ollama,
+            Self::OpenRouter,
+            Self::OpenCode,
+            Self::Custom,
+        ]
+    }
+
     /// Default model ID for the preset. Used when `AgentConfig::model` is empty.
     pub fn default_model(&self) -> &'static str {
         match self {
@@ -45,6 +174,7 @@ impl ProviderPreset {
             Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
             Self::Ollama => "llama3.2",
             Self::OpenRouter => "openai/gpt-4o",
+            Self::OpenCode => "gpt-5-codex",
             Self::Custom => "",
         }
     }
@@ -58,6 +188,7 @@ impl ProviderPreset {
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Ollama => Some("http://localhost:11434/v1"),
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
+            Self::OpenCode => Some("https://opencode.ai/zen/v1"),
             Self::Custom => None,
         }
     }
@@ -72,6 +203,7 @@ impl ProviderPreset {
             Self::Together => "TOGETHER_API_KEY",
             Self::Ollama => "",
             Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::OpenCode => "OPENCODE_API_KEY",
             Self::Custom => "OPENAI_API_KEY",
         }
     }
@@ -85,6 +217,7 @@ impl ProviderPreset {
             Self::Together => "together",
             Self::Ollama => "ollama",
             Self::OpenRouter => "openrouter",
+            Self::OpenCode => "opencode",
             Self::Custom => "custom",
         }
     }
@@ -92,7 +225,6 @@ impl ProviderPreset {
     /// Returns OAuth 2.0 PKCE endpoints for providers that support browser login.
     /// Returns `None` for providers without a supported OAuth flow
     /// (Together.ai and Ollama use API keys only).
-    #[cfg(not(test))]
     pub fn oauth_endpoints(&self) -> Option<OAuthEndpoints> {
         match self {
             Self::OpenAi => Some(OAuthEndpoints {
@@ -106,9 +238,136 @@ impl ProviderPreset {
                 token_url: "https://openrouter.ai/api/v1/auth/keys",
                 scope: "",
             }),
+            Self::OpenCode => None,
             _ => None,
         }
     }
+
+    /// Returns high-level authentication requirement for this preset.
+    pub fn auth_requirements(&self) -> AuthRequirement {
+        if self.oauth_endpoints().is_some() {
+            AuthRequirement::OAuth
+        } else if self.api_key_env().is_empty() {
+            AuthRequirement::None
+        } else {
+            AuthRequirement::ApiKey
+        }
+    }
+
+    /// Converts a runtime preset into a `/login` registry entry.
+    pub fn registry_entry(&self) -> ProviderRegistryEntry {
+        let auth_mode = match self.auth_requirements() {
+            AuthRequirement::OAuth => LoginAuthMode::OAuth,
+            AuthRequirement::ApiKey => {
+                if matches!(self, Self::Custom) {
+                    LoginAuthMode::EndpointAndKey
+                } else {
+                    LoginAuthMode::ApiKey
+                }
+            }
+            AuthRequirement::None => LoginAuthMode::None,
+        };
+
+        let endpoint_env = if matches!(self, Self::Custom) {
+            Some("OPENPISTACRAB_BASE_URL")
+        } else {
+            None
+        };
+
+        ProviderRegistryEntry {
+            name: self.name(),
+            display_name: match self {
+                Self::OpenCode => "OpenCode Zen",
+                Self::OpenAi => "OpenAI (ChatGPT Plus/Pro or API key)",
+                Self::OpenRouter => "OpenRouter",
+                Self::Together => "Together",
+                Self::Ollama => "Ollama",
+                Self::GlueGoogle => "Glue Google",
+                Self::GlueGpt => "Glue GPT",
+                Self::Custom => "Custom OpenAI-Compatible",
+            },
+            category: ProviderCategory::Runtime,
+            sort_order: match self {
+                Self::OpenCode => 10,
+                Self::OpenAi => 40,
+                Self::OpenRouter => 60,
+                Self::Together => 110,
+                Self::GlueGoogle => 120,
+                Self::GlueGpt => 130,
+                Self::Ollama => 140,
+                Self::Custom => 150,
+            },
+            search_aliases: match self {
+                Self::OpenCode => &["zen", "opencode", "coding"],
+                Self::OpenAi => &["openai", "chatgpt", "gpt"],
+                Self::OpenRouter => &["router", "openrouter"],
+                Self::Together => &["together", "llama", "mixtral"],
+                Self::GlueGoogle => &["google", "gemini", "glue"],
+                Self::GlueGpt => &["gpt", "glue"],
+                Self::Ollama => &["ollama", "local"],
+                Self::Custom => &["custom", "openai-compatible", "proxy"],
+            },
+            auth_mode,
+            api_key_env: self.api_key_env(),
+            endpoint_env,
+            supports_runtime: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Low-level auth requirement derived from runtime preset metadata.
+pub enum AuthRequirement {
+    /// OAuth/PKCE authentication.
+    OAuth,
+    /// API key authentication.
+    ApiKey,
+    /// No authentication required.
+    None,
+}
+
+/// Returns the merged provider registry (runtime providers + extension slots).
+pub fn provider_registry() -> Vec<ProviderRegistryEntry> {
+    let mut entries: Vec<ProviderRegistryEntry> = ProviderPreset::all()
+        .iter()
+        .map(ProviderPreset::registry_entry)
+        .collect();
+    entries.extend_from_slice(EXTENSION_PROVIDER_SLOTS);
+    entries
+}
+
+/// Resolves one provider entry by id (case-insensitive).
+pub fn provider_registry_entry(name: &str) -> Option<ProviderRegistryEntry> {
+    provider_registry_entry_ci(name)
+}
+
+/// Resolves one provider entry by id (case-insensitive).
+pub fn provider_registry_entry_ci(name: &str) -> Option<ProviderRegistryEntry> {
+    let needle = name.trim().to_ascii_lowercase();
+    provider_registry()
+        .into_iter()
+        .find(|entry| entry.name == needle)
+}
+
+/// Returns picker-ordered provider entries.
+pub fn provider_registry_for_picker() -> Vec<ProviderRegistryEntry> {
+    let mut entries = provider_registry();
+    entries.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.display_name.cmp(b.display_name))
+    });
+    entries
+}
+
+/// Returns a comma-separated provider name list for user prompts.
+#[allow(dead_code)]
+pub fn provider_registry_names() -> String {
+    provider_registry()
+        .iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Top-level CLI configuration.
@@ -172,6 +431,7 @@ impl std::str::FromStr for ProviderPreset {
             "together" => Ok(Self::Together),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
+            "opencode" => Ok(Self::OpenCode),
             "custom" => Ok(Self::Custom),
             other => Err(format!("unknown provider '{other}'")),
         }
@@ -181,7 +441,7 @@ impl std::str::FromStr for ProviderPreset {
 /// Agent model/provider config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Provider preset: openai | together | ollama | openrouter | custom.
+    /// Provider preset: openai | together | ollama | openrouter | opencode | custom.
     #[serde(default)]
     pub provider: ProviderPreset,
     /// Model ID. Leave empty (or omit) to use the preset default.
@@ -465,12 +725,93 @@ mod tests {
             ProviderPreset::OpenRouter.base_url(),
             Some("https://openrouter.ai/api/v1")
         );
+        assert_eq!(
+            ProviderPreset::OpenCode.base_url(),
+            Some("https://opencode.ai/zen/v1")
+        );
 
         assert_eq!(
             ProviderPreset::Together.default_model(),
             "meta-llama/Llama-3.3-70B-Instruct-Turbo"
         );
         assert_eq!(ProviderPreset::Ollama.default_model(), "llama3.2");
+    }
+
+    #[test]
+    fn provider_registry_contains_runtime_and_extension_slots() {
+        let entries = provider_registry();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "openai" && entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "openrouter" && entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "opencode" && entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "anthropic" && !entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "github-copilot" && !entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "vercel-ai-gateway" && !entry.supports_runtime)
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "azure-openai" && !entry.supports_runtime)
+        );
+    }
+
+    #[test]
+    fn provider_registry_entry_resolves_known_names() {
+        let openai = provider_registry_entry("openai").expect("openai registry entry");
+        assert_eq!(openai.auth_mode, LoginAuthMode::OAuth);
+        assert_eq!(openai.display_name, "OpenAI (ChatGPT Plus/Pro or API key)");
+        assert_eq!(openai.category, ProviderCategory::Runtime);
+
+        let custom = provider_registry_entry("custom").expect("custom registry entry");
+        assert_eq!(custom.auth_mode, LoginAuthMode::EndpointAndKey);
+
+        let azure = provider_registry_entry("azure-openai").expect("azure slot entry");
+        assert_eq!(azure.auth_mode, LoginAuthMode::EndpointAndKey);
+        assert_eq!(azure.endpoint_env, Some("AZURE_OPENAI_ENDPOINT"));
+
+        let copilot = provider_registry_entry_ci("GitHub-COPILOT").expect("copilot slot");
+        assert_eq!(copilot.display_name, "GitHub Copilot");
+        assert_eq!(copilot.category, ProviderCategory::Extension);
+    }
+
+    #[test]
+    fn provider_registry_for_picker_has_priority_ordering() {
+        let entries = provider_registry_for_picker();
+        let top: Vec<&str> = entries.iter().take(7).map(|entry| entry.name).collect();
+        assert_eq!(
+            top,
+            vec![
+                "opencode",
+                "anthropic",
+                "github-copilot",
+                "openai",
+                "google",
+                "openrouter",
+                "vercel-ai-gateway"
+            ]
+        );
     }
 
     #[test]
@@ -615,10 +956,16 @@ api_key = "tg-key"
             "openrouter".parse::<ProviderPreset>().ok(),
             Some(ProviderPreset::OpenRouter)
         );
+        assert_eq!(
+            "opencode".parse::<ProviderPreset>().ok(),
+            Some(ProviderPreset::OpenCode)
+        );
         assert!("unknown".parse::<ProviderPreset>().is_err());
 
         assert_eq!(ProviderPreset::OpenAi.api_key_env(), "OPENAI_API_KEY");
         assert_eq!(ProviderPreset::OpenAi.name(), "openai");
+        assert_eq!(ProviderPreset::OpenCode.api_key_env(), "OPENCODE_API_KEY");
+        assert_eq!(ProviderPreset::OpenCode.name(), "opencode");
         assert_eq!(ProviderPreset::Ollama.api_key_env(), "");
         assert_eq!(ProviderPreset::Ollama.name(), "ollama");
     }
@@ -672,5 +1019,23 @@ api_key = "tg-key"
         assert_eq!(cfg.resolve_api_key(), "legacy-key");
 
         remove_env_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn resolve_api_key_uses_opencode_env() {
+        let _guard = env_lock().lock().expect("env lock");
+
+        remove_env_var("OPENPISTACRAB_API_KEY");
+        remove_env_var("OPENCODE_API_KEY");
+        remove_env_var("OPENAI_API_KEY");
+
+        let mut cfg = Config::default();
+        cfg.agent.api_key.clear();
+        cfg.agent.provider = ProviderPreset::OpenCode;
+
+        set_env_var("OPENCODE_API_KEY", "opencode-key");
+        assert_eq!(cfg.resolve_api_key(), "opencode-key");
+
+        remove_env_var("OPENCODE_API_KEY");
     }
 }

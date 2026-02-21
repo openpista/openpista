@@ -24,6 +24,8 @@ use std::time::Duration;
 pub struct ProviderCredential {
     /// Bearer access token.
     pub access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// Refresh token (if provided by the server).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
@@ -303,6 +305,7 @@ async fn exchange_code(
 
     Ok(ProviderCredential {
         access_token: token.access_token,
+        endpoint: None,
         refresh_token: token.refresh_token,
         expires_at,
     })
@@ -476,6 +479,7 @@ mod tests {
         let mut creds = Credentials::default();
         let cred = ProviderCredential {
             access_token: "tok_test".to_string(),
+            endpoint: None,
             refresh_token: Some("refresh_test".to_string()),
             expires_at: None,
         };
@@ -490,6 +494,7 @@ mod tests {
     fn provider_credential_is_expired_with_no_expiry_returns_false() {
         let cred = ProviderCredential {
             access_token: "tok".to_string(),
+            endpoint: None,
             refresh_token: None,
             expires_at: None,
         };
@@ -500,6 +505,7 @@ mod tests {
     fn provider_credential_is_expired_with_past_expiry_returns_true() {
         let cred = ProviderCredential {
             access_token: "tok".to_string(),
+            endpoint: None,
             refresh_token: None,
             expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
         };
@@ -516,6 +522,7 @@ mod tests {
             "openai".to_string(),
             ProviderCredential {
                 access_token: "sk-test".to_string(),
+                endpoint: None,
                 refresh_token: Some("rt-test".to_string()),
                 expires_at: None,
             },
