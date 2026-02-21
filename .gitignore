@@ -18,6 +18,9 @@ config.toml
 *.cert
 *.pid
 
+# skills
+skills/hello-wasm/target
+
 # OS / local tooling
 .DS_Store
 .sisyphus/
