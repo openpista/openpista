@@ -39,6 +39,14 @@ pub enum TuiMessage {
     Error(String),
 }
 
+/// Determines which "view" is active
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Screen {
+    #[default]
+    Home,
+    Chat,
+}
+
 /// High-level processing state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppState {
@@ -62,6 +70,16 @@ pub struct TuiApp {
     pub cursor_pos: usize,
     /// Current high-level processing state.
     pub state: AppState,
+    /// Which screen is currently displayed.
+    pub screen: Screen,
+    /// Workspace name for status bar.
+    pub workspace_name: String,
+    /// Git branch for status bar.
+    pub branch_name: String,
+    /// Available MCP servers for status bar.
+    pub mcp_count: usize,
+    /// Version text.
+    pub version: String,
     /// Vertical scroll offset for the history panel.
     pub history_scroll: u16,
     /// Model name shown in the status bar.
@@ -89,6 +107,11 @@ impl TuiApp {
             input: String::new(),
             cursor_pos: 0,
             state: AppState::Idle,
+            screen: Screen::Home,
+            workspace_name: "~/openpista".into(),
+            branch_name: "main".into(),
+            mcp_count: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
             history_scroll: 0,
             model_name: model_name.into(),
             session_id,
@@ -204,6 +227,13 @@ impl TuiApp {
                     self.should_quit = true;
                 }
             }
+            (_, KeyCode::Enter) if self.state == AppState::Idle => {
+                // If Enter is pressed, make sure we are heavily into the Chat screen
+                if self.screen == Screen::Home {
+                    self.screen = Screen::Chat;
+                }
+                // (The event loop will then extract `self.take_input()` when handling this)
+            }
             (_, KeyCode::Char(c)) if self.state == AppState::Idle => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
@@ -260,168 +290,67 @@ impl TuiApp {
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
-        // Layout: title(1) | history(fill) | status(1) | input(3)
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .split(area);
+        match self.screen {
+            Screen::Home => {
+                // Layout for home: content(fill) | status(1)
+                let chunks =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
-        self.render_title(frame, chunks[0]);
-        self.render_history(frame, chunks[1]);
-        self.render_status(frame, chunks[2]);
-        self.render_input(frame, chunks[3]);
+                crate::tui::home::render(self, frame, chunks[0]);
+                crate::tui::status::render(self, frame, chunks[1]);
+            }
+            Screen::Chat => {
+                // Layout for chat: title(1) | history(fill) | status(1) | input(3)
+                let chunks = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                ])
+                .split(area);
+
+                self.render_title(frame, chunks[0]);
+                crate::tui::chat::render(self, frame, chunks[1]);
+                crate::tui::status::render(self, frame, chunks[2]);
+                self.render_input(frame, chunks[3]);
+            }
+        }
     }
 
     fn render_title(&self, frame: &mut Frame<'_>, area: Rect) {
-        let session_prefix = &self.session_id.as_str()[..8.min(self.session_id.as_str().len())];
-        let title = Line::from(vec![
-            Span::styled(
-                " openpista ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" session:{session_prefix} "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!(" {} ", self.model_name),
-                Style::default().fg(Color::Green),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(title), area);
-    }
-
-    fn render_history(&self, frame: &mut Frame<'_>, area: Rect) {
-        let mut lines: Vec<Line<'_>> = Vec::new();
-
-        for msg in &self.messages {
-            match msg {
-                TuiMessage::User(text) => {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "You: ",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(text),
-                    ]));
-                }
-                TuiMessage::Assistant(text) => {
-                    lines.push(Line::from(""));
-                    // Split multi-line responses
-                    let mut first = true;
-                    for line in text.lines() {
-                        if first {
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    "Agent: ",
-                                    Style::default()
-                                        .fg(Color::Green)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(line.to_string()),
-                            ]));
-                            first = false;
-                        } else {
-                            lines.push(Line::from(Span::raw(format!("       {line}"))));
-                        }
-                    }
-                }
-                TuiMessage::ToolCall {
-                    tool_name,
-                    args_preview,
-                    done,
-                } => {
-                    let status = if *done { "✓" } else { "⟳" };
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  [{status} {tool_name}] "),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                        Span::styled(args_preview, Style::default().fg(Color::DarkGray)),
-                    ]));
-                }
-                TuiMessage::ToolResult {
-                    tool_name,
-                    output_preview,
-                    is_error,
-                } => {
-                    let color = if *is_error {
-                        Color::Red
-                    } else {
-                        Color::DarkGray
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("    [{tool_name}] → {output_preview}"),
-                        Style::default().fg(color),
-                    )));
-                }
-                TuiMessage::Error(text) => {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("Error: {text}"),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )));
-                }
-            }
-        }
-
-        // Auto-scroll to bottom
-        let content_height = lines.len() as u16;
-        let visible_height = area.height.saturating_sub(2); // block borders
-        let max_scroll = content_height.saturating_sub(visible_height);
-        let scroll = self.history_scroll.min(max_scroll);
-
-        let history = Paragraph::new(Text::from(lines))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0));
-
-        frame.render_widget(history, area);
-    }
-
-    fn render_status(&self, frame: &mut Frame<'_>, area: Rect) {
-        let status_text = match &self.state {
-            AppState::Idle => Line::from(Span::styled(
-                " Enter:send  ↑↓:scroll  Ctrl+C:quit",
-                Style::default().fg(Color::DarkGray),
-            )),
-            AppState::Thinking { round } => {
-                let spinner = SPINNER[(self.spinner_tick as usize) % SPINNER.len()];
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {spinner} Thinking... "),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(
-                        format!("[round {round}]"),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ])
-            }
-            AppState::ExecutingTool { tool_name } => {
-                let spinner = SPINNER[(self.spinner_tick as usize) % SPINNER.len()];
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {spinner} Running "),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(tool_name, Style::default().fg(Color::Cyan)),
-                ])
-            }
+        let border_color = if self.state == AppState::Idle {
+            Color::Cyan
+        } else {
+            Color::DarkGray
         };
-        frame.render_widget(Paragraph::new(status_text), area);
+
+        let display_text = if self.input.is_empty() && self.state == AppState::Idle {
+            "Type a message..."
+        } else {
+            &self.input
+        };
+
+        let input_style = if self.input.is_empty() && self.state == AppState::Idle {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
+        let input = Paragraph::new(Span::styled(display_text, input_style)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(" Input "),
+        );
+
+        frame.render_widget(input, area);
+
+        // Show cursor when idle
+        if self.state == AppState::Idle {
+            // Calculate cursor column (char width up to cursor_pos)
+            let cursor_col = self.input[..self.cursor_pos].chars().count() as u16;
+            frame.set_cursor_position((area.x + 1 + cursor_col, area.y + 1));
+        }
     }
 
     fn render_input(&self, frame: &mut Frame<'_>, area: Rect) {
