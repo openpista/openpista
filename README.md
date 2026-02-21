@@ -160,6 +160,7 @@ workspace = "~/.openpistacrab/workspace"
 |---|---|
 | `OPENPISTACRAB_API_KEY` | OpenAI-compatible API key (overrides config) |
 | `OPENAI_API_KEY` | Fallback API key |
+| `OPENCODE_API_KEY` | OpenCode Zen API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (enables Telegram channel) |
 | `OPENPISTACRAB_WORKSPACE` | Custom skills workspace path |
 
@@ -173,19 +174,41 @@ workspace = "~/.openpistacrab/workspace"
 OPENPISTACRAB_API_KEY=sk-... openpistacrab run -e "list files in my home directory"
 ```
 
-### Interactive REPL
+### Auth Login Picker
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpistacrab repl
+# Interactive provider picker (search + arrow selection)
+openpista auth login
 
-openpistacrab REPL (session: 3f2a1b...)
-Type /quit to exit
+# Non-interactive mode (for scripts/CI)
+openpista auth login --non-interactive --provider opencode --api-key "$OPENCODE_API_KEY"
+```
 
-> what is my current working directory?
-/Users/pista
+TUI shortcuts:
 
-> show me the 5 largest files in /tmp
-...
+```txt
+/login
+/connection
+```
+
+
+```bash
+# Recommended coding models
+openpista models list
+```
+
+TUI shortcuts:
+
+```txt
+/models
+```
+
+Inside the `/models` browser:
+
+```txt
+s or /: search by model id
+r: refresh catalog from remote
+Esc: exit search mode (first) or close browser
 ```
 
 ### Daemon mode (Telegram + CLI + QUIC gateway)

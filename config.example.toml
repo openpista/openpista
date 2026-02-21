@@ -17,6 +17,7 @@ tls_cert = ""  # 비어있으면 rcgen 으로 자동생성
 #   together   → Together.ai             (기본 model: meta-llama/Llama-3.3-70B-Instruct-Turbo, base_url 자동 설정)
 #   ollama     → 로컬 Ollama             (기본 model: llama3.2, base_url 자동 설정, api_key 불필요)
 #   openrouter → OpenRouter              (기본 model: openai/gpt-4o, base_url 자동 설정)
+#   opencode   → OpenCode Zen            (기본 model: gpt-5-codex, base_url 자동 설정)
 #   custom     → base_url / model 직접 지정
 #
 provider = "openai"
@@ -28,6 +29,7 @@ provider = "openai"
 #   model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"   # together
 #   model = "llama3.2"                                   # ollama
 #   model = "anthropic/claude-sonnet-4-5"                # openrouter
+#   model = "gpt-5-codex"                                # opencode
 model = ""
 
 # API 키 — 환경 변수가 우선 적용됩니다:
@@ -35,6 +37,9 @@ model = ""
 #   OPENAI_API_KEY          → openai / custom (폴백)
 #   TOGETHER_API_KEY        → together
 #   OPENROUTER_API_KEY      → openrouter
+#   OPENCODE_API_KEY        → opencode
+#   GITHUB_COPILOT_TOKEN    → github-copilot (login picker extension slot)
+#   VERCEL_AI_GATEWAY_API_KEY → vercel-ai-gateway (login picker extension slot)
 #   (ollama 는 API 키 불필요)
 api_key = ""
 
