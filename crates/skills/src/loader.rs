@@ -124,7 +124,32 @@ impl SkillLoader {
         tokio::fs::read_to_string(path).await.ok()
     }
 
-    /// Loads parsed skill metadata from `skills/<name>/SKILL.md` or `skills/<name>.md`.
+    /// Load parsed metadata for a skill from the workspace's skills directory.
+    ///
+    /// Checks for metadata in the following order and uses the first match:
+    /// 1. `skills/<name>/SKILL.md`
+    /// 2. `skills/<name>.md`
+    ///
+    /// If front matter is present it will be parsed for `image`, `description`, and `mode`.
+    /// The `mode` field maps to `SkillExecutionMode` (invalid or missing values default to `Subprocess`).
+    /// `image` and `description` are trimmed and converted to `None` when empty.
+    /// Returns `None` if `skill_name` is invalid or no readable metadata file is found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::path::PathBuf;
+    /// # use crates::skills::loader::SkillLoader;
+    /// # tokio_test::block_on(async {
+    /// let loader = SkillLoader::new(PathBuf::from("/workspace"));
+    /// let meta = loader.load_skill_metadata("example_skill").await;
+    /// // `meta` is Some(...) when metadata was found and parsed, otherwise None
+    /// # });
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// `Some(SkillMetadata)` with parsed `name`, optional `image` and `description`, and `mode` when metadata is found; `None` otherwise.
     pub async fn load_skill_metadata(&self, skill_name: &str) -> Option<SkillMetadata> {
         if !is_valid_skill_name(skill_name) {
             warn!("Invalid skill name attempt: {skill_name}");
@@ -229,17 +254,77 @@ impl SkillLoader {
         }
     }
 
-    /// Returns the configured workspace root path.
+    /// Get the configured workspace root path.
+    ///
+    /// Returns a reference to the configured workspace directory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// let loader = SkillLoader::new(std::path::PathBuf::from("/tmp/workspace"));
+    /// assert_eq!(loader.workspace(), Path::new("/tmp/workspace"));
+    /// ```
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
 }
 
+/// Extracts YAML front matter from the given markdown content and deserializes it into a `SkillFrontMatter`.
+///
+/// # Examples
+///
+/// ```
+/// let md = r#"---
+/// image: "ghcr.io/example/skill:latest"
+/// description: "Does something"
+/// mode: "wasm"
+/// ---
+/// # Skill
+/// Details...
+/// "#;
+///
+/// let fm = crate::parse_skill_front_matter(md).expect("front matter parsed");
+/// assert_eq!(fm.image.unwrap(), "ghcr.io/example/skill:latest");
+/// assert_eq!(fm.description.unwrap(), "Does something");
+/// assert_eq!(crate::parse_mode(&fm.mode.unwrap_or_default()), crate::SkillExecutionMode::Wasm);
+/// ```
+///
+/// # Returns
+///
+/// `Some(SkillFrontMatter)` when YAML front matter is present and successfully parsed, `None` otherwise.
 fn parse_skill_front_matter(content: &str) -> Option<SkillFrontMatter> {
     let yaml = extract_front_matter(content)?;
     serde_yaml::from_str::<SkillFrontMatter>(&yaml).ok()
 }
 
+/// Extracts YAML front matter from the start of a Markdown document.
+///
+/// The function looks for YAML front matter delimited by `---` on its own line
+/// at the very beginning of `content` and returns the inner YAML block without
+/// the surrounding delimiter lines.
+///
+/// # Returns
+///
+/// `Some(String)` containing the YAML front matter (without the leading and
+/// trailing `---` lines) if valid front matter is present at the start of
+/// `content`, or `None` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// let md = r#"---
+/// title: Example
+/// description: An example skill
+/// ---
+///
+/// # Content
+/// "#;
+///
+/// let yaml = extract_front_matter(md).unwrap();
+/// assert!(yaml.contains("title: Example"));
+/// assert!(yaml.contains("description: An example skill"));
+/// ```
 fn extract_front_matter(content: &str) -> Option<String> {
     let mut lines = content.lines();
     if lines.next()?.trim() != "---" {
@@ -257,6 +342,21 @@ fn extract_front_matter(content: &str) -> Option<String> {
     None
 }
 
+/// Maps a front-matter mode string to a SkillExecutionMode.
+///
+/// Parses the input case-insensitively after trimming whitespace; the literal value `"wasm"` selects
+/// `SkillExecutionMode::Wasm`, and any other value selects `SkillExecutionMode::Subprocess`.
+///
+/// # Returns
+/// `SkillExecutionMode::Wasm` if the trimmed, case-insensitive input is `"wasm"`, `SkillExecutionMode::Subprocess` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(parse_mode(" wasm "), SkillExecutionMode::Wasm);
+/// assert_eq!(parse_mode("WASM"), SkillExecutionMode::Wasm);
+/// assert_eq!(parse_mode("foo"), SkillExecutionMode::Subprocess);
+/// ```
 fn parse_mode(value: &str) -> SkillExecutionMode {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -272,6 +372,21 @@ fn parse_mode(value: &str) -> SkillExecutionMode {
     }
 }
 
+/// Convert a String into an optional trimmed string, returning `None` when the trimmed result is empty.
+///
+/// # Examples
+///
+/// ```
+/// let s = "  hello  ".to_string();
+/// assert_eq!(normalize_optional_text(s), Some("hello".to_string()));
+///
+/// let empty = "   ".to_string();
+/// assert_eq!(normalize_optional_text(empty), None);
+/// ```
+///
+/// # Returns
+///
+/// `Some` with the trimmed text if the input contains non-whitespace characters, `None` otherwise.
 fn normalize_optional_text(value: String) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -281,7 +396,32 @@ fn normalize_optional_text(value: String) -> Option<String> {
     }
 }
 
-/// Executes a script by trying executors in order until one launches successfully.
+/// Attempt to execute `script` by trying each executor in `executors` in order until one starts.
+///
+/// The command is run with `script` and `args`, the process' current directory set to `current_dir`,
+/// and both stdout and stderr captured. If an executor fails to start because the executable is not
+/// found, the next executor is tried. If a process starts, its `std::process::Output` is returned.
+/// If all executors fail to start due to "not found", the last such error is returned; any other
+/// error encountered while spawning or running an executor is returned immediately.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::path::Path;
+/// # async fn doc_example() -> std::io::Result<()> {
+/// let output = crate::run_with_executor_candidates(
+///     &["bash", "sh"],
+///     Path::new("scripts/run.sh"),
+///     &["--help"],
+///     Path::new("."),
+/// ).await?;
+///
+/// // Inspect captured output
+/// let stdout = String::from_utf8_lossy(&output.stdout);
+/// assert!(stdout.contains("Usage") || output.status.code().is_some());
+/// # Ok(())
+/// # }
+/// ```
 async fn run_with_executor_candidates(
     executors: &[&str],
     script: &Path,
@@ -317,6 +457,20 @@ async fn run_with_executor_candidates(
     }))
 }
 
+/// Determines if `name` is exactly one normal filesystem path component.
+///
+/// This returns `true` only when `name` parses as a single path component that is a
+/// normal segment (not `.` or `..`, not containing separators) and its UTF-8
+/// representation equals the original `name`.
+///
+/// # Examples
+///
+/// ```
+/// assert!(is_valid_skill_name("skill"));
+/// assert!(!is_valid_skill_name("nested/skill"));
+/// assert!(!is_valid_skill_name(".."));
+/// assert!(!is_valid_skill_name(""));
+/// ```
 fn is_valid_skill_name(name: &str) -> bool {
     let path = Path::new(name);
     let mut components = path.components();
@@ -515,6 +669,19 @@ mod tests {
         assert_eq!(metadata.description.as_deref(), Some("hello wasm"));
     }
 
+    /// Verifies that a skill's execution mode defaults to `Subprocess` when the front-matter `mode` is missing or unrecognized.
+    ///
+    /// This test creates two skill definitions:
+    /// - one with no `mode` field in the front matter,
+    /// - one with an unknown `mode` value,
+    /// and asserts that both yield `SkillExecutionMode::Subprocess`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // creates skills/a/SKILL.md without `mode` and skills/b/SKILL.md with `mode: unknown`
+    /// // then asserts both metadata entries have mode == SkillExecutionMode::Subprocess
+    /// ```
     #[tokio::test]
     async fn load_skill_metadata_defaults_mode_when_missing_or_invalid() {
         let tmp = tempfile::tempdir().expect("tempdir");

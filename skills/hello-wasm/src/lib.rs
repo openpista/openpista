@@ -20,6 +20,31 @@ struct ToolResult {
 
 static OUTPUT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+/// Allocate a heap buffer with the given capacity and return a raw pointer to it.
+///
+/// The caller is responsible for deallocating the returned buffer (using the corresponding
+/// `dealloc` function) with the same pointer and length to avoid memory leaks.
+///
+/// # Parameters
+///
+/// * `len` — Requested capacity in bytes; must be greater than zero.
+///
+/// # Returns
+///
+/// `0` if `len` is less than or equal to zero, otherwise a raw pointer to the allocated
+/// buffer cast to `i32`.
+///
+/// # Examples
+///
+/// ```
+/// // Safety: `alloc`/`dealloc` operate on raw pointers; the caller must ensure correct use.
+/// unsafe {
+///     let ptr = alloc(16);
+///     assert!(ptr != 0);
+///     // ... use the buffer ...
+///     dealloc(ptr, 16);
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc(len: i32) -> i32 {
     if len <= 0 {
@@ -32,6 +57,19 @@ pub extern "C" fn alloc(len: i32) -> i32 {
     ptr as i32
 }
 
+/// Deallocates a previously allocated byte buffer obtained via this module's ABI.
+///
+/// If `ptr` or `len` are non-positive the function does nothing. Otherwise it reconstitutes
+/// the original `Vec<u8>` from the raw pointer and capacity so Rust can drop and free the buffer.
+///
+/// # Examples
+///
+/// ```
+/// // allocate a buffer through the FFI allocator, then free it
+/// let ptr = unsafe { alloc(16) };
+/// assert!(ptr != 0);
+/// unsafe { dealloc(ptr, 16) };
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn dealloc(ptr: i32, len: i32) {
     if ptr <= 0 || len <= 0 {
@@ -43,6 +81,39 @@ pub extern "C" fn dealloc(ptr: i32, len: i32) {
     }
 }
 
+/// Process a JSON-encoded `ToolCall` located at the given pointer and length, produce a JSON-encoded `ToolResult`, store it in the global `OUTPUT` buffer, and return a pointer/length handle to the stored result.
+///
+/// The function treats non-positive `ptr` or `len` as invalid ABI input and returns an error `ToolResult`; otherwise it reads `len` bytes from `ptr`, attempts to decode a `ToolCall`, constructs an appropriate `ToolResult` (including decode or encode error payloads when necessary), serializes that result to JSON, stores the bytes in `OUTPUT`, and returns a combined handle.
+///
+/// # Returns
+///
+/// A 64-bit value where the upper 32 bits are the pointer to the stored JSON-encoded `ToolResult` and the lower 32 bits are its length.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+///
+/// // Prepare a ToolCall payload.
+/// let call = json!({
+///     "id": "1",
+///     "name": "hello-wasm",
+///     "arguments": { "name": "alice" }
+/// });
+/// let bytes = serde_json::to_vec(&call).unwrap();
+///
+/// // Allocate, copy, and invoke `run` (unsafe FFI-style).
+/// let ptr = crate::alloc(bytes.len() as i32);
+/// unsafe {
+///     std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+///     let handle = crate::run(ptr as i32, bytes.len() as i32);
+///     let out_ptr = (handle >> 32) as *const u8;
+///     let out_len = (handle & 0xffff_ffff) as usize;
+///     let slice = std::slice::from_raw_parts(out_ptr, out_len);
+///     let result_json = std::str::from_utf8(slice).unwrap();
+///     assert!(result_json.contains("hello from wasm"));
+/// }
+/// ```
 #[unsafe(no_mangle)]
 pub extern "C" fn run(ptr: i32, len: i32) -> i64 {
     let result = if ptr <= 0 || len <= 0 {

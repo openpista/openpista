@@ -19,7 +19,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ## What is openpista?
 
-openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI) to your **operating system** via an AI agent loop.
+openpistacrab is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI,WhatApp) to your **operating system** via an AI agent loop.
 
 - Send a message in Telegram → the LLM decides what to do → bash runs it → reply comes back
 - Single static binary, ~10 MB, minimal memory footprint
