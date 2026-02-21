@@ -58,7 +58,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Context concatenation from all discovered skills
 - [x] Subprocess execution: `run.sh` → bash, `main.py` → python/python3
 - [x] Non-zero exit codes surfaced as tool errors
-- [x] `OPENPISTACRAB_WORKSPACE` environment variable override
+- [x] `openpista_WORKSPACE` environment variable override
 
 ### Docker Sandbox
 

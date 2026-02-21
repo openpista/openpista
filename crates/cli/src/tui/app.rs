@@ -359,6 +359,21 @@ impl TuiApp {
         };
     }
 
+    pub fn reopen_provider_selection_with_error(&mut self, message: String) {
+        self.state = AppState::LoginBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::SelectProvider,
+            selected_provider: None,
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: Some(message),
+            endpoint: None,
+        };
+    }
+
     /// Opens/updates model browser with new catalog data.
     pub fn open_model_browser(
         &mut self,
@@ -1473,40 +1488,23 @@ impl TuiApp {
     }
 
     fn render_title(&self, frame: &mut Frame<'_>, area: Rect) {
-    pub fn render_input(&self, frame: &mut Frame<'_>, area: Rect) {
-        let border_color = if self.state == AppState::Idle {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
-
-        let display_text = if self.input.is_empty() && self.state == AppState::Idle {
-            "Type a message..."
-        } else {
-            &self.input
-        };
-
-        let input_style = if self.input.is_empty() && self.state == AppState::Idle {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default()
-        };
-
-        let input = Paragraph::new(Span::styled(display_text, input_style)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .title(" Input "),
-        );
-
-        frame.render_widget(input, area);
-
-        // Show cursor when idle
-        if self.state == AppState::Idle {
-            // Calculate cursor column (char width up to cursor_pos)
-            let cursor_col = self.input[..self.cursor_pos].chars().count() as u16;
-            frame.set_cursor_position((area.x + 1 + cursor_col, area.y + 1));
-        }
+        let title = Line::from(vec![
+            Span::styled(
+                " Chat ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" model:{} ", self.model_name),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" session:{} ", self.session_id.as_str()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(title), area);
     }
 
     fn render_input(&self, frame: &mut Frame<'_>, area: Rect) {

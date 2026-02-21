@@ -46,7 +46,7 @@ const DEFAULT_CPU_MILLIS: i64 = 1000;
 const MAX_OUTPUT_CHARS: usize = 10_000;
 const TOKEN_ENV_FILE_NAME: &str = ".openpista_task_env";
 const TOKEN_MOUNT_DIR: &str = "/run/secrets";
-const DEFAULT_TOKEN_ENV_NAME: &str = "OPENPISTACRAB_TASK_TOKEN";
+const DEFAULT_TOKEN_ENV_NAME: &str = "openpista_TASK_TOKEN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeMode {
@@ -208,7 +208,7 @@ impl Tool for ContainerTool {
                 },
                 "token_env_name": {
                     "type": "string",
-                    "description": "Environment variable name exposed by injected credential file (default: OPENPISTACRAB_TASK_TOKEN)"
+                    "description": "Environment variable name exposed by injected credential file (default: openpista_TASK_TOKEN)"
                 },
                 "report_via_quic": {
                     "type": "boolean",
@@ -1269,7 +1269,7 @@ fn unix_now_secs() -> Result<u64, String> {
 /// let cred = TaskCredential {
 ///     token: "token".into(),
 ///     expires_at_unix: 0,
-///     env_name: "OPENPISTACRAB_TASK_TOKEN".into(),
+///     env_name: "openpista_TASK_TOKEN".into(),
 /// };
 /// let cmd_with_cred = build_shell_command("echo secret", Some(&cred));
 /// assert!(cmd_with_cred.ends_with("echo secret"));
@@ -1361,7 +1361,7 @@ fn build_task_credential_archive(credential: &TaskCredential) -> Result<Vec<u8>,
 
 fn build_task_credential_script(credential: &TaskCredential) -> String {
     format!(
-        "export {}={}\nexport OPENPISTACRAB_TASK_TOKEN_EXPIRES_AT={}\n",
+        "export {}={}\nexport openpista_TASK_TOKEN_EXPIRES_AT={}\n",
         credential.env_name,
         shell_single_quote(&credential.token),
         credential.expires_at_unix
@@ -2095,12 +2095,12 @@ mod tests {
         let credential = TaskCredential {
             token: "abc123".to_string(),
             expires_at_unix: 42,
-            env_name: "OPENPISTACRAB_TASK_TOKEN".to_string(),
+            env_name: "openpista_TASK_TOKEN".to_string(),
         };
 
         let script = build_task_credential_script(&credential);
-        assert!(script.contains("export OPENPISTACRAB_TASK_TOKEN='abc123'"));
-        assert!(script.contains("OPENPISTACRAB_TASK_TOKEN_EXPIRES_AT=42"));
+        assert!(script.contains("export openpista_TASK_TOKEN='abc123'"));
+        assert!(script.contains("openpista_TASK_TOKEN_EXPIRES_AT=42"));
     }
 
     #[test]

@@ -58,7 +58,7 @@
 - [x] 발견된 모든 스킬로부터 문맥 연결(concatenation)
 - [x] 하위 프로세스 실행: `run.sh` → bash, `main.py` → python/python3
 - [x] 도구 에러로 표출되는 0이 아닌 종료 코드(Non-zero exit codes)
-- [x] `OPENPISTACRAB_WORKSPACE` 환경 변수 재정의(override)
+- [x] `openpista_WORKSPACE` 환경 변수 재정의(override)
 
 ### Docker 샌드박스 (Docker Sandbox)
 
