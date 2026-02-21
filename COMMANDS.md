@@ -1,84 +1,84 @@
-# COMMANDS
+# 명렁어 가이드 (COMMANDS)
 
-Frequently used commands in `openpista` categorized by `CLI` and `TUI`
+`openpista`에서 자주 사용되는 명령어들을 `CLI`와 `TUI` 카테고리별로 정리했습니다.
 
-## CLI Commands
+## CLI 명령어 (CLI Commands)
 
-### Basic Execution
+### 기본 실행
 
 ```bash
-# Run TUI (Default)
+# TUI 실행 (기본값)
 openpista
 openpista tui
 
-# Run Daemon
+# 데몬 실행
 openpista start
 
-# Execute Single Request
-openpista run -e "your prompt"
+# 단일 요청 실행 (스크립트용)
+openpista run -e "프롬프트를 입력하세요"
 ```
 
-### Model Catalog
+### 모델 카탈로그 (Model Catalog)
 
 ```bash
-# Default: List recommended coding models
+# 기본: 추천 코딩 모델 목록 확인
 openpista models list
 ```
 
-### Authentication (Auth)
+### 인증 (Authentication)
 
 ```bash
-# Interactive provider picker login
+# 대화형 인증 제공자(Provider) 선택창 열기
 openpista auth login
 
-# Non-interactive login (Script/CI)
+# 비대화형 로그인 (CI 또는 스크립트용)
 openpista auth login --non-interactive --provider opencode --api-key "$OPENCODE_API_KEY"
 
-# Example of endpoint + key provider
+# 엔드포인트와 키를 같이 사용하는 제공자 예시
 openpista auth login --non-interactive \
   --provider azure-openai \
   --endpoint "https://your-resource.openai.azure.com" \
   --api-key "$AZURE_OPENAI_API_KEY"
 
-# Logout
+# 로그아웃
 openpista auth logout --provider openai
 
-# Check saved authentication status
+# 저장된 인증 상태 확인
 openpista auth status
 ```
 
-## TUI Commands
+## TUI 명령어 (TUI Commands)
 
-### Slash Commands
+### 슬래시 명령어 (Slash Commands)
 
 ```txt
-/help                    - Show available TUI commands
-/login                   - Open provider picker for authentication
-/connection              - Same as /login (alias)
-/models                  - Open model browser (Recommended on top, All Models at bottom)
-/clear                   - Clear conversation history
-/quit                    - Exit TUI
-/exit                    - Exit TUI (alias for /quit)
+/help                    - 사용 가능한 TUI 명령어 목록 보기
+/login                   - 인증을 위한 제공자 선택창 열기
+/connection              - /login 과 동일 (별칭)
+/models                  - 모델 브라우저 열기 (상단에 추천 모델, 하단에 전체 모델 표시)
+/clear                   - 대화 기록 지우기
+/quit                    - TUI 종료
+/exit                    - TUI 종료 (/quit 과 동일)
 ```
 
-### Login Browser Keybinds
+### 로그인 브라우저 단축키 (Login Browser Keybinds)
 
 ```txt
-↑/↓, j/k: Move
-Enter: Select/Next step
-Type: Search or input
-Backspace: Delete input
-Esc: Previous step or exit
+↑/↓, j/k: 이동
+Enter: 선택 / 다음 단계로 진행
+텍스트 입력: 검색 또는 정보 입력
+Backspace: 입력 지우기
+Esc: 이전 단계로 돌아가거나 종료
 ```
 
-### Model Browser Keybinds
+### 모델 브라우저 단축키 (Model Browser Keybinds)
 
 ```txt
-s or /: Enter search mode
-Type/Backspace: Search for model id partial match
-j/k, ↑/↓: Move
-PgUp/PgDn: Move page
-Enter: Apply selected model as the current session model
-r: Force Refresh
-Esc: (In search mode) Exit search, (In normal mode) Exit browser
+s 또는 /: 검색 모드 진입
+입력/Backspace: 모델 ID 부분 일치 검색
+j/k, ↑/↓: 이동
+PgUp/PgDn: 페이지 단위 이동
+Enter: 선택한 모델을 현재 세션 모델로 적용
+r: 강제 새로고침 (Force Refresh)
+Esc: (검색 모드에서) 검색 종료, (일반 모드에서) 브라우저 종료
 ```
