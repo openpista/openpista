@@ -140,14 +140,10 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json");
 
         if proto::is_anthropic_oauth_token(&self.api_key) {
-            return Err(LlmError::Api(
-                "OAuth tokens (sk-ant-oat*) are not supported by the Anthropic Messages API. \
-                 Use /login and select 'API Key' instead of OAuth, \
-                 or set the openpista_API_KEY environment variable."
-                    .to_string(),
-            ));
+            req_builder = req_builder.bearer_auth(&self.api_key);
+        } else {
+            req_builder = req_builder.header("x-api-key", &self.api_key);
         }
-        req_builder = req_builder.header("x-api-key", &self.api_key);
 
         let response = req_builder
             .json(&anthropic_req)
@@ -538,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_is_rejected_early() {
+    fn oauth_token_detected_by_shared_helper() {
         // Verify the shared helper correctly identifies OAuth tokens
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));

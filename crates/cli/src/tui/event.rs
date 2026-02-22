@@ -304,25 +304,7 @@ async fn build_and_store_credential_with_path(
                     .map_err(|e| e.to_string())?
                 };
 
-                let credential = if provider_name == "anthropic" {
-                    let permanent_key =
-                        crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
-                            .await
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to convert OAuth token to API key: {e}. \
-                                     Use /login and select 'API Key' instead of OAuth."
-                                )
-                            })?;
-                    crate::auth::ProviderCredential {
-                        access_token: permanent_key,
-                        refresh_token: None,
-                        expires_at: None,
-                        endpoint: None,
-                    }
-                } else {
-                    oauth_credential
-                };
+                let credential = oauth_credential;
 
                 (
                     credential,
@@ -730,27 +712,7 @@ pub async fn run_tui(
                                         crate::auth::complete_code_display_flow(&pending, &code)
                                             .await
                                             .map_err(|e| e.to_string())?;
-                                    let credential = if provider_name == "anthropic" {
-                                        let permanent_key =
-                                            crate::auth::create_anthropic_api_key(
-                                                &oauth_cred.access_token,
-                                            )
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "Failed to convert OAuth token to API key: {e}. \
-                                                     Use /login and select 'API Key' instead of OAuth."
-                                                )
-                                            })?;
-                                        crate::auth::ProviderCredential {
-                                            access_token: permanent_key,
-                                            refresh_token: None,
-                                            expires_at: None,
-                                            endpoint: None,
-                                        }
-                                    } else {
-                                        oauth_cred
-                                    };
+                                    let credential = oauth_cred;
                                     let p = provider_name.clone();
                                     tokio::task::spawn_blocking(move || {
                                         persist_credential(p, credential, cred_path)
