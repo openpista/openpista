@@ -29,8 +29,10 @@ use crate::config::{
 use crate::model_catalog;
 use tracing::debug;
 
+/// Local port used for the OAuth redirect callback server.
 const OAUTH_CALLBACK_PORT: u16 = 9009;
 
+/// Formats model catalog entries into a human-readable text listing for chat display.
 fn format_model_list(
     entries: &[model_catalog::ModelCatalogEntry],
     sync_statuses: &[String],
@@ -99,15 +101,21 @@ fn collect_authenticated_providers(config: &Config) -> Vec<(String, Option<Strin
     }
     providers
 }
+/// Maximum seconds to wait for the OAuth callback before timing out.
 const OAUTH_TIMEOUT_SECS: u64 = 120;
 
+/// Parsed sub-command for the `/model` slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelsCommand {
+    /// Open the interactive model browser.
     Browse,
+    /// Print model list to chat.
     List,
+    /// Unrecognised sub-command with an error message.
     Invalid(String),
 }
 
+/// Parses a raw `/model` input into a `ModelsCommand` variant.
 fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
     let mut parts = raw.split_whitespace();
     if parts.next()? != "/model" {
@@ -123,9 +131,12 @@ fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
     }
 }
 
+/// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelTaskMode {
+    /// Open the interactive browser with a search query.
     Browse(String),
+    /// Print a text listing to chat.
     List,
 }
 
@@ -152,6 +163,7 @@ fn persist_credential(
     creds.save_to(&path).map_err(|e| e.to_string())
 }
 
+/// Loads provider credentials from the given TOML file path.
 fn load_credentials(path: &std::path::Path) -> crate::auth::Credentials {
     if !path.exists() {
         return crate::auth::Credentials::default();
@@ -162,6 +174,7 @@ fn load_credentials(path: &std::path::Path) -> crate::auth::Credentials {
         .unwrap_or_default()
 }
 
+/// Returns the default on-disk credentials file path.
 fn credentials_path() -> std::path::PathBuf {
     crate::auth::Credentials::path()
 }
@@ -196,6 +209,7 @@ async fn run_oauth_login(
     anyhow::bail!("OAuth login is not available in tests")
 }
 
+/// Builds and persists a provider credential using the default credentials path.
 pub(crate) async fn build_and_store_credential(
     config: &Config,
     intent: AuthLoginIntent,
@@ -205,6 +219,7 @@ pub(crate) async fn build_and_store_credential(
     build_and_store_credential_with_path(config, intent, port, timeout, credentials_path()).await
 }
 
+/// Builds and persists a provider credential to a specified path.
 async fn build_and_store_credential_with_path(
     config: &Config,
     intent: AuthLoginIntent,
@@ -290,15 +305,21 @@ async fn build_and_store_credential_with_path(
                 };
 
                 let credential = if provider_name == "anthropic" {
-                    let permanent_key =
-                        crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
-                            .await
-                            .map_err(|e| format!("Failed to create Anthropic API key: {e}"))?;
-                    crate::auth::ProviderCredential {
-                        access_token: permanent_key,
-                        refresh_token: None,
-                        expires_at: None,
-                        endpoint: None,
+                    match crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
+                        .await
+                    {
+                        Ok(permanent_key) => crate::auth::ProviderCredential {
+                            access_token: permanent_key,
+                            refresh_token: None,
+                            expires_at: None,
+                            endpoint: None,
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to create Anthropic API key, using OAuth token directly: {e}"
+                            );
+                            oauth_credential
+                        }
                     }
                 } else {
                     oauth_credential
@@ -385,6 +406,7 @@ async fn persist_auth(
     build_and_store_credential(&config, intent, port, timeout).await
 }
 
+/// Test helper that delegates to `build_and_store_credential_with_path`.
 #[cfg(test)]
 async fn persist_auth_with_path(
     config: Config,
@@ -710,18 +732,23 @@ pub async fn run_tui(
                                             .await
                                             .map_err(|e| e.to_string())?;
                                     let credential = if provider_name == "anthropic" {
-                                        let api_key = crate::auth::create_anthropic_api_key(
+                                        match crate::auth::create_anthropic_api_key(
                                             &oauth_cred.access_token,
                                         )
                                         .await
-                                        .map_err(|e| {
-                                            format!("Failed to create Anthropic API key: {e}")
-                                        })?;
-                                        crate::auth::ProviderCredential {
-                                            access_token: api_key,
-                                            refresh_token: None,
-                                            expires_at: None,
-                                            endpoint: None,
+                                        {
+                                            Ok(api_key) => crate::auth::ProviderCredential {
+                                                access_token: api_key,
+                                                refresh_token: None,
+                                                expires_at: None,
+                                                endpoint: None,
+                                            },
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to create Anthropic API key, using OAuth token directly: {e}"
+                                                );
+                                                oauth_cred
+                                            }
                                         }
                                     } else {
                                         oauth_cred

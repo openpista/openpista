@@ -23,6 +23,7 @@ impl PidFile {
         PathBuf::from(home).join(".openpista").join("openpista.pid")
     }
 
+    /// Writes the current process ID to the PID file.
     pub async fn write(&self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;

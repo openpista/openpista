@@ -3,13 +3,17 @@ use crate::config::{
     provider_registry_for_picker,
 };
 
+/// Authentication method chosen by the user during the login flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethodChoice {
+    /// Browser-based OAuth 2.0 PKCE flow.
     OAuth,
+    /// Manual API key entry.
     ApiKey,
 }
 
 impl AuthMethodChoice {
+    /// Returns a human-readable label for this auth method.
     pub fn label(self) -> &'static str {
         match self {
             Self::OAuth => "Browser login (OAuth)",
@@ -18,22 +22,33 @@ impl AuthMethodChoice {
     }
 }
 
+/// Steps in the interactive login browser wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginBrowseStep {
+    /// Provider selection list.
     SelectProvider,
+    /// Auth method selection (OAuth vs API key).
     SelectMethod,
+    /// Endpoint URL input for endpoint+key providers.
     InputEndpoint,
+    /// API key text input.
     InputApiKey,
 }
 
+/// Captures the user's complete login intent from the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLoginIntent {
+    /// Selected provider identifier.
     pub provider: String,
+    /// Chosen authentication method.
     pub auth_method: AuthMethodChoice,
+    /// Optional custom endpoint URL (for endpoint+key providers).
     pub endpoint: Option<String>,
+    /// Optional API key entered by the user.
     pub api_key: Option<String>,
 }
 
+/// Returns `true` if `entry` matches the search `query` by name, display name, or alias.
 pub fn provider_matches_query(entry: &ProviderRegistryEntry, query: &str) -> bool {
     let needle = query.trim().to_ascii_lowercase();
     if needle.is_empty() {
@@ -48,6 +63,7 @@ pub fn provider_matches_query(entry: &ProviderRegistryEntry, query: &str) -> boo
             .any(|alias| alias.to_ascii_lowercase().contains(&needle))
 }
 
+/// Returns provider registry entries matching the given search query.
 pub fn filtered_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
     provider_registry_for_picker()
         .into_iter()
@@ -55,6 +71,7 @@ pub fn filtered_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
         .collect()
 }
 
+/// Returns provider entries grouped by category (Runtime first, then Extension).
 fn grouped_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
     let mut runtime = Vec::new();
     let mut extension = Vec::new();
@@ -70,6 +87,7 @@ fn grouped_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
     runtime
 }
 
+/// Determines which login browser step to show after selecting a provider.
 pub fn provider_step_for_entry(entry: &ProviderRegistryEntry) -> LoginBrowseStep {
     if entry.name == "openai" || entry.name == "anthropic" {
         LoginBrowseStep::SelectMethod
@@ -83,10 +101,12 @@ pub fn provider_step_for_entry(entry: &ProviderRegistryEntry) -> LoginBrowseStep
     }
 }
 
+/// Parses an optional provider seed string into a trimmed search query.
 pub fn parse_provider_seed(seed: Option<&str>) -> String {
     seed.unwrap_or_default().trim().to_string()
 }
 
+/// Selects the default auth method for a provider, with optional user preference.
 pub fn api_key_method_for_provider(
     provider: &str,
     preferred: Option<AuthMethodChoice>,
@@ -98,6 +118,7 @@ pub fn api_key_method_for_provider(
     }
 }
 
+/// Truncates a line to fit within `width` columns, adding `...` if needed.
 #[cfg(not(test))]
 fn truncate_for_width(line: &str, width: usize) -> String {
     if width == 0 {
@@ -117,6 +138,7 @@ fn truncate_for_width(line: &str, width: usize) -> String {
     format!("{head}...")
 }
 
+/// Joins lines with CRLF line endings for terminal rendering.
 fn lines_to_crlf(lines: &[String]) -> String {
     let mut out = String::new();
     for line in lines {
@@ -126,12 +148,14 @@ fn lines_to_crlf(lines: &[String]) -> String {
     out
 }
 
+/// Pushes a character to the input buffer and a `*` to the masked display buffer.
 #[cfg(not(test))]
 fn masked_push(masked: &mut String, input: &mut String, c: char) {
     input.push(c);
     masked.push('*');
 }
 
+/// Pops one character from both the input and masked display buffers.
 #[cfg(not(test))]
 fn masked_pop(masked: &mut String, input: &mut String) {
     if input.pop().is_some() {
@@ -139,6 +163,7 @@ fn masked_pop(masked: &mut String, input: &mut String) {
     }
 }
 
+/// RAII guard that restores terminal state (raw mode, alternate screen) on drop.
 #[cfg(not(test))]
 struct TerminalUiGuard;
 
@@ -154,23 +179,35 @@ impl Drop for TerminalUiGuard {
     }
 }
 
+/// Internal state for the interactive CLI auth-provider picker.
 #[cfg(not(test))]
 #[derive(Debug, Clone)]
 struct CliPickerState {
+    /// Current search/filter query.
     query: String,
+    /// Index of the highlighted row.
     cursor: usize,
+    /// Active wizard step.
     step: LoginBrowseStep,
+    /// Provider chosen in the first step.
     selected_provider: Option<ProviderRegistryEntry>,
+    /// Auth method chosen in the second step.
     selected_method: Option<AuthMethodChoice>,
+    /// Endpoint URL captured for endpoint+key providers.
     endpoint: Option<String>,
+    /// Raw text input (endpoint or API key).
     input_buffer: String,
+    /// Masked version of the API key input.
     masked_buffer: String,
+    /// Error message from the last action.
     last_error: Option<String>,
+    /// OAuth client ID from config, used for availability checks.
     config_oauth_client_id: String,
 }
 
 #[cfg(not(test))]
 impl CliPickerState {
+    /// Creates a new picker state with an optional provider-name seed.
     fn new(seed: Option<&str>, config_oauth_client_id: String) -> Self {
         Self {
             query: parse_provider_seed(seed),
@@ -186,14 +223,17 @@ impl CliPickerState {
         }
     }
 
+    /// Returns `true` if OAuth login is available for the given provider.
     fn oauth_available_for(&self, provider_name: &str) -> bool {
         crate::config::oauth_available_for(provider_name, &self.config_oauth_client_id)
     }
 
+    /// Returns provider entries matching the current search query.
     fn providers(&self) -> Vec<ProviderRegistryEntry> {
         grouped_provider_entries(&self.query)
     }
 
+    /// Clamps the cursor index within the valid range `[0, len-1]`.
     fn clamp_cursor(&mut self, len: usize) {
         if len == 0 {
             self.cursor = 0;
@@ -202,10 +242,12 @@ impl CliPickerState {
         self.cursor = self.cursor.min(len.saturating_sub(1));
     }
 
+    /// Moves the cursor up one position.
     fn move_up(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
     }
 
+    /// Moves the cursor down one position within `[0, len-1]`.
     fn move_down(&mut self, len: usize) {
         if len == 0 {
             self.cursor = 0;
@@ -215,6 +257,7 @@ impl CliPickerState {
     }
 }
 
+/// Renders the CLI picker UI to the alternate screen.
 #[cfg(not(test))]
 fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
     use crossterm::{
@@ -319,6 +362,7 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
+/// Runs the interactive terminal-based auth provider picker.
 pub fn run_cli_auth_picker(
     initial_provider_seed: Option<&str>,
     config_oauth_client_id: String,
@@ -553,6 +597,7 @@ pub fn run_cli_auth_picker(
     }
 }
 
+/// Looks up a provider registry entry by case-insensitive name.
 pub fn provider_by_name(name: &str) -> Option<ProviderRegistryEntry> {
     provider_registry_entry_ci(name)
 }

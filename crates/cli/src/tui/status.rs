@@ -1,3 +1,5 @@
+//! Status bar widget — workspace, branch, MCP count, state indicator, and version.
+
 use super::app::{AppState, TuiApp};
 use super::theme::THEME;
 use ratatui::{
@@ -8,8 +10,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+/// Braille-pattern spinner frames for the status bar animation.
 const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
 
+/// Renders the status bar showing workspace, branch, MCP count, app state, and version.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let status_text = match &app.state {
         AppState::Idle => Line::from(vec![

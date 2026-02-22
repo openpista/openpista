@@ -1,3 +1,5 @@
+//! Session sidebar widget — lists conversation sessions with relative timestamps.
+
 use super::app::TuiApp;
 use super::theme::THEME;
 use ratatui::{
@@ -8,12 +10,15 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+/// Fixed sidebar width in terminal columns.
 const SIDEBAR_WIDTH: u16 = 30;
 
+/// Returns the fixed sidebar width in columns.
 pub fn sidebar_width() -> u16 {
     SIDEBAR_WIDTH
 }
 
+/// Renders the session sidebar with active/hover highlighting and relative timestamps.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let header = Line::from(vec![
         Span::styled(
@@ -105,6 +110,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(list, inner);
 }
 
+/// Truncates a string to `max_len` characters, appending `…` if shortened.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if max_len == 0 {
         return String::new();
@@ -121,6 +127,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Formats a UTC timestamp as a human-readable relative time (e.g. "5m ago").
 fn format_relative_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
     let now = chrono::Utc::now();
     let diff = now.signed_duration_since(*dt);

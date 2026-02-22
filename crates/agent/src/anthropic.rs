@@ -69,6 +69,13 @@ struct AnthropicResponse {
     stop_reason: Option<String>,
 }
 
+/// Returns `true` when the key looks like an Anthropic OAuth access token
+/// rather than a permanent API key. OAuth tokens use `Authorization: Bearer`
+/// while permanent keys use the `x-api-key` header.
+fn is_oauth_token(key: &str) -> bool {
+    key.starts_with("sk-ant-oat")
+}
+
 // ── Provider ───────────────────────────────────────────────────────────────────
 
 /// Anthropic Messages API LLM provider.
@@ -133,12 +140,19 @@ impl LlmProvider for AnthropicProvider {
             "Sending request to Anthropic"
         );
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        if is_oauth_token(&self.api_key) {
+            req_builder = req_builder.bearer_auth(&self.api_key);
+        } else {
+            req_builder = req_builder.header("x-api-key", &self.api_key);
+        }
+
+        let response = req_builder
             .json(&anthropic_req)
             .send()
             .await
@@ -462,5 +476,80 @@ mod tests {
         let json = serde_json::to_string(&block).expect("serialize");
         assert!(json.contains("\"type\":\"tool_result\""));
         assert!(json.contains("\"tool_use_id\":\"tu1\""));
+    }
+
+    #[test]
+    fn parses_mixed_text_and_tool_use_response() {
+        let json = r#"{
+            "content": [
+                {"type":"text","text":"Let me run that."},
+                {"type":"tool_use","id":"tu1","name":"bash","input":{"command":"ls"}}
+            ],
+            "stop_reason": "tool_use"
+        }"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(resp.content.len(), 2);
+        assert!(
+            matches!(&resp.content[0], ContentBlock::Text { text } if text == "Let me run that.")
+        );
+        assert!(matches!(&resp.content[1], ContentBlock::ToolUse { name, .. } if name == "bash"));
+    }
+
+    #[test]
+    fn empty_content_in_response() {
+        let json = r#"{"content":[],"stop_reason":"end_turn"}"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).expect("parse");
+        assert!(resp.content.is_empty());
+    }
+
+    #[test]
+    fn system_message_extracted_properly() {
+        let msgs = vec![
+            ChatMessage::system("Be helpful"),
+            ChatMessage::user("hello"),
+        ];
+        let converted = convert_messages(&msgs).expect("conversion");
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+    }
+
+    #[test]
+    fn user_message_with_plain_text_content() {
+        let msgs = vec![ChatMessage::user("test message")];
+        let converted = convert_messages(&msgs).expect("conversion");
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+        let AnthropicContent::Text(ref text) = converted[0].content else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "test message");
+    }
+
+    #[test]
+    fn assistant_message_with_plain_text_content() {
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello back"),
+        ];
+        let converted = convert_messages(&msgs).expect("conversion");
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[1].role, "assistant");
+        let AnthropicContent::Text(ref text) = converted[1].content else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "hello back");
+    }
+
+    #[test]
+    fn is_oauth_token_detects_oauth_prefix() {
+        assert!(is_oauth_token("sk-ant-oat01-abc123"));
+        assert!(is_oauth_token("sk-ant-oat02-xyz"));
+    }
+
+    #[test]
+    fn is_oauth_token_rejects_permanent_key() {
+        assert!(!is_oauth_token("sk-ant-api03-abc123"));
+        assert!(!is_oauth_token("sk-some-other-key"));
+        assert!(!is_oauth_token(""));
     }
 }
