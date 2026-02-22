@@ -157,6 +157,13 @@ pub enum AppState {
         /// Whether in-browser search mode is active.
         search_active: bool,
     },
+    /// Confirmation dialog before deleting a session.
+    ConfirmDelete {
+        /// Session ID being deleted.
+        session_id: String,
+        /// Short preview text shown in the confirmation dialog.
+        session_preview: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +249,12 @@ pub struct TuiApp {
     pub sidebar_scroll: u16,
     /// Whether the sidebar is visible.
     pub sidebar_visible: bool,
+    /// Whether keyboard input is directed to sidebar.
+    pub sidebar_focused: bool,
+    /// Pending sidebar session selection (set by Enter key, consumed by event loop).
+    pending_sidebar_selection: Option<SessionId>,
+    /// Confirmed session deletion (set by ConfirmDelete y/Enter, consumed by event loop).
+    confirmed_delete: Option<SessionId>,
     /// Current mouse text selection state.
     pub text_selection: super::selection::TextSelection,
     /// Bounding rect of the chat widget (set each render; used for mouse hit-testing).
@@ -287,6 +300,9 @@ impl TuiApp {
             sidebar_hover: None,
             sidebar_scroll: 0,
             sidebar_visible: true,
+            sidebar_focused: false,
+            pending_sidebar_selection: None,
+            confirmed_delete: None,
             text_selection: super::selection::TextSelection::new(),
             chat_area: None,
             chat_text_grid: Vec::new(),
@@ -751,11 +767,183 @@ impl TuiApp {
         self.state = AppState::Idle;
     }
 
+    // ── Session management ─────────────────────────────────
+
+    /// Toggle keyboard focus between the sidebar and the main input area.
+    pub fn toggle_sidebar_focus(&mut self) {
+        if !self.sidebar_visible {
+            return;
+        }
+        self.sidebar_focused = !self.sidebar_focused;
+        // When focusing sidebar, select the first item if nothing is hovered
+        if self.sidebar_focused && self.sidebar_hover.is_none() && !self.session_list.is_empty() {
+            self.sidebar_hover = Some(0);
+        }
+    }
+
+    /// Select the currently hovered sidebar session for loading.
+    /// Returns the `SessionId` if a valid entry was hovered, and stores it
+    /// in `pending_sidebar_selection` for the event loop to consume.
+    pub fn select_sidebar_session(&mut self) -> Option<SessionId> {
+        let idx = self.sidebar_hover?;
+        let entry = self.session_list.get(idx)?;
+        let id = entry.id.clone();
+        self.pending_sidebar_selection = Some(id.clone());
+        self.sidebar_focused = false;
+        Some(id)
+    }
+
+    /// Consume the pending sidebar selection (set by `select_sidebar_session`).
+    pub fn take_pending_sidebar_selection(&mut self) -> Option<SessionId> {
+        self.pending_sidebar_selection.take()
+    }
+
+    /// Request deletion of the currently hovered sidebar session.
+    /// Transitions to `ConfirmDelete` state and returns the session id.
+    pub fn request_delete_session(&mut self) -> Option<SessionId> {
+        let idx = self.sidebar_hover?;
+        let entry = self.session_list.get(idx)?;
+        let id = entry.id.clone();
+        let preview = if entry.preview.is_empty() {
+            "(empty session)".to_string()
+        } else {
+            let first_line = entry.preview.lines().next().unwrap_or(&entry.preview);
+            if first_line.chars().count() > 40 {
+                format!("{}…", first_line.chars().take(39).collect::<String>())
+            } else {
+                first_line.to_string()
+            }
+        };
+        self.state = AppState::ConfirmDelete {
+            session_id: id.as_str().to_string(),
+            session_preview: preview,
+        };
+        Some(id)
+    }
+
+    /// Remove a session from the sidebar list by id.
+    pub fn remove_session_from_list(&mut self, session_id: &SessionId) {
+        self.session_list
+            .retain(|e| e.id.as_str() != session_id.as_str());
+        // Reset hover if it's now out of bounds
+        if let Some(hover) = self.sidebar_hover
+            && hover >= self.session_list.len()
+        {
+            self.sidebar_hover = if self.session_list.is_empty() {
+                None
+            } else {
+                Some(self.session_list.len() - 1)
+            };
+        }
+    }
+
+    /// Load messages from a previous session into the TUI conversation history.
+    /// Converts `AgentMessage` records into `TuiMessage` variants.
+    pub fn load_session_messages(
+        &mut self,
+        session_id: SessionId,
+        messages: Vec<proto::AgentMessage>,
+    ) {
+        self.session_id = session_id;
+        self.messages.clear();
+        self.history_scroll = 0;
+        self.screen = Screen::Chat;
+
+        for msg in messages {
+            match msg.role {
+                proto::Role::User => {
+                    self.messages.push(TuiMessage::User(msg.content));
+                }
+                proto::Role::Assistant => {
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        for tc in tool_calls {
+                            self.messages.push(TuiMessage::ToolCall {
+                                tool_name: tc.name.clone(),
+                                args_preview: tc.arguments.to_string(),
+                                done: true,
+                            });
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        self.messages.push(TuiMessage::Assistant(msg.content));
+                    }
+                }
+                proto::Role::Tool => {
+                    self.messages.push(TuiMessage::ToolResult {
+                        tool_name: msg.tool_name.unwrap_or_default(),
+                        output_preview: msg.content,
+                        is_error: false,
+                    });
+                }
+                proto::Role::System => {
+                    // Skip system messages in TUI display
+                }
+            }
+        }
+        self.scroll_to_bottom();
+    }
+
+    /// Replace the sidebar session list with a fresh list.
+    pub fn refresh_session_list(&mut self, sessions: Vec<SessionEntry>) {
+        self.session_list = sessions;
+    }
+
+    /// Consume the confirmed delete session id (set by ConfirmDelete y/Enter).
+    pub fn take_confirmed_delete(&mut self) -> Option<SessionId> {
+        self.confirmed_delete.take()
+    }
+
+    /// Sets a pending sidebar session selection (used by mouse click handler in event loop).
+    pub fn set_pending_sidebar_selection(&mut self, session_id: SessionId) {
+        self.pending_sidebar_selection = Some(session_id);
+    }
     // ── Input handling ───────────────────────────────────────
 
     /// Handle a keyboard event.
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        // ── ConfirmDelete state ──────────────────────────────
+        if let AppState::ConfirmDelete { session_id, .. } = &self.state {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let id = SessionId::from(session_id.clone());
+                    self.confirmed_delete = Some(id);
+                    self.state = AppState::Idle;
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.state = AppState::Idle;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // ── Sidebar focused state ───────────────────────────
+        if self.sidebar_focused && self.state == AppState::Idle {
+            match (key.modifiers, key.code) {
+                (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                    let max = self.session_list.len().saturating_sub(1);
+                    let current = self.sidebar_hover.unwrap_or(0);
+                    self.sidebar_hover = Some((current + 1).min(max));
+                }
+                (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                    let current = self.sidebar_hover.unwrap_or(0);
+                    self.sidebar_hover = Some(current.saturating_sub(1));
+                }
+                (_, KeyCode::Enter) => {
+                    self.select_sidebar_session();
+                }
+                (_, KeyCode::Char('d')) | (_, KeyCode::Delete) => {
+                    self.request_delete_session();
+                }
+                (_, KeyCode::Esc) | (_, KeyCode::Tab) => {
+                    self.sidebar_focused = false;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         let login_browsing = matches!(self.state, AppState::LoginBrowsing { .. });
         if login_browsing {
@@ -1144,6 +1332,9 @@ impl TuiApp {
                     self.command_palette_cursor = 0;
                 }
             }
+            (_, KeyCode::Tab) if self.state == AppState::Idle && self.sidebar_visible => {
+                self.toggle_sidebar_focus();
+            }
             (_, KeyCode::Enter) if self.state == AppState::Idle => {
                 // If Enter is pressed, make sure we are heavily into the Chat screen
                 if self.screen == Screen::Home {
@@ -1262,6 +1453,56 @@ impl TuiApp {
 
                 if self.sidebar_visible {
                     crate::tui::sidebar::render(self, frame, sidebar_area);
+                }
+
+                // ── ConfirmDelete overlay ──────────────────
+                if let AppState::ConfirmDelete {
+                    session_preview, ..
+                } = &self.state
+                {
+                    let popup_width = 50u16.min(area.width.saturating_sub(4));
+                    let popup_height = 5u16;
+                    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+                    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+                    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+                    frame.render_widget(Clear, popup_area);
+                    let dialog = Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            " Delete session? ",
+                            Style::default()
+                                .fg(THEME.error)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" {}", session_preview),
+                            Style::default().fg(THEME.fg_dim),
+                        )),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                " y",
+                                Style::default()
+                                    .fg(THEME.error)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled("/Enter: delete  ", Style::default().fg(THEME.fg_muted)),
+                            Span::styled(
+                                "n",
+                                Style::default()
+                                    .fg(THEME.success)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled("/Esc: cancel", Style::default().fg(THEME.fg_muted)),
+                        ]),
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(THEME.error)),
+                    )
+                    .wrap(Wrap { trim: false });
+                    frame.render_widget(dialog, popup_area);
                 }
             }
         }
@@ -2488,5 +2729,276 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(!app.is_palette_active());
         assert_eq!(app.input, "");
+    }
+
+    // ── Session management tests ──────────────────────────────
+
+    fn make_session_entry(id: &str, preview: &str) -> SessionEntry {
+        SessionEntry {
+            id: SessionId::from(id),
+            channel_id: "cli:tui".to_string(),
+            updated_at: chrono::Utc::now(),
+            preview: preview.to_string(),
+        }
+    }
+
+    #[test]
+    fn toggle_sidebar_focus_flips_state() {
+        let mut app = make_app();
+        assert!(!app.sidebar_focused);
+        app.toggle_sidebar_focus();
+        assert!(app.sidebar_focused);
+        app.toggle_sidebar_focus();
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn select_sidebar_session_returns_hovered_id() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "hello"),
+            make_session_entry("s2", "world"),
+        ];
+        app.sidebar_hover = Some(1);
+        let selected = app.select_sidebar_session();
+        assert_eq!(selected.as_ref().map(|s| s.as_str()), Some("s2"));
+        // pending_sidebar_selection should be set
+        assert_eq!(
+            app.pending_sidebar_selection.as_ref().map(|s| s.as_str()),
+            Some("s2")
+        );
+        // sidebar should be unfocused
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn select_sidebar_session_returns_none_when_no_hover() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = None;
+        assert!(app.select_sidebar_session().is_none());
+    }
+
+    #[test]
+    fn request_delete_session_transitions_to_confirm_delete() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello world")];
+        app.sidebar_hover = Some(0);
+        let del_id = app.request_delete_session();
+        assert_eq!(del_id.as_ref().map(|s| s.as_str()), Some("s1"));
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+    }
+
+    #[test]
+    fn request_delete_session_returns_none_when_no_hover() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = None;
+        assert!(app.request_delete_session().is_none());
+    }
+
+    #[test]
+    fn remove_session_from_list_removes_entry() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "hello"),
+            make_session_entry("s2", "world"),
+            make_session_entry("s3", "foo"),
+        ];
+        app.sidebar_hover = Some(2);
+        let id = SessionId::from("s2");
+        app.remove_session_from_list(&id);
+        assert_eq!(app.session_list.len(), 2);
+        assert_eq!(app.session_list[0].id.as_str(), "s1");
+        assert_eq!(app.session_list[1].id.as_str(), "s3");
+        // hover should be clamped
+        assert!(app.sidebar_hover.unwrap() < app.session_list.len());
+    }
+
+    #[test]
+    fn remove_session_from_list_clears_hover_when_empty() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = Some(0);
+        let id = SessionId::from("s1");
+        app.remove_session_from_list(&id);
+        assert!(app.session_list.is_empty());
+        assert!(app.sidebar_hover.is_none());
+    }
+
+    #[test]
+    fn load_session_messages_converts_agent_messages() {
+        let mut app = make_app();
+        let sid = SessionId::from("test-session");
+        let messages = vec![
+            proto::AgentMessage::new(sid.clone(), proto::Role::User, "hello"),
+            proto::AgentMessage::new(sid.clone(), proto::Role::Assistant, "hi there"),
+        ];
+        app.load_session_messages(sid.clone(), messages);
+        assert_eq!(app.messages.len(), 2);
+        assert!(matches!(&app.messages[0], TuiMessage::User(t) if t == "hello"));
+        assert!(matches!(&app.messages[1], TuiMessage::Assistant(t) if t == "hi there"));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn load_session_messages_handles_tool_calls() {
+        let mut app = make_app();
+        let sid = SessionId::from("test-session");
+        let mut assistant = proto::AgentMessage::new(sid.clone(), proto::Role::Assistant, "");
+        assistant.tool_calls = Some(vec![proto::ToolCall {
+            id: "call-1".to_string(),
+            name: "system.run".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        }]);
+        let tool = proto::AgentMessage::tool_result(sid.clone(), "call-1", "system.run", "file.rs");
+        app.load_session_messages(sid, vec![assistant, tool]);
+        assert_eq!(app.messages.len(), 2);
+        assert!(
+            matches!(&app.messages[0], TuiMessage::ToolCall { tool_name, .. } if tool_name == "system.run")
+        );
+        assert!(
+            matches!(&app.messages[1], TuiMessage::ToolResult { tool_name, .. } if tool_name == "system.run")
+        );
+    }
+
+    #[test]
+    fn refresh_session_list_replaces_entries() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("old", "old")];
+        let new_sessions = vec![
+            make_session_entry("new1", "first"),
+            make_session_entry("new2", "second"),
+        ];
+        app.refresh_session_list(new_sessions);
+        assert_eq!(app.session_list.len(), 2);
+        assert_eq!(app.session_list[0].id.as_str(), "new1");
+    }
+
+    #[test]
+    fn take_confirmed_delete_consumes_value() {
+        let mut app = make_app();
+        app.confirmed_delete = Some(SessionId::from("del-me"));
+        let taken = app.take_confirmed_delete();
+        assert_eq!(taken.as_ref().map(|s| s.as_str()), Some("del-me"));
+        assert!(app.take_confirmed_delete().is_none());
+    }
+
+    #[test]
+    fn toggle_sidebar_focus_noop_when_hidden() {
+        let mut app = make_app();
+        app.sidebar_visible = false;
+        app.sidebar_focused = false;
+
+        app.toggle_sidebar_focus();
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn confirm_delete_dialog_y_confirms() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "hello"),
+            make_session_entry("s2", "world"),
+        ];
+        app.sidebar_hover = Some(1);
+        app.request_delete_session();
+
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert_eq!(app.state, AppState::Idle);
+        let del = app.take_confirmed_delete();
+        assert_eq!(del.as_ref().map(|s| s.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn confirm_delete_dialog_n_cancels() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "hello"),
+            make_session_entry("s2", "world"),
+        ];
+        app.sidebar_hover = Some(1);
+        app.request_delete_session();
+
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.take_confirmed_delete().is_none());
+    }
+
+    #[test]
+    fn sidebar_focused_navigation_down() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "a"),
+            make_session_entry("s2", "b"),
+            make_session_entry("s3", "c"),
+            make_session_entry("s4", "d"),
+            make_session_entry("s5", "e"),
+        ];
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        app.sidebar_hover = Some(0);
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.sidebar_hover, Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.sidebar_hover, Some(2));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.sidebar_hover, Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.sidebar_hover, Some(0));
+    }
+
+    #[test]
+    fn sidebar_focused_enter_sets_pending_selection() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "a"),
+            make_session_entry("s2", "b"),
+            make_session_entry("s3", "c"),
+        ];
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        app.sidebar_hover = Some(1);
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let pending = app.take_pending_sidebar_selection();
+        assert_eq!(pending.as_ref().map(|s| s.as_str()), Some("s2"));
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_d_triggers_confirm_delete() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "a"),
+            make_session_entry("s2", "b"),
+            make_session_entry("s3", "c"),
+        ];
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        app.sidebar_hover = Some(2);
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+        if let AppState::ConfirmDelete { session_id, .. } = &app.state {
+            assert_eq!(session_id, "s3");
+        }
     }
 }

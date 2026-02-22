@@ -832,11 +832,6 @@ fn cmd_auth_status() -> anyhow::Result<()> {
 /// Prints the branded farewell banner with session resume instructions.
 fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     let session_str = session_id.as_str();
-    let short_session = if session_str.len() > 8 {
-        &session_str[..8]
-    } else {
-        session_str
-    };
 
     println!();
     println!("  \x1b[1;32m                            _     _      \x1b[0m");
@@ -853,8 +848,8 @@ fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     println!("  \x1b[1;37mModel\x1b[0m     \x1b[32m{}\x1b[0m", model);
     println!();
     println!(
-        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista -s {}\x1b[0m",
-        short_session
+        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista tui -s {}\x1b[0m",
+        session_str
     );
     println!();
 }

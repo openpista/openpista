@@ -20,6 +20,11 @@ pub fn sidebar_width() -> u16 {
 
 /// Renders the session sidebar with active/hover highlighting and relative timestamps.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
+    let focus_hint = if app.sidebar_focused {
+        Span::styled(" ◉", Style::default().fg(THEME.sidebar_active_indicator))
+    } else {
+        Span::styled(" [Tab]", Style::default().fg(THEME.fg_muted))
+    };
     let header = Line::from(vec![
         Span::styled(
             " Sessions ",
@@ -31,11 +36,17 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             format!("({})", app.session_list.len()),
             Style::default().fg(THEME.fg_muted),
         ),
+        focus_hint,
     ]);
 
+    let border_style = if app.sidebar_focused {
+        Style::default().fg(THEME.sidebar_active_indicator)
+    } else {
+        Style::default().fg(THEME.sidebar_border)
+    };
     let block = Block::default()
         .borders(Borders::LEFT | Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(THEME.sidebar_border))
+        .border_style(border_style)
         .title(header);
 
     let inner = block.inner(area);
@@ -60,7 +71,14 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
         let indicator = if is_active {
             Span::styled("▌", Style::default().fg(THEME.sidebar_active_indicator))
         } else if is_hovered {
-            Span::styled("▌", Style::default().fg(THEME.sidebar_hover))
+            Span::styled(
+                "▌",
+                Style::default().fg(if app.sidebar_focused {
+                    THEME.sidebar_active_indicator
+                } else {
+                    THEME.sidebar_hover
+                }),
+            )
         } else {
             Span::raw(" ")
         };
