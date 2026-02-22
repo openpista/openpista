@@ -131,6 +131,56 @@ fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
     }
 }
 
+/// Parsed sub-command for the `/session` slash command.
+#[derive(Debug, Clone, PartialEq)]
+enum SessionCommand {
+    /// `/session` or `/session list` — print all sessions to chat.
+    List,
+    /// `/session new` — create a new session.
+    New,
+    /// `/session load <id>` — load a specific session (partial ID match).
+    Load(String),
+    /// `/session delete <id>` — delete a specific session (partial ID match).
+    Delete(String),
+    /// Invalid usage with hint message.
+    Invalid(String),
+}
+
+fn parse_session_command(raw: &str) -> Option<SessionCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/session" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("list") => Some(SessionCommand::List),
+        Some("new") => Some(SessionCommand::New),
+        Some("load") => {
+            let id = parts.collect::<Vec<_>>().join(" ");
+            if id.is_empty() {
+                Some(SessionCommand::Invalid(
+                    "Usage: /session load <id>".to_string(),
+                ))
+            } else {
+                Some(SessionCommand::Load(id))
+            }
+        }
+        Some("delete") | Some("del") => {
+            let id = parts.collect::<Vec<_>>().join(" ");
+            if id.is_empty() {
+                Some(SessionCommand::Invalid(
+                    "Usage: /session delete <id>".to_string(),
+                ))
+            } else {
+                Some(SessionCommand::Delete(id))
+            }
+        }
+        Some(_) => Some(SessionCommand::Invalid(
+            "Use /session, /session list, /session new, /session load <id>, /session delete <id>"
+                .to_string(),
+        )),
+    }
+}
+
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelTaskMode {
@@ -544,6 +594,77 @@ pub async fn run_tui(
                                     continue;
                                 }
 
+                                if let Some(session_cmd) = parse_session_command(&message) {
+                                    match session_cmd {
+                                        SessionCommand::List => {
+                                            if app.session_list.is_empty() {
+                                                app.push_assistant("No sessions found.".to_string());
+                                            } else {
+                                                let mut lines = vec!["**Sessions:**".to_string()];
+                                                for (i, entry) in app.session_list.iter().enumerate() {
+                                                    let active = if entry.id.as_str() == app.session_id.as_str() { " ← active" } else { "" };
+                                                    lines.push(format!(
+                                                        "{}. `{}` — {}{}",
+                                                        i + 1,
+                                                        entry.id.as_str(),
+                                                        entry.preview,
+                                                        active,
+                                                    ));
+                                                }
+                                                app.push_assistant(lines.join("\n"));
+                                            }
+                                        }
+                                        SessionCommand::New => {
+                                            let new_sid = proto::SessionId::new();
+                                            app.load_session_messages(new_sid.clone(), Vec::new());
+                                            app.push_assistant(format!("New session created: `{}`", new_sid.as_str()));
+                                            // Set session_id in event loop scope
+                                            session_id = new_sid;
+                                        }
+                                        SessionCommand::Load(partial_id) => {
+                                            // Find session with partial ID match
+                                            let matched: Vec<_> = app.session_list.iter()
+                                                .filter(|e| e.id.as_str().contains(&partial_id))
+                                                .collect();
+                                            match matched.len() {
+                                                0 => app.push_error(format!("No session matching '{partial_id}'")),
+                                                1 => {
+                                                    let sid = matched[0].id.clone();
+                                                    app.set_pending_sidebar_selection(sid);
+                                                }
+                                                n => {
+                                                    let ids: Vec<_> = matched.iter().map(|e| format!("`{}`", e.id.as_str())).collect();
+                                                    app.push_error(format!("{n} sessions match '{partial_id}': {}", ids.join(", ")));
+                                                }
+                                            }
+                                        }
+                                        SessionCommand::Delete(partial_id) => {
+                                            let matched: Vec<_> = app.session_list.iter()
+                                                .filter(|e| e.id.as_str().contains(&partial_id))
+                                                .collect();
+                                            match matched.len() {
+                                                0 => app.push_error(format!("No session matching '{partial_id}'")),
+                                                1 => {
+                                                    let idx = app.session_list.iter().position(|e| e.id.as_str() == matched[0].id.as_str());
+                                                    if let Some(i) = idx {
+                                                        app.sidebar_hover = Some(i);
+                                                        app.request_delete_session();
+                                                    }
+                                                }
+                                                n => {
+                                                    let ids: Vec<_> = matched.iter().map(|e| format!("`{}`", e.id.as_str())).collect();
+                                                    app.push_error(format!("{n} sessions match '{partial_id}': {}", ids.join(", ")));
+                                                }
+                                            }
+                                        }
+                                        SessionCommand::Invalid(msg) => {
+                                            app.push_error(msg);
+                                        }
+                                    }
+                                    app.scroll_to_bottom();
+                                    continue;
+                                }
+
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
                                     app.scroll_to_bottom();
@@ -614,6 +735,12 @@ pub async fn run_tui(
                                     }
                                 }
                             }
+                            // Persist last used model
+                            let state = crate::config::TuiState {
+                                last_model: new_model.clone(),
+                                last_provider: provider_name.clone(),
+                            };
+                            let _ = state.save();
                         }
 
                         if app.take_model_refresh_request() {
@@ -769,7 +896,8 @@ pub async fn run_tui(
                                     if sb_area.contains(pos) {
                                         let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
                                         let entry_height = 3u16;
-                                        let idx = (inner_y / entry_height) as usize;
+                                        let scrolled_y = inner_y + app.sidebar_scroll * entry_height;
+                                        let idx = (scrolled_y / entry_height) as usize;
                                         if idx < app.session_list.len() {
                                             app.sidebar_hover = Some(idx);
                                             app.select_sidebar_session();
@@ -780,7 +908,8 @@ pub async fn run_tui(
                                     if sb_area.contains(pos) {
                                         let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
                                         let entry_height = 3u16;
-                                        let idx = (inner_y / entry_height) as usize;
+                                        let scrolled_y = inner_y + app.sidebar_scroll * entry_height;
+                                        let idx = (scrolled_y / entry_height) as usize;
                                         if idx < app.session_list.len() {
                                             app.sidebar_hover = Some(idx);
                                         } else {
@@ -977,6 +1106,17 @@ pub async fn run_tui(
                             runtime.register_provider(provider_str, new_llm);
                             let _ = runtime.switch_provider(provider_str);
                         }
+                        // Persist last used model after auth
+                        if let Some(ref provider_str) = auth_provider_name {
+                            let model = provider_str.parse::<ProviderPreset>()
+                                .map(|p| p.default_model().to_string())
+                                .unwrap_or_default();
+                            let state = crate::config::TuiState {
+                                last_model: model,
+                                last_provider: provider_str.clone(),
+                            };
+                            let _ = state.save();
+                        }
                         debug!(provider = ?auth_provider_name, "Auth task completed successfully");
                         // Pre-cache model catalog for the newly authenticated provider
                         if model_task.is_none() {
@@ -1142,6 +1282,63 @@ mod tests {
                 "Use /model to browse or /model list to print models.".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn parse_session_command_supports_all_variants() {
+        // bare /session => List
+        assert_eq!(
+            parse_session_command("/session"),
+            Some(SessionCommand::List)
+        );
+        assert_eq!(
+            parse_session_command("/session list"),
+            Some(SessionCommand::List)
+        );
+
+        // new
+        assert_eq!(
+            parse_session_command("/session new"),
+            Some(SessionCommand::New)
+        );
+
+        // load requires id
+        assert_eq!(
+            parse_session_command("/session load"),
+            Some(SessionCommand::Invalid(
+                "Usage: /session load <id>".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_session_command("/session load abc123"),
+            Some(SessionCommand::Load("abc123".to_string()))
+        );
+
+        // delete / del
+        assert_eq!(
+            parse_session_command("/session delete"),
+            Some(SessionCommand::Invalid(
+                "Usage: /session delete <id>".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_session_command("/session delete xyz"),
+            Some(SessionCommand::Delete("xyz".to_string()))
+        );
+        assert_eq!(
+            parse_session_command("/session del xyz"),
+            Some(SessionCommand::Delete("xyz".to_string()))
+        );
+
+        // unknown subcommand
+        assert!(matches!(
+            parse_session_command("/session foobar"),
+            Some(SessionCommand::Invalid(_))
+        ));
+
+        // non-session command returns None
+        assert_eq!(parse_session_command("/model"), None);
+        assert_eq!(parse_session_command("/help"), None);
     }
 
     #[test]

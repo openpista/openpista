@@ -16,6 +16,25 @@ const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷
 /// Renders the status bar showing workspace, branch, MCP count, app state, and version.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let status_text = match &app.state {
+        AppState::Idle if app.sidebar_focused => Line::from(vec![
+            Span::styled(
+                format!(" {} ", app.workspace_name),
+                Style::default().fg(THEME.status_workspace),
+            ),
+            Span::styled(" ⭘ ", Style::default().fg(THEME.success)),
+            Span::styled(
+                format!("{} ", app.branch_name),
+                Style::default().fg(THEME.status_branch),
+            ),
+            Span::styled(
+                format!(" 💚 {} MCP /status ", app.mcp_count),
+                Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  ↑↓:navigate  Enter:load  d:delete  n:new  Tab:chat  Ctrl+C:quit",
+                Style::default().fg(THEME.sidebar_active_indicator),
+            ),
+        ]),
         AppState::Idle => Line::from(vec![
             Span::styled(
                 format!(" {} ", app.workspace_name),
@@ -31,7 +50,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
                 Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Enter:send  ↑↓:scroll  Ctrl+C:quit",
+                "  Enter:send  ↑↓:scroll  Tab:sidebar  Ctrl+C:quit",
                 Style::default().fg(THEME.status_hint),
             ),
         ]),
