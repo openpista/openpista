@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(not(test))]
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, trace};
 
 // ── Credential types ──────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ impl Credentials {
     /// Loads credentials from disk. Returns an empty set on any I/O or parse error.
     pub fn load() -> Self {
         let path = Self::path();
-        debug!(path = %path.display(), exists = %path.exists(), "Loading credentials");
+        trace!(path = %path.display(), exists = %path.exists(), "Loading credentials");
         if !path.exists() {
             return Self::default();
         }
@@ -292,12 +292,15 @@ async fn exchange_code(
         ("code_verifier", code_verifier),
     ];
 
-    let token: TokenResponse = client
+    let response = client
         .post(token_url)
         .form(&params)
         .send()
         .await
-        .context("token exchange request failed")?
+        .context("token exchange request failed")?;
+    debug!(status = %response.status().as_u16(), "Token exchange response");
+
+    let token: TokenResponse = response
         .error_for_status()
         .context("token endpoint returned an error status")?
         .json()
@@ -307,6 +310,12 @@ async fn exchange_code(
     let expires_at = token
         .expires_in
         .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+
+    debug!(
+        has_refresh = %token.refresh_token.is_some(),
+        expires_in = ?token.expires_in,
+        "Token exchange completed"
+    );
 
     Ok(ProviderCredential {
         access_token: token.access_token,
@@ -518,12 +527,15 @@ async fn exchange_code_json(
         "code_verifier": code_verifier,
     });
 
-    let token: TokenResponse = client
+    let response = client
         .post(token_url)
         .json(&body)
         .send()
         .await
-        .context("token exchange request failed")?
+        .context("token exchange request failed")?;
+    debug!(status = %response.status().as_u16(), "Token exchange (JSON) response");
+
+    let token: TokenResponse = response
         .error_for_status()
         .context("token endpoint returned an error status")?
         .json()
@@ -533,6 +545,12 @@ async fn exchange_code_json(
     let expires_at = token
         .expires_in
         .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+
+    debug!(
+        has_refresh = %token.refresh_token.is_some(),
+        expires_in = ?token.expires_in,
+        "Token exchange (JSON) completed"
+    );
 
     Ok(ProviderCredential {
         access_token: token.access_token,
@@ -568,58 +586,6 @@ pub async fn complete_code_display_flow(
     _code: &str,
 ) -> anyhow::Result<ProviderCredential> {
     anyhow::bail!("complete_code_display_flow not available in tests")
-}
-
-/// Creates a permanent Anthropic API key from an OAuth access token.
-#[cfg(not(test))]
-pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<String> {
-    debug!("Creating Anthropic API key from OAuth token");
-    #[derive(serde::Deserialize)]
-    struct CreateApiKeyResponse {
-        raw_key: String,
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let response = client
-        .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
-        .bearer_auth(access_token)
-        .header("anthropic-version", "2023-06-01")
-        .json(&serde_json::json!({"name": "openpista"}))
-        .send()
-        .await
-        .context("create_api_key request failed")?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read create_api_key response body")?;
-
-    if !status.is_success() {
-        let preview: String = body.chars().take(512).collect();
-        anyhow::bail!("create_api_key returned HTTP {status}: {preview}");
-    }
-
-    let parsed: CreateApiKeyResponse = serde_json::from_str(&body).with_context(|| {
-        let preview = if body.len() > 512 {
-            &body[..512]
-        } else {
-            &body
-        };
-        format!("failed to parse create_api_key response: {preview}")
-    })?;
-
-    Ok(parsed.raw_key)
-}
-
-/// Test stub; always returns an error since the Anthropic API is unavailable in tests.
-#[cfg(test)]
-pub async fn create_anthropic_api_key(_access_token: &str) -> anyhow::Result<String> {
-    anyhow::bail!("create_anthropic_api_key not available in tests")
 }
 
 /// Strips URL fragments and whitespace from a pasted authorization code.

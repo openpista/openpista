@@ -27,7 +27,7 @@ use crate::config::{
     Config, LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry,
 };
 use crate::model_catalog;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Local port used for the OAuth redirect callback server.
 const OAUTH_CALLBACK_PORT: u16 = 9009;
@@ -304,25 +304,7 @@ async fn build_and_store_credential_with_path(
                     .map_err(|e| e.to_string())?
                 };
 
-                let credential = if provider_name == "anthropic" {
-                    let permanent_key =
-                        crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
-                            .await
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to convert OAuth token to API key: {e}. \
-                                     Use /login and select 'API Key' instead of OAuth."
-                                )
-                            })?;
-                    crate::auth::ProviderCredential {
-                        access_token: permanent_key,
-                        refresh_token: None,
-                        expires_at: None,
-                        endpoint: None,
-                    }
-                } else {
-                    oauth_credential
-                };
+                let credential = oauth_credential;
 
                 (
                     credential,
@@ -591,8 +573,10 @@ pub async fn run_tui(
                         }
 
                         if let Some((new_model, provider_name)) = app.take_pending_model_change() {
+                            info!(new_model = %new_model, provider = %provider_name, "Model changed");
                             runtime.set_model(new_model.clone());
                             if provider_name != runtime.active_provider_name() {
+                                debug!(target_provider = %provider_name, current_provider = %runtime.active_provider_name(), "Switching provider");
                                 // Try switching first; if provider not registered, build & register on-demand
                                 if runtime.switch_provider(&provider_name).is_err() {
                                     if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
@@ -611,6 +595,7 @@ pub async fn run_tui(
                                                 };
                                             runtime.register_provider(&provider_name, new_llm);
                                             let _ = runtime.switch_provider(&provider_name);
+                                            debug!(provider = %provider_name, "Provider switch completed (on-demand registration)");
                                         } else {
                                             tracing::warn!(provider = %provider_name, "No credential found for provider");
                                         }
@@ -730,27 +715,7 @@ pub async fn run_tui(
                                         crate::auth::complete_code_display_flow(&pending, &code)
                                             .await
                                             .map_err(|e| e.to_string())?;
-                                    let credential = if provider_name == "anthropic" {
-                                        let permanent_key =
-                                            crate::auth::create_anthropic_api_key(
-                                                &oauth_cred.access_token,
-                                            )
-                                            .await
-                                            .map_err(|e| {
-                                                format!(
-                                                    "Failed to convert OAuth token to API key: {e}. \
-                                                     Use /login and select 'API Key' instead of OAuth."
-                                                )
-                                            })?;
-                                        crate::auth::ProviderCredential {
-                                            access_token: permanent_key,
-                                            refresh_token: None,
-                                            expires_at: None,
-                                            endpoint: None,
-                                        }
-                                    } else {
-                                        oauth_cred
-                                    };
+                                    let credential = oauth_cred;
                                     let p = provider_name.clone();
                                     tokio::task::spawn_blocking(move || {
                                         persist_credential(p, credential, cred_path)
