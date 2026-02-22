@@ -3348,4 +3348,246 @@ mod tests {
             assert_eq!(session_id, "s3");
         }
     }
+
+    // ── Session browser tests ──────────────────────────────
+
+    #[test]
+    fn open_session_browser_sets_state() {
+        let mut app = make_app();
+        app.open_session_browser();
+        assert!(matches!(
+            app.state,
+            AppState::SessionBrowsing {
+                search_active: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn session_browser_esc_closes() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn session_browser_search_mode_esc_then_close() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // 's' activates search
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::SessionBrowsing {
+                search_active: true,
+                ..
+            }
+        ));
+
+        // first Esc deactivates search
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::SessionBrowsing {
+                search_active: false,
+                ..
+            }
+        ));
+
+        // second Esc closes browser
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn session_browser_slash_starts_search_mode() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::SessionBrowsing {
+                search_active: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn session_browser_navigation_j_k() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "first"),
+            make_session_entry("s2", "second"),
+            make_session_entry("s3", "third"),
+        ];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        } else {
+            panic!("expected SessionBrowsing");
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        } else {
+            panic!("expected SessionBrowsing");
+        }
+    }
+
+    #[test]
+    fn session_browser_enter_loads_session() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "first"),
+            make_session_entry("s2", "second"),
+        ];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Move to second entry
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.state, AppState::Idle);
+        let pending = app.take_pending_sidebar_selection();
+        assert_eq!(pending.as_ref().map(|s| s.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn session_browser_n_creates_new() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.session_browser_new_requested);
+    }
+
+    #[test]
+    fn session_browser_d_triggers_delete() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "first"),
+            make_session_entry("s2", "second"),
+        ];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Move to second entry and press 'd'
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+        if let AppState::ConfirmDelete { session_id, .. } = &app.state {
+            assert_eq!(session_id, "s2");
+        }
+    }
+
+    #[test]
+    fn session_browser_ctrl_c_closes() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn visible_sessions_filters_by_query() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("abc123", "deploy script"),
+            make_session_entry("def456", "test runner"),
+            make_session_entry("ghi789", "deploy fix"),
+        ];
+
+        let all = app.visible_sessions("");
+        assert_eq!(all.len(), 3);
+
+        let deploy = app.visible_sessions("deploy");
+        assert_eq!(deploy.len(), 2);
+        assert_eq!(deploy[0].id.as_str(), "abc123");
+        assert_eq!(deploy[1].id.as_str(), "ghi789");
+
+        let by_id = app.visible_sessions("def");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].id.as_str(), "def456");
+    }
+
+    #[test]
+    fn session_browser_search_typing_filters() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "deploy script"),
+            make_session_entry("s2", "test runner"),
+        ];
+        app.open_session_browser();
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Enter search mode and type 'dep'
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        if let AppState::SessionBrowsing { query, cursor, .. } = &app.state {
+            assert_eq!(query, "dep");
+            assert_eq!(*cursor, 0);
+            let visible = app.visible_sessions(query);
+            assert_eq!(visible.len(), 1);
+            assert_eq!(visible[0].preview, "deploy script");
+        } else {
+            panic!("expected SessionBrowsing");
+        }
+    }
+
+    #[test]
+    fn render_session_browser_no_panic() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "hello world"),
+            make_session_entry("s2", "another session"),
+        ];
+        app.open_session_browser();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // State should be preserved after render
+        assert!(matches!(app.state, AppState::SessionBrowsing { .. }));
+    }
+
+    #[test]
+    fn render_session_browser_empty_no_panic() {
+        let mut app = make_app();
+        app.open_session_browser();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(matches!(app.state, AppState::SessionBrowsing { .. }));
+    }
 }
