@@ -1,4 +1,5 @@
 //! Home/welcome screen widget — centered logo, input box, and keyboard shortcuts.
+use unicode_width::UnicodeWidthStr;
 
 use super::app::{AppState, TuiApp};
 use super::theme::THEME;
@@ -88,7 +89,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 
     // Show cursor when idle
     if app.state == AppState::Idle {
-        let cursor_col = app.input[..app.cursor_pos].chars().count() as u16;
+        let cursor_col = UnicodeWidthStr::width(&app.input[..app.cursor_pos]) as u16;
         frame.set_cursor_position((inner_input_v[0].x + 1 + cursor_col, inner_input_v[0].y));
     }
 

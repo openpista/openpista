@@ -1,5 +1,6 @@
 //! TUI application state, rendering, and input handling.
 #![allow(dead_code)]
+use unicode_width::UnicodeWidthStr;
 
 use super::theme::THEME;
 use crate::auth_picker::{self, AuthLoginIntent, AuthMethodChoice, LoginBrowseStep};
@@ -1502,19 +1503,19 @@ impl TuiApp {
 
         match step {
             LoginBrowseStep::SelectProvider => {
-                let cursor_col = query.chars().count() as u16;
+                let cursor_col = UnicodeWidthStr::width(query.as_str()) as u16;
                 frame.set_cursor_position((chunks[1].x + 10 + cursor_col, chunks[1].y + 3));
             }
             LoginBrowseStep::InputEndpoint => {
-                let cursor_col = input_buffer.chars().count() as u16;
+                let cursor_col = UnicodeWidthStr::width(input_buffer.as_str()) as u16;
                 frame.set_cursor_position((chunks[1].x + 12 + cursor_col, chunks[1].y + 4));
             }
             LoginBrowseStep::InputApiKey => {
                 let is_code_display = matches!(selected_method, Some(AuthMethodChoice::OAuth));
                 let display_len = if is_code_display {
-                    input_buffer.chars().count()
+                    UnicodeWidthStr::width(input_buffer.as_str())
                 } else {
-                    masked_buffer.chars().count()
+                    UnicodeWidthStr::width(masked_buffer.as_str())
                 };
                 // " Code: " = 7, " API key: " = 10
                 let label_offset: u16 = if is_code_display { 8 } else { 11 };
@@ -1658,7 +1659,7 @@ impl TuiApp {
         );
 
         if *search_active {
-            let cursor_col = query.chars().count() as u16;
+            let cursor_col = UnicodeWidthStr::width(query.as_str()) as u16;
             frame.set_cursor_position((footer[0].x + 18 + cursor_col, footer[0].y));
         }
     }
@@ -1727,7 +1728,7 @@ impl TuiApp {
         frame.render_widget(input, area);
 
         if is_idle_or_prompting {
-            let cursor_col = self.input[..self.cursor_pos].chars().count() as u16;
+            let cursor_col = UnicodeWidthStr::width(&self.input[..self.cursor_pos]) as u16;
             frame.set_cursor_position((area.x + 1 + cursor_col, area.y + 1));
         }
 
