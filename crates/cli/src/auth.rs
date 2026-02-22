@@ -584,19 +584,25 @@ pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<Stri
         .build()
         .context("failed to build HTTP client")?;
 
-    let body = client
+    let response = client
         .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
         .bearer_auth(access_token)
         .header("anthropic-version", "2023-06-01")
         .json(&serde_json::json!({"name": "openpista"}))
         .send()
         .await
-        .context("create_api_key request failed")?
-        .error_for_status()
-        .context("create_api_key endpoint returned error")?
+        .context("create_api_key request failed")?;
+
+    let status = response.status();
+    let body = response
         .text()
         .await
         .context("failed to read create_api_key response body")?;
+
+    if !status.is_success() {
+        let preview: String = body.chars().take(512).collect();
+        anyhow::bail!("create_api_key returned HTTP {status}: {preview}");
+    }
 
     let parsed: CreateApiKeyResponse = serde_json::from_str(&body).with_context(|| {
         let preview = if body.len() > 512 {

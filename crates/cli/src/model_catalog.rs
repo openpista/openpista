@@ -481,11 +481,6 @@ async fn fetch_remote_model_ids_from(url: &str, api_key: &str) -> Result<Vec<Str
     Ok(ids)
 }
 
-/// Returns `true` if `key` looks like an Anthropic OAuth access token (`sk-ant-oat*`).
-fn is_anthropic_oauth_token(key: &str) -> bool {
-    key.starts_with("sk-ant-oat")
-}
-
 /// Fetches model IDs from the Anthropic models API with version-header auth.
 async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String> {
     let url = "https://api.anthropic.com/v1/models?limit=1000";
@@ -498,11 +493,15 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
 
     let mut req_builder = client.get(url).header("anthropic-version", "2023-06-01");
 
-    if is_anthropic_oauth_token(api_key) {
-        req_builder = req_builder.bearer_auth(api_key);
-    } else {
-        req_builder = req_builder.header("x-api-key", api_key);
+    if proto::is_anthropic_oauth_token(api_key) {
+        return Err(
+            "Anthropic OAuth tokens (sk-ant-oat*) cannot be used to list models. \
+             Use /login and select 'API Key' instead of OAuth, \
+             or set the openpista_API_KEY environment variable."
+                .to_string(),
+        );
     }
+    req_builder = req_builder.header("x-api-key", api_key);
 
     let response = req_builder
         .send()
@@ -929,15 +928,9 @@ mod tests {
     }
 
     #[test]
-    fn is_anthropic_oauth_token_detects_oauth_prefix() {
-        assert!(is_anthropic_oauth_token("sk-ant-oat01-abc123"));
-        assert!(is_anthropic_oauth_token("sk-ant-oat02-xyz"));
-    }
-
-    #[test]
-    fn is_anthropic_oauth_token_rejects_permanent_key() {
-        assert!(!is_anthropic_oauth_token("sk-ant-api03-abc123"));
-        assert!(!is_anthropic_oauth_token("some-random-key"));
-        assert!(!is_anthropic_oauth_token(""));
+    fn oauth_token_is_rejected_by_shared_helper() {
+        assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
+        assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
+        assert!(!proto::is_anthropic_oauth_token(""));
     }
 }
