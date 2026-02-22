@@ -6,6 +6,7 @@ Cargo.lock
 # Rust debug / profiling artifacts
 *.pdb
 *.dSYM/
+lcov.info
 
 # Docs build artifacts
 /docs/*
@@ -17,6 +18,7 @@ config.toml
 *.key
 *.cert
 *.pid
+*.log
 
 # skills
 skills/hello-wasm/target
@@ -24,3 +26,7 @@ skills/hello-wasm/target
 # OS / local tooling
 .DS_Store
 .sisyphus/
+
+
+CLAUDE.md
+.claude

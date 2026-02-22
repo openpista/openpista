@@ -20,11 +20,14 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 anyhow = "1"
+arboard = "3"
 chrono = { workspace = true }
 reqwest = { workspace = true }
+unicode-width = "0.2"
 sha2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }

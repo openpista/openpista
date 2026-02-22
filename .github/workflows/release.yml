@@ -97,8 +97,8 @@ jobs:
         run: |
           tag="${{ needs.prepare.outputs.release_tag }}"
           target="${{ matrix.target }}"
-          bin_path="target/${target}/release/openpistacrab"
-          package_dir="openpistacrab-${tag}-${target}"
+          bin_path="target/${target}/release/openpista"
+          package_dir="openpista-${tag}-${target}"
           artifact="${package_dir}.tar.gz"
 
           if [ ! -f "${bin_path}" ]; then
@@ -107,7 +107,7 @@ jobs:
           fi
 
           mkdir -p "${package_dir}"
-          cp "${bin_path}" "${package_dir}/openpistacrab"
+          cp "${bin_path}" "${package_dir}/openpista"
           tar -czf "${artifact}" "${package_dir}"
 
           echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
@@ -137,7 +137,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          mapfile -t artifacts < <(ls -1 openpistacrab-*.tar.gz)
+          mapfile -t artifacts < <(ls -1 openpista-*.tar.gz)
           if [ "${#artifacts[@]}" -eq 0 ]; then
             echo "no release artifacts found" >&2
             exit 1
@@ -162,7 +162,7 @@ jobs:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
           files: |
-            dist/openpistacrab-*.tar.gz
+            dist/openpista-*.tar.gz
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
         env:

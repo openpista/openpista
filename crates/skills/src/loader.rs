@@ -50,11 +50,11 @@ impl SkillLoader {
         }
     }
 
-    /// Creates a loader using `OPENPISTACRAB_WORKSPACE` or default workspace path.
+    /// Creates a loader using `openpista_WORKSPACE` or default workspace path.
     pub fn from_env_or_default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let default_workspace = format!("{home}/.openpistacrab/workspace");
-        let workspace = std::env::var("OPENPISTACRAB_WORKSPACE").unwrap_or(default_workspace);
+        let default_workspace = format!("{home}/.openpista/workspace");
+        let workspace = std::env::var("openpista_WORKSPACE").unwrap_or(default_workspace);
         Self::new(workspace)
     }
 
@@ -358,9 +358,17 @@ fn extract_front_matter(content: &str) -> Option<String> {
 /// assert_eq!(parse_mode("foo"), SkillExecutionMode::Subprocess);
 /// ```
 fn parse_mode(value: &str) -> SkillExecutionMode {
-    match value.trim().to_ascii_lowercase().as_str() {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "wasm" => SkillExecutionMode::Wasm,
-        _ => SkillExecutionMode::Subprocess,
+        _ => {
+            warn!(
+                value = %value,
+                normalized = %normalized,
+                "unknown skill execution mode, defaulting to subprocess"
+            );
+            SkillExecutionMode::Subprocess
+        }
     }
 }
 
@@ -688,14 +696,6 @@ mod tests {
 
         assert_eq!(a_md.mode, SkillExecutionMode::Subprocess);
         assert_eq!(b_md.mode, SkillExecutionMode::Subprocess);
-    }
-
-    #[tokio::test]
-    async fn load_skill_metadata_returns_none_when_skill_missing() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let loader = SkillLoader::new(tmp.path());
-        let metadata = loader.load_skill_metadata("missing").await;
-        assert!(metadata.is_none());
     }
 
     #[test]

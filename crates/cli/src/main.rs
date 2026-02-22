@@ -1,8 +1,12 @@
 //! CLI entrypoint and subcommand orchestration.
 
 mod auth;
+mod auth_picker;
 mod config;
 mod daemon;
+mod model_catalog;
+#[cfg(test)]
+mod test_support;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -14,7 +18,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[cfg(not(test))]
-use agent::{AgentRuntime, OpenAiProvider, SqliteMemory, ToolRegistry};
+use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
+#[cfg(not(test))]
+use agent::{AgentRuntime, AnthropicProvider, OpenAiProvider, SqliteMemory, ToolRegistry};
 #[cfg(not(test))]
 use channels::{ChannelAdapter, CliAdapter, MobileAdapter, TelegramAdapter};
 #[cfg(not(test))]
@@ -31,18 +37,7 @@ use tools::{
 #[cfg(not(test))]
 use tracing::{error, info, warn};
 #[cfg(not(test))]
-use tracing_subscriber::{EnvFilter, fmt};
-
-/// Parsed REPL line classification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ReplInput {
-    /// Empty or whitespace-only input line.
-    Empty,
-    /// Exit command (`/quit` or `/exit`).
-    Exit,
-    /// Normal user message content.
-    Message(String),
-}
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Top-level command-line arguments for the openpista application.
 #[derive(Parser)]
@@ -57,6 +52,10 @@ struct Cli {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
+    /// Enable debug logging to ~/.openpista/debug.log
+    #[arg(long, default_value_t = false)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -65,7 +64,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the full-screen TUI (default when no subcommand is given)
-    Tui,
+    Tui {
+        /// Resume an existing session by its ID
+        #[arg(short = 's', long)]
+        session: Option<String>,
+    },
 
     /// Start the daemon (gateway + all enabled channels)
     Start,
@@ -77,8 +80,11 @@ enum Commands {
         exec: String,
     },
 
-    /// Start interactive REPL session
-    Repl,
+    /// Browse model catalog entries
+    Model {
+        #[command(subcommand)]
+        command: Option<ModelsCommands>,
+    },
 
     /// Manage provider credentials via OAuth 2.0 PKCE browser login
     Auth {
@@ -87,14 +93,29 @@ enum Commands {
     },
 }
 
+/// `model` sub-subcommands.
+#[derive(Subcommand)]
+enum ModelsCommands {
+    /// List recommended coding model
+    List,
+}
+
 /// `auth` sub-subcommands.
 #[derive(Subcommand)]
 enum AuthCommands {
     /// Authenticate with a provider via browser-based OAuth PKCE flow
     Login {
-        /// Provider to authenticate with (openai, openrouter)
-        #[arg(short, long, default_value = "openai")]
-        provider: String,
+        /// Provider to authenticate with
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// API key value to persist for API-key or fallback auth modes
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Endpoint value for endpoint+key providers (azure-openai, custom, etc.)
+        #[arg(long)]
+        endpoint: Option<String>,
 
         /// Local port for the OAuth callback server
         #[arg(long, default_value_t = 9009)]
@@ -103,6 +124,10 @@ enum AuthCommands {
         /// Seconds to wait for the browser authorization before timing out
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+
+        /// Skip interactive picker and require flags/env inputs only
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
 
     /// Remove stored credentials for a provider
@@ -123,21 +148,71 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Determine effective command (default to Tui if none given)
-    let command = cli.command.unwrap_or(Commands::Tui);
-    let is_tui = matches!(command, Commands::Tui);
+    let command = cli.command.unwrap_or(Commands::Tui { session: None });
+    let is_tui = matches!(command, Commands::Tui { .. });
 
-    // Initialize tracing — suppress in TUI mode to avoid corrupting the display
-    let filter =
+    // Initialize tracing — suppress console output in TUI mode to avoid corrupting the display.
+    // When --debug is passed, also write debug-level logs to ~/.openpista/debug.log.
+    let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
-    if is_tui {
-        fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::sink)
-            .with_target(false)
-            .init();
+    // WorkerGuard must outlive main() so buffered file writes are flushed on exit.
+    let _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+    let debug_writer = if cli.debug {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let log_dir = std::path::PathBuf::from(home).join(".openpista");
+        std::fs::create_dir_all(&log_dir).ok();
+        let appender = tracing_appender::rolling::never(&log_dir, "debug.log");
+        let (writer, guard) = tracing_appender::non_blocking(appender);
+        _file_guard = Some(guard);
+        Some(writer)
     } else {
-        fmt().with_env_filter(filter).with_target(false).init();
+        _file_guard = None;
+        None
+    };
+
+    match (is_tui, debug_writer) {
+        (true, Some(writer)) => {
+            let console = fmt::layer()
+                .with_writer(std::io::sink)
+                .with_target(false)
+                .with_filter(console_filter);
+            let file = fmt::layer()
+                .with_writer(writer)
+                .with_target(true)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("debug"));
+            tracing_subscriber::registry()
+                .with(console)
+                .with(file)
+                .init();
+        }
+        (true, None) => {
+            fmt()
+                .with_env_filter(console_filter)
+                .with_writer(std::io::sink)
+                .with_target(false)
+                .init();
+        }
+        (false, Some(writer)) => {
+            let console = fmt::layer().with_target(false).with_filter(console_filter);
+            let file = fmt::layer()
+                .with_writer(writer)
+                .with_target(true)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("debug"));
+            tracing_subscriber::registry()
+                .with(console)
+                .with(file)
+                .init();
+        }
+        (false, None) => {
+            fmt()
+                .with_env_filter(console_filter)
+                .with_target(false)
+                .init();
+        }
     }
 
     // Load config
@@ -147,16 +222,30 @@ async fn main() -> anyhow::Result<()> {
     });
 
     match command {
-        Commands::Tui => cmd_tui(config).await,
+        Commands::Tui { session } => cmd_tui(config, session).await,
         Commands::Start => cmd_start(config).await,
         Commands::Run { exec } => cmd_run(config, exec).await,
-        Commands::Repl => cmd_repl(config).await,
+        Commands::Model { command } => cmd_models(config, command).await,
         Commands::Auth { command } => match command {
             AuthCommands::Login {
                 provider,
+                api_key,
+                endpoint,
                 port,
                 timeout,
-            } => cmd_auth_login(config, provider, port, timeout).await,
+                non_interactive,
+            } => {
+                cmd_auth_login(
+                    config,
+                    provider,
+                    api_key,
+                    endpoint,
+                    port,
+                    timeout,
+                    non_interactive,
+                )
+                .await
+            }
             AuthCommands::Logout { provider } => cmd_auth_logout(provider),
             AuthCommands::Status => cmd_auth_status(),
         },
@@ -165,14 +254,54 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(not(test))]
 /// Starts the full-screen TUI for interactive agent sessions.
-async fn cmd_tui(config: Config) -> anyhow::Result<()> {
+async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> {
     let runtime = build_runtime(&config, None).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
     let channel_id = ChannelId::new("cli", "tui");
-    let session_id = SessionId::new();
+    let session_id = match session {
+        Some(id) => SessionId::from(id),
+        None => SessionId::new(),
+    };
     let model_name = config.agent.effective_model().to_string();
 
-    tui::run_tui(runtime, skill_loader, channel_id, session_id, model_name).await
+    tui::run_tui(
+        runtime,
+        skill_loader,
+        channel_id,
+        session_id.clone(),
+        model_name,
+        config.clone(),
+    )
+    .await?;
+
+    print_goodbye_banner(&session_id, config.agent.effective_model());
+    Ok(())
+}
+
+#[cfg(not(test))]
+/// Builds an LLM provider instance for the given preset, API key, optional base URL, and model.
+fn build_provider(
+    preset: config::ProviderPreset,
+    api_key: &str,
+    base_url: Option<&str>,
+    model: &str,
+) -> Arc<dyn agent::LlmProvider> {
+    match preset {
+        config::ProviderPreset::Anthropic => {
+            if let Some(base_url) = base_url {
+                Arc::new(AnthropicProvider::with_base_url(api_key, base_url))
+            } else {
+                Arc::new(AnthropicProvider::new(api_key))
+            }
+        }
+        _ => {
+            if let Some(base_url) = base_url {
+                Arc::new(OpenAiProvider::with_base_url(api_key, base_url, model))
+            } else {
+                Arc::new(OpenAiProvider::new(api_key, model))
+            }
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -201,27 +330,55 @@ async fn build_runtime(
     // LLM provider
     let api_key = config.resolve_api_key();
     if api_key.is_empty() {
-        warn!("No API key configured. Set OPENPISTACRAB_API_KEY or OPENAI_API_KEY.");
+        warn!("No API key configured. Set openpista_API_KEY or OPENAI_API_KEY.");
+    }
+    let model = config.agent.effective_model().to_string();
+    let llm = build_provider(
+        config.agent.provider,
+        &api_key,
+        config.agent.effective_base_url(),
+        &model,
+    );
+
+    let runtime = Arc::new(
+        AgentRuntime::new(
+            llm,
+            registry,
+            memory,
+            config.agent.provider.name(),
+            &model,
+            config.agent.max_tool_rounds,
+        )
+        .with_worker_report_quic_addr(worker_report_quic_addr),
+    );
+
+    // Register all authenticated providers so the runtime can switch between them.
+    for preset in config::ProviderPreset::all() {
+        let name = preset.name();
+        // Skip the active provider — already registered by AgentRuntime::new.
+        if name == config.agent.provider.name() {
+            continue;
+        }
+        if let Some(cred) = config.resolve_credential_for(name) {
+            let default_model = preset.default_model();
+            let provider = build_provider(
+                *preset,
+                &cred.api_key,
+                cred.base_url.as_deref(),
+                default_model,
+            );
+            runtime.register_provider(name, provider);
+            info!(provider = %name, "Registered additional provider");
+        }
     }
 
-    let model = config.agent.effective_model().to_string();
-    let llm: Arc<dyn agent::LlmProvider> = if let Some(base_url) = config.agent.effective_base_url()
-    {
-        Arc::new(OpenAiProvider::with_base_url(&api_key, base_url, &model))
-    } else {
-        Arc::new(OpenAiProvider::new(&api_key, &model))
-    };
-
-    Ok(Arc::new(
-        AgentRuntime::new(llm, registry, memory, &model, config.agent.max_tool_rounds)
-            .with_worker_report_quic_addr(worker_report_quic_addr),
-    ))
+    Ok(runtime)
 }
 
 #[cfg(not(test))]
 /// Starts daemon mode with enabled channel adapters.
 async fn cmd_start(config: Config) -> anyhow::Result<()> {
-    info!("Starting openpistacrab daemon");
+    info!("Starting openpista daemon");
 
     let report_host = config.gateway.report_host.as_deref().unwrap_or("127.0.0.1");
     let report_addr = format!("{report_host}:{}", config.gateway.port);
@@ -397,7 +554,7 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     }
 
     pid_file.remove().await;
-    info!("openpistacrab stopped");
+    info!("openpista stopped");
     Ok(())
 }
 
@@ -431,98 +588,203 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
-/// Runs interactive REPL mode.
-async fn cmd_repl(config: Config) -> anyhow::Result<()> {
-    let runtime = build_runtime(&config, None).await?;
-    let skill_loader = SkillLoader::new(&config.skills.workspace);
+async fn cmd_models(config: Config, command: Option<ModelsCommands>) -> anyhow::Result<()> {
+    match command.unwrap_or(ModelsCommands::List) {
+        ModelsCommands::List => {
+            let provider_name = config.agent.provider.name();
+            let base_url = config.agent.effective_base_url();
+            let api_key = config.resolve_api_key();
+            let catalog =
+                model_catalog::load_catalog(provider_name, base_url, &api_key, false).await;
+            let summary = model_catalog::model_summary(&catalog.entries, "", false);
+            let sections = model_catalog::model_sections(&catalog.entries, "", false);
 
-    let channel_id = ChannelId::new("cli", "repl");
-    let session_id = SessionId::new();
+            println!(
+                "model | provider:{} | total:{} | matched:{} | recommended:{} | available:{}",
+                catalog.provider,
+                summary.total,
+                summary.matched,
+                summary.recommended,
+                summary.available
+            );
+            println!("{}", catalog.sync_status);
+            println!();
 
-    println!("openpistacrab REPL (session: {})", session_id);
-    println!("Type /quit to exit\n");
-
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
-
-    loop {
-        stdout.write_all(b"> ").await?;
-        stdout.flush().await?;
-
-        match reader.next_line().await? {
-            None => break,
-            Some(line) => {
-                let line = match parse_repl_input(&line) {
-                    ReplInput::Empty => continue,
-                    ReplInput::Exit => break,
-                    ReplInput::Message(text) => text,
-                };
-
-                let skills_ctx = skill_loader.load_context().await;
-
-                match runtime
-                    .process(&channel_id, &session_id, &line, Some(&skills_ctx))
-                    .await
-                {
-                    Ok(text) => {
-                        println!("\n{text}\n");
-                    }
-                    Err(e) => {
-                        eprintln!("\nError: {e}\n");
-                    }
-                }
-            }
+            print_model_section("Recommended + Available", &sections.recommended_available);
+            print_model_section(
+                "Recommended + Unavailable",
+                &sections.recommended_unavailable,
+            );
         }
     }
 
-    println!("Goodbye!");
     Ok(())
 }
 
 #[cfg(not(test))]
-/// Runs the OAuth PKCE login flow for `provider` and persists the token.
+fn print_model_section(title: &str, entries: &[model_catalog::ModelCatalogEntry]) {
+    println!("{title} ({})", entries.len());
+    for entry in entries {
+        println!(
+            "- {}  [status:{}]  [available:{}]  [source:{}]",
+            entry.id,
+            entry.status.as_str(),
+            if entry.available { "yes" } else { "no" },
+            entry.source.as_str()
+        );
+    }
+    println!();
+}
+
+#[cfg(not(test))]
 async fn cmd_auth_login(
     config: Config,
-    provider: String,
+    provider: Option<String>,
+    api_key: Option<String>,
+    endpoint: Option<String>,
     port: u16,
     timeout: u64,
+    non_interactive: bool,
 ) -> anyhow::Result<()> {
-    let preset: crate::config::ProviderPreset = provider
-        .parse()
-        .map_err(|_| anyhow::anyhow!("unknown provider '{provider}'"))?;
+    use crate::config::{LoginAuthMode, provider_registry_entry_ci, provider_registry_names};
 
-    let endpoints = preset.oauth_endpoints().ok_or_else(|| {
-        anyhow::anyhow!(
-            "provider '{provider}' does not support OAuth PKCE login.\n\
-             Supported providers: openai, openrouter\n\
-             For API-key-only providers (together, ollama), set api_key in config.toml."
-        )
-    })?;
-
-    let client_id = if !config.agent.oauth_client_id.is_empty() {
-        config.agent.oauth_client_id.clone()
-    } else {
-        anyhow::bail!(
-            "No OAuth client ID configured for '{provider}'.\n\
-             Register an OAuth app with the provider and set one of:\n\
-             • agent.oauth_client_id in config.toml\n\
-             • OPENPISTACRAB_OAUTH_CLIENT_ID environment variable"
-        )
+    let lookup_env = |env_name: &str| -> Option<String> {
+        if env_name.is_empty() {
+            None
+        } else {
+            std::env::var(env_name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        }
     };
 
-    let cred = auth::login(&provider, &endpoints, &client_id, port, timeout).await?;
+    let intent = if non_interactive {
+        let provider = provider
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if provider.is_empty() {
+            anyhow::bail!(
+                "--non-interactive requires --provider <name>. Available providers: {}",
+                provider_registry_names()
+            );
+        }
+        let entry = provider_registry_entry_ci(&provider).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown provider '{provider}'. Available providers: {}",
+                provider_registry_names()
+            )
+        })?;
 
-    let mut creds = auth::Credentials::load();
-    creds.set(provider.clone(), cred);
-    creds.save()?;
+        let resolved_api_key = api_key
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| lookup_env(entry.api_key_env))
+            .or_else(|| lookup_env("openpista_API_KEY"));
 
-    println!(
-        "\nAuthenticated as '{provider}'. Token stored in {}",
-        auth::Credentials::path().display()
-    );
+        let resolved_endpoint = endpoint
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                entry
+                    .endpoint_env
+                    .and_then(lookup_env)
+                    .filter(|value| !value.trim().is_empty())
+            });
+
+        match entry.auth_mode {
+            LoginAuthMode::None => {
+                println!("Provider '{}' does not require login.", entry.name);
+                return Ok(());
+            }
+            LoginAuthMode::EndpointAndKey => {
+                let endpoint = resolved_endpoint.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires endpoint. Set --endpoint or {}.",
+                        entry.name,
+                        entry.endpoint_env.unwrap_or("PROVIDER_ENDPOINT")
+                    )
+                })?;
+                let api_key = resolved_api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires API key. Set --api-key or {}.",
+                        entry.name,
+                        entry.api_key_env
+                    )
+                })?;
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: AuthMethodChoice::ApiKey,
+                    endpoint: Some(endpoint),
+                    api_key: Some(api_key),
+                }
+            }
+            LoginAuthMode::ApiKey => {
+                let api_key = resolved_api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider '{}' requires API key. Set --api-key, {}, or openpista_API_KEY.",
+                        entry.name,
+                        entry.api_key_env
+                    )
+                })?;
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: AuthMethodChoice::ApiKey,
+                    endpoint: resolved_endpoint,
+                    api_key: Some(api_key),
+                }
+            }
+            LoginAuthMode::OAuth => {
+                let method = if resolved_api_key.is_some() {
+                    AuthMethodChoice::ApiKey
+                } else {
+                    AuthMethodChoice::OAuth
+                };
+                if method == AuthMethodChoice::OAuth
+                    && !crate::config::oauth_available_for(
+                        entry.name,
+                        &config.agent.oauth_client_id,
+                    )
+                {
+                    anyhow::bail!(
+                        "No OAuth client ID configured for '{}'. Set openpista_OAUTH_CLIENT_ID or provide --api-key for API-key fallback.",
+                        entry.name
+                    );
+                }
+                AuthLoginIntent {
+                    provider: entry.name.to_string(),
+                    auth_method: method,
+                    endpoint: resolved_endpoint,
+                    api_key: resolved_api_key,
+                }
+            }
+        }
+    } else {
+        let intent = auth_picker::run_cli_auth_picker(
+            provider.as_deref(),
+            config.agent.oauth_client_id.clone(),
+        )?;
+        let Some(intent) = intent else {
+            println!("Login cancelled.");
+            return Ok(());
+        };
+        intent
+    };
+
+    let message = persist_cli_auth_intent(&config, intent, port, timeout).await?;
+    println!("\n{message}");
     Ok(())
+}
+
+#[cfg(not(test))]
+async fn persist_cli_auth_intent(
+    config: &Config,
+    intent: AuthLoginIntent,
+    port: u16,
+    timeout: u64,
+) -> anyhow::Result<String> {
+    tui::event::build_and_store_credential(config, intent, port, timeout)
+        .await
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(not(test))]
@@ -543,7 +805,7 @@ fn cmd_auth_logout(provider: String) -> anyhow::Result<()> {
 fn cmd_auth_status() -> anyhow::Result<()> {
     let creds = auth::Credentials::load();
     if creds.providers.is_empty() {
-        println!("No stored credentials. Run `openpistacrab auth login` to authenticate.");
+        println!("No stored credentials. Run `openpista auth login` to authenticate.");
         return Ok(());
     }
     println!(
@@ -563,19 +825,37 @@ fn cmd_auth_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses one REPL input line into semantic input kind.
-fn parse_repl_input(line: &str) -> ReplInput {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        ReplInput::Empty
-    } else if trimmed == "/quit" || trimmed == "/exit" {
-        ReplInput::Exit
+/// Prints the branded farewell banner with session resume instructions.
+fn print_goodbye_banner(session_id: &SessionId, model: &str) {
+    let session_str = session_id.as_str();
+    let short_session = if session_str.len() > 8 {
+        &session_str[..8]
     } else {
-        ReplInput::Message(trimmed.to_string())
-    }
+        session_str
+    };
+
+    println!();
+    println!("  \x1b[1;32m                            _     _      \x1b[0m");
+    println!("  \x1b[1;32m  ___  _ __  ___ _ __  _ __(_)___| |_ __ _\x1b[0m");
+    println!("  \x1b[1;32m / _ \\| '_ \\/ _ \\ '_ \\| '_ \\| / __| __/ _` |\x1b[0m");
+    println!("  \x1b[1;32m| (_) | |_) |  __/ | | | |_) | \\__ \\ || (_| |\x1b[0m");
+    println!("  \x1b[1;32m \\___/| .__/ \\___|_| |_| .__/|_|___/\\__\\__,_|\x1b[0m");
+    println!("  \x1b[1;32m      |_|              |_|                   \x1b[0m");
+    println!();
+    println!(
+        "  \x1b[1;37mSession\x1b[0m   \x1b[32m{}\x1b[0m",
+        session_str
+    );
+    println!("  \x1b[1;37mModel\x1b[0m     \x1b[32m{}\x1b[0m", model);
+    println!();
+    println!(
+        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista -s {}\x1b[0m",
+        short_session
+    );
+    println!();
 }
 
-/// Returns whether a response should be routed to the mobile QUIC adapter.
+/// Returns whether a response should be routed to the mobile adapter.
 fn should_send_mobile_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("mobile:")
 }
@@ -590,6 +870,7 @@ fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
 }
 
+/// Extracts a [`WorkerReport`] from event metadata, if present.
 fn parse_worker_report(event: &ChannelEvent) -> Option<WorkerReport> {
     let metadata = event.metadata.clone()?;
     let report: WorkerReport = serde_json::from_value(metadata).ok()?;
@@ -623,17 +904,6 @@ fn format_run_header(exec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_repl_input_classifies_lines() {
-        assert_eq!(parse_repl_input("   "), ReplInput::Empty);
-        assert_eq!(parse_repl_input("/quit"), ReplInput::Exit);
-        assert_eq!(parse_repl_input("/exit"), ReplInput::Exit);
-        assert_eq!(
-            parse_repl_input("  hello world  "),
-            ReplInput::Message("hello world".to_string())
-        );
-    }
 
     #[test]
     fn should_send_mobile_response_checks_prefix() {
@@ -710,5 +980,17 @@ exit_code: 0"
     #[test]
     fn format_run_header_embeds_exec_text() {
         assert_eq!(format_run_header("ls -la"), "Running: ls -la");
+    }
+
+    #[test]
+    fn print_goodbye_banner_does_not_panic() {
+        let session = SessionId::from("abcdef12-3456-7890-abcd-ef1234567890");
+        print_goodbye_banner(&session, "gpt-4o");
+    }
+
+    #[test]
+    fn print_goodbye_banner_short_session_id() {
+        let session = SessionId::from("short");
+        print_goodbye_banner(&session, "claude-sonnet-4-20250514");
     }
 }

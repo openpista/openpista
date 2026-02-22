@@ -1,4 +1,4 @@
-# openpistacrab
+# openpista
 
 [![CI](https://github.com/openpista/openpista/actions/workflows/ci.yml/badge.svg)](https://github.com/openpista/openpista/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/openpista/openpista/graph/badge.svg)](https://codecov.io/gh/openpista/openpista)
@@ -15,9 +15,9 @@
 
 ---
 
-## openpistacrab이란?
+## openpista이란?
 
-openpistacrab은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, WhatsApp)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
+openpista은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, WhatsApp)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
 - 텔레그램에서 메시지를 보내면 → LLM이 무엇을 할지 결정 → bash가 실행 → 결과가 돌아옴
 - 단일 정적 바이너리, ~10 MB, 최소 메모리 사용
@@ -82,7 +82,7 @@ cd openpista
 cargo build --release
 
 # 바이너리를 PATH에 복사
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Ubuntu / Debian
@@ -100,7 +100,7 @@ git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
 
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ### Fedora / RHEL
@@ -113,7 +113,7 @@ source "$HOME/.cargo/env"
 git clone https://github.com/openpista/openpista.git
 cd openpista
 cargo build --release
-sudo cp target/release/openpistacrab /usr/local/bin/
+sudo cp target/release/openpista /usr/local/bin/
 ```
 
 ---
@@ -134,7 +134,7 @@ tls_cert = ""        # 비워두면 자체 서명 인증서 자동 생성
 [agent]
 provider = "openai"
 model = "gpt-4o"
-api_key = ""         # 또는 OPENPISTACRAB_API_KEY 환경변수 사용
+api_key = ""         # 또는 openpista_API_KEY 환경변수 사용
 max_tool_rounds = 10
 
 [channels.telegram]
@@ -145,20 +145,21 @@ token = ""           # 또는 TELEGRAM_BOT_TOKEN 환경변수 사용
 enabled = true
 
 [database]
-url = "~/.openpistacrab/memory.db"
+url = "~/.openpista/memory.db"
 
 [skills]
-workspace = "~/.openpistacrab/workspace"
+workspace = "~/.openpista/workspace"
 ```
 
 ### 환경 변수
 
 | 변수 | 설명 |
 |---|---|
-| `OPENPISTACRAB_API_KEY` | OpenAI 호환 API 키 (설정 파일 덮어씀) |
+| `openpista_API_KEY` | OpenAI 호환 API 키 (설정 파일 덮어씀) |
 | `OPENAI_API_KEY` | 대체 API 키 |
+| `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (텔레그램 채널 활성화) |
-| `OPENPISTACRAB_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
+| `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
 
 ---
 
@@ -167,36 +168,59 @@ workspace = "~/.openpistacrab/workspace"
 ### 단일 명령 실행
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpistacrab run -e "홈 디렉토리의 파일을 나열해줘"
+openpista_API_KEY=sk-... openpista run -e "홈 디렉토리의 파일을 나열해줘"
 ```
 
-### 대화형 REPL
+### 인증 로그인 Picker
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... openpistacrab repl
+# 검색 + 화살표 선택 기반 인터랙티브 로그인
+openpista auth login
 
-openpistacrab REPL (session: 3f2a1b...)
-종료하려면 /quit 입력
+# 스크립트/CI용 비대화형 모드
+openpista auth login --non-interactive --provider opencode --api-key "$OPENCODE_API_KEY"
+```
 
-> 현재 작업 디렉토리가 어디야?
-/Users/pista
+TUI 명령:
 
-> /tmp에서 가장 큰 파일 5개 보여줘
-...
+```txt
+/login
+/connection
+```
+
+### 모델 카탈로그 (OpenCode)
+
+```bash
+# 코딩 추천 모델 목록
+openpista models list
+```
+
+TUI 명령:
+
+```txt
+/models
+```
+
+`/models` 브라우저 내부 키:
+
+```txt
+s 또는 /: model id 검색
+r: 원격 카탈로그 강제 동기화
+Esc: (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
 ```
 
 ### 데몬 모드 (텔레그램 + CLI + QUIC 게이트웨이)
 
 ```bash
-OPENPISTACRAB_API_KEY=sk-... \
+openpista_API_KEY=sk-... \
 TELEGRAM_BOT_TOKEN=123456:ABC... \
-openpistacrab start
+openpista start
 ```
 
 데몬은:
 - 원격 에이전트 연결을 위해 QUIC 포트 `4433`에서 수신 대기
 - 활성화된 모든 채널 어댑터 시작
-- `~/.openpistacrab/openpistacrab.pid`에 PID 파일 저장
+- `~/.openpista/openpista.pid`에 PID 파일 저장
 - 정상 종료를 위한 `SIGTERM` / `Ctrl-C` 처리
 
 ### Skills
@@ -204,7 +228,7 @@ openpistacrab start
 워크스페이스에 `SKILL.md`를 배치하여 에이전트 기능을 확장하세요:
 
 ```
-~/.openpistacrab/workspace/skills/
+~/.openpista/workspace/skills/
 ├── deploy/
 │   ├── SKILL.md      ← 이 skill이 무엇을 하는지 설명
 │   └── run.sh        ← 에이전트가 이 skill을 호출할 때 실행됨
@@ -218,7 +242,7 @@ openpistacrab start
 ## 워크스페이스 구조
 
 ```
-openpistacrab/
+openpista/
 ├── crates/
 │   ├── proto/      # 공유 타입, 에러 (AgentMessage, ToolCall, …)
 │   ├── gateway/    # QUIC 서버, 세션 라우터, 크론 스케줄러

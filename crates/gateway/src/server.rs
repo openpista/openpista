@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use proto::{ChannelEvent, GatewayError};
 use quinn::{Endpoint, ServerConfig};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -44,12 +46,13 @@ impl QuicServer {
         key_pem: &[u8],
         handler: AgentHandler,
     ) -> Result<Self, GatewayError> {
-        let cert: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e: std::io::Error| GatewayError::Tls(e.to_string()))?;
-        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem))
-            .map_err(|e: std::io::Error| GatewayError::Tls(e.to_string()))?
+        let cert: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| GatewayError::Tls(e.to_string()))?;
+        let key = PrivateKeyDer::pem_slice_iter(key_pem)
+            .next()
+            .transpose()
+            .map_err(|e| GatewayError::Tls(e.to_string()))?
             .ok_or_else(|| GatewayError::Tls("No private key found".into()))?;
 
         let server_config = make_server_config(cert, key)?;
