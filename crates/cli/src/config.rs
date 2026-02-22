@@ -2,7 +2,7 @@ use proto::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Resolved credential for a specific provider.
 #[allow(dead_code)]
@@ -31,6 +31,9 @@ pub struct OAuthEndpoints {
     /// Path component of the OAuth redirect URI.
     /// For localhost flows: appended to `http://localhost:{port}`.
     /// For code-display flows: appended to the auth URL origin.
+    /// Base URL for the redirect URI. When `None`, the auth URL origin is used.
+    /// Required when auth URL and redirect URL have different domains.
+    pub redirect_base: Option<&'static str>,
     pub redirect_path: &'static str,
 }
 
@@ -251,14 +254,16 @@ impl ProviderPreset {
                 default_client_id: Some("app_EMoamEEZ73f0CkXaXp7hrann"),
                 default_callback_port: Some(1455),
                 redirect_path: "/auth/callback",
+                redirect_base: None,
             }),
             Self::Anthropic => Some(OAuthEndpoints {
-                auth_url: "https://console.anthropic.com/oauth/authorize",
-                token_url: "https://console.anthropic.com/v1/oauth/token",
-                scope: "org:create_api_key user:profile user:inference",
+                auth_url: "https://claude.ai/oauth/authorize",
+                token_url: "https://platform.claude.com/v1/oauth/token",
+                scope: "user:profile user:inference",
                 default_client_id: Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e"),
                 default_callback_port: None,
                 redirect_path: "/oauth/code/callback",
+                redirect_base: Some("https://platform.claude.com"),
             }),
             Self::OpenRouter => Some(OAuthEndpoints {
                 auth_url: "https://openrouter.ai/auth",
@@ -267,6 +272,7 @@ impl ProviderPreset {
                 default_client_id: None,
                 default_callback_port: None,
                 redirect_path: "",
+                redirect_base: None,
             }),
 
             _ => None,
@@ -726,6 +732,22 @@ impl Config {
             && !cred.is_expired()
         {
             debug!(source = "credential_store", provider = %self.agent.provider.name(), "API key resolved");
+            // Warn about potentially stale credential formats
+            let token = &cred.access_token;
+            if self.agent.provider == ProviderPreset::OpenAi && token.starts_with("eyJ") {
+                warn!(
+                    provider = "openai",
+                    "Stored credential looks like a raw OAuth JWT — consider re-login with `openpista auth login`"
+                );
+            }
+            if self.agent.provider == ProviderPreset::Anthropic
+                && token.starts_with("sk-ant-api03-")
+            {
+                warn!(
+                    provider = "anthropic",
+                    "Stored credential looks like a workspace API key — consider re-login with `openpista auth login`"
+                );
+            }
             return cred.access_token.clone();
         }
 
@@ -749,6 +771,75 @@ impl Config {
             );
         }
         fallback
+    }
+
+    /// Test stub: delegates directly to [`resolve_api_key`] (no network calls in tests).
+    #[cfg(test)]
+    pub async fn resolve_api_key_refreshed(&self) -> String {
+        self.resolve_api_key()
+    }
+
+    /// Like [`resolve_api_key`] but also attempts to auto-refresh an expired (or nearly
+    /// expired) OAuth token before returning.
+    ///
+    /// If the stored credential expires within 5 minutes, this method tries to refresh
+    /// it via the provider's token endpoint and persists the updated credential.
+    /// On any refresh failure it falls back gracefully to the existing token.
+    #[cfg(not(test))]
+    pub async fn resolve_api_key_refreshed(&self) -> String {
+        use crate::auth::{Credentials, refresh_access_token, refresh_and_exchange};
+        use chrono::Utc;
+
+        if !self.agent.api_key.is_empty() {
+            return self.agent.api_key.clone();
+        }
+
+        let mut creds = Credentials::load();
+        let provider_name = self.agent.provider.name();
+
+        if let Some(cred) = creds.get(provider_name) {
+            let near_expiry = cred
+                .expires_at
+                .is_some_and(|t| t < Utc::now() + chrono::Duration::minutes(5));
+
+            // Force refresh when Anthropic workspace key (sk-ant-api03-) needs OAuth upgrade.
+            // OpenAI JWTs (eyJ...) are the correct format for ChatGPT Pro subscriptions
+            // and do NOT need id_token exchange — only refresh when near_expiry.
+            let is_stale_format = self.agent.provider == ProviderPreset::Anthropic
+                && cred.access_token.starts_with("sk-ant-api03-");
+
+            if (near_expiry || is_stale_format)
+                && let Some(rt) = cred.refresh_token.clone()
+                && let Some(endpoints) = self.agent.provider.oauth_endpoints()
+            {
+                let client_id = endpoints
+                    .effective_client_id(&self.agent.oauth_client_id)
+                    .unwrap_or_default()
+                    .to_string();
+                let is_openai = self.agent.provider == ProviderPreset::OpenAi;
+                let refresh_result = if is_openai {
+                    refresh_and_exchange(endpoints.token_url, &rt, &client_id).await
+                } else {
+                    refresh_access_token(endpoints.token_url, &rt, &client_id).await
+                };
+                if let Ok(new_cred) = refresh_result {
+                    let api_key = new_cred.access_token.clone();
+                    creds.set(provider_name.to_string(), new_cred);
+                    let _ = creds.save();
+                    debug!(source = "refreshed_credential", provider = %provider_name, "API key resolved after refresh");
+                    return api_key;
+                }
+                debug!(provider = %provider_name, "Token refresh failed, using existing credential");
+            }
+
+            if !cred.is_expired() {
+                debug!(source = "credential_store", provider = %provider_name, "API key resolved");
+                return cred.access_token.clone();
+            }
+        }
+
+        // Fall back to env vars / legacy key
+        self.resolve_api_key()
     }
 
     /// Resolves the API key for an arbitrary provider name (not just the configured one).
@@ -800,6 +891,99 @@ impl Config {
         }
 
         None
+    }
+
+    /// Async version of [`resolve_credential_for`] that auto-refreshes stale OAuth tokens.
+    #[cfg(not(test))]
+    pub async fn resolve_credential_for_refreshed(
+        &self,
+        provider_name: &str,
+    ) -> Option<ResolvedCredential> {
+        use crate::auth::{Credentials, refresh_access_token, refresh_and_exchange};
+        use chrono::Utc;
+
+        // If it's the configured provider, delegate to the async method
+        if provider_name == self.agent.provider.name() {
+            let key = self.resolve_api_key_refreshed().await;
+            if key.is_empty() {
+                return None;
+            }
+            return Some(ResolvedCredential {
+                api_key: key,
+                base_url: self.agent.effective_base_url().map(String::from),
+            });
+        }
+
+        // Try credential store with refresh for other providers
+        let mut creds = Credentials::load();
+        if let Some(cred) = creds.get(provider_name) {
+            let preset = provider_name.parse::<ProviderPreset>().ok();
+            let near_expiry = cred
+                .expires_at
+                .is_some_and(|t| t < Utc::now() + chrono::Duration::minutes(5));
+            // Only Anthropic workspace keys (sk-ant-api03-) are stale and need upgrade.
+            // OpenAI JWTs are the correct format for ChatGPT Pro subscriptions.
+            let is_stale_format = match provider_name {
+                "anthropic" => cred.access_token.starts_with("sk-ant-api03-"),
+                _ => false,
+            };
+
+            if (near_expiry || is_stale_format)
+                && let Some(rt) = cred.refresh_token.clone()
+                && let Some(ref p) = preset
+                && let Some(endpoints) = p.oauth_endpoints()
+            {
+                let client_id = endpoints
+                    .effective_client_id(&self.agent.oauth_client_id)
+                    .unwrap_or_default()
+                    .to_string();
+                let is_openai = provider_name == "openai";
+                let refresh_result = if is_openai {
+                    refresh_and_exchange(endpoints.token_url, &rt, &client_id).await
+                } else {
+                    refresh_access_token(endpoints.token_url, &rt, &client_id).await
+                };
+                if let Ok(new_cred) = refresh_result {
+                    let api_key = new_cred.access_token.clone();
+                    creds.set(provider_name.to_string(), new_cred);
+                    let _ = creds.save();
+                    let base_url = preset.and_then(|p| p.base_url().map(String::from));
+                    return Some(ResolvedCredential { api_key, base_url });
+                }
+            }
+
+            if !cred.is_expired() {
+                let base_url = preset.and_then(|p| p.base_url().map(String::from));
+                return Some(ResolvedCredential {
+                    api_key: cred.access_token.clone(),
+                    base_url,
+                });
+            }
+        }
+
+        // Try provider-specific env var
+        if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
+            let env_var = preset.api_key_env();
+            if !env_var.is_empty()
+                && let Ok(key) = std::env::var(env_var)
+            {
+                return Some(ResolvedCredential {
+                    api_key: key,
+                    base_url: preset.base_url().map(String::from),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Test stub for [`resolve_credential_for_refreshed`].
+    #[cfg(test)]
+    pub async fn resolve_credential_for_refreshed(
+        &self,
+        provider_name: &str,
+    ) -> Option<ResolvedCredential> {
+        self.resolve_credential_for(provider_name)
     }
 }
 
@@ -1135,8 +1319,8 @@ api_key = "tg-key"
         let ep = ProviderPreset::Anthropic
             .oauth_endpoints()
             .expect("anthropic oauth endpoints");
-        assert!(ep.auth_url.contains("anthropic.com"));
-        assert!(ep.token_url.contains("anthropic.com"));
+        assert!(ep.auth_url.contains("claude.ai"));
+        assert!(ep.token_url.contains("platform.claude.com") || ep.token_url.contains("anthropic.com"));
         assert!(ep.default_client_id.is_some());
         assert!(ep.default_callback_port.is_none());
         assert!(!ep.redirect_path.is_empty());
