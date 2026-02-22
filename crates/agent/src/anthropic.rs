@@ -69,13 +69,6 @@ struct AnthropicResponse {
     stop_reason: Option<String>,
 }
 
-/// Returns `true` when the key looks like an Anthropic OAuth access token
-/// rather than a permanent API key. OAuth tokens use `Authorization: Bearer`
-/// while permanent keys use the `x-api-key` header.
-fn is_oauth_token(key: &str) -> bool {
-    key.starts_with("sk-ant-oat")
-}
-
 // ── Provider ───────────────────────────────────────────────────────────────────
 
 /// Anthropic Messages API LLM provider.
@@ -146,11 +139,15 @@ impl LlmProvider for AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json");
 
-        if is_oauth_token(&self.api_key) {
-            req_builder = req_builder.bearer_auth(&self.api_key);
-        } else {
-            req_builder = req_builder.header("x-api-key", &self.api_key);
+        if proto::is_anthropic_oauth_token(&self.api_key) {
+            return Err(LlmError::Api(
+                "OAuth tokens (sk-ant-oat*) are not supported by the Anthropic Messages API. \
+                 Use /login and select 'API Key' instead of OAuth, \
+                 or set the openpista_API_KEY environment variable."
+                    .to_string(),
+            ));
         }
+        req_builder = req_builder.header("x-api-key", &self.api_key);
 
         let response = req_builder
             .json(&anthropic_req)
@@ -541,15 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn is_oauth_token_detects_oauth_prefix() {
-        assert!(is_oauth_token("sk-ant-oat01-abc123"));
-        assert!(is_oauth_token("sk-ant-oat02-xyz"));
-    }
-
-    #[test]
-    fn is_oauth_token_rejects_permanent_key() {
-        assert!(!is_oauth_token("sk-ant-api03-abc123"));
-        assert!(!is_oauth_token("sk-some-other-key"));
-        assert!(!is_oauth_token(""));
+    fn oauth_token_is_rejected_early() {
+        // Verify the shared helper correctly identifies OAuth tokens
+        assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
+        assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
+        assert!(!proto::is_anthropic_oauth_token(""));
     }
 }
