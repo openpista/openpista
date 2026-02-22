@@ -4,11 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracing::debug;
 
-/// Default provider identifier for OpenCode Zen models.
-pub const OPENCODE_PROVIDER: &str = "opencode";
-/// Base URL for the OpenCode Zen model listing endpoint.
-#[allow(dead_code)]
-pub const OPENCODE_MODELS_URL: &str = "https://opencode.ai/zen/v1/model";
 /// Time-to-live for the on-disk model cache (24 hours).
 const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
@@ -174,7 +169,7 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
                 available: true,
             },
         ],
-        "openai" | "opencode" => vec![
+        "openai" => vec![
             ModelCatalogEntry {
                 id: "gpt-5.3-codex".to_string(),
                 provider: p.clone(),
@@ -292,12 +287,6 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
     }
 }
 
-#[allow(dead_code)]
-/// Returns the default on-disk cache path for the OpenCode provider.
-pub fn default_cache_path() -> PathBuf {
-    provider_cache_path(OPENCODE_PROVIDER)
-}
-
 /// Groups filtered catalog entries into display sections.
 pub fn model_sections(entries: &[ModelCatalogEntry], query: &str, show_all: bool) -> ModelSections {
     let filtered = filtered_entries(entries, query, show_all);
@@ -345,18 +334,6 @@ pub fn filtered_entries(
 
     result.sort_by(|a, b| a.id.cmp(&b.id));
     result
-}
-
-#[allow(dead_code)]
-/// Loads the OpenCode provider catalog, optionally refreshing from remote.
-pub async fn load_opencode_catalog(refresh: bool, api_key: &str) -> CatalogLoadResult {
-    load_catalog(
-        OPENCODE_PROVIDER,
-        Some("https://opencode.ai/zen/v1"),
-        api_key,
-        refresh,
-    )
-    .await
 }
 
 /// Merges hardcoded seed entries with remotely-discovered model ids.
