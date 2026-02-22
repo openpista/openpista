@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[cfg(not(test))]
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 #[cfg(not(test))]
-use agent::{AgentRuntime, AnthropicProvider, OpenAiProvider, SqliteMemory, ToolRegistry};
+use agent::{AgentRuntime, AnthropicProvider, OpenAiProvider, ResponsesApiProvider, SqliteMemory, ToolRegistry};
 #[cfg(not(test))]
 use channels::{ChannelAdapter, CliAdapter, MobileAdapter, TelegramAdapter};
 #[cfg(not(test))]
@@ -80,24 +80,21 @@ enum Commands {
         exec: String,
     },
 
-    /// Browse model catalog entries
+    /// Browse or test model catalog entries
     Model {
-        #[command(subcommand)]
-        command: Option<ModelsCommands>,
-    },
+        /// 'list' to show catalog, 'test' to test all, or a model name to test
+        #[arg(value_name = "MODEL_OR_COMMAND")]
+        model_name: Option<String>,
 
+        /// Message to send for testing
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
     /// Manage provider credentials via OAuth 2.0 PKCE browser login
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
     },
-}
-
-/// `model` sub-subcommands.
-#[derive(Subcommand)]
-enum ModelsCommands {
-    /// List recommended coding model
-    List,
 }
 
 /// `auth` sub-subcommands.
@@ -229,7 +226,20 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui { session } => cmd_tui(config, session).await,
         Commands::Start => cmd_start(config).await,
         Commands::Run { exec } => cmd_run(config, exec).await,
-        Commands::Model { command } => cmd_models(config, command).await,
+        Commands::Model {
+            model_name,
+            message,
+        } => match model_name.as_deref() {
+            None | Some("list") => cmd_models(config).await,
+            Some("test") => {
+                let msg = message.unwrap_or_else(|| "Hello! Please respond briefly.".to_string());
+                cmd_model_test_all(config, msg).await
+            }
+            Some(name) => {
+                let msg = message.unwrap_or_else(|| "Hello! Please respond briefly.".to_string());
+                cmd_model_test(config, name.to_string(), msg).await
+            }
+        },
         Commands::Auth { command } => match command {
             AuthCommands::Login {
                 provider,
@@ -299,7 +309,18 @@ fn build_provider(
             }
         }
         _ => {
-            if let Some(base_url) = base_url {
+            // Detect OAuth-based credential → use Responses API for subscription access
+            let use_responses_api = preset == config::ProviderPreset::OpenAi
+                && is_openai_oauth_credential_for_key(api_key);
+            if use_responses_api {
+                let account_id = crate::auth::extract_chatgpt_account_id(api_key);
+                let provider = if let Some(base_url) = base_url {
+                    ResponsesApiProvider::with_base_url(api_key, base_url)
+                } else {
+                    ResponsesApiProvider::new(api_key)
+                };
+                Arc::new(provider.with_chatgpt_account_id(account_id))
+            } else if let Some(base_url) = base_url {
                 Arc::new(OpenAiProvider::with_base_url(api_key, base_url, model))
             } else {
                 Arc::new(OpenAiProvider::new(api_key, model))
@@ -332,7 +353,7 @@ async fn build_runtime(
     let memory = Arc::new(memory);
 
     // LLM provider
-    let api_key = config.resolve_api_key();
+    let api_key = config.resolve_api_key_refreshed().await;
     if api_key.is_empty() {
         warn!("No API key configured. Set openpista_API_KEY or OPENAI_API_KEY.");
     }
@@ -363,7 +384,7 @@ async fn build_runtime(
         if name == config.agent.provider.name() {
             continue;
         }
-        if let Some(cred) = config.resolve_credential_for(name) {
+        if let Some(cred) = config.resolve_credential_for_refreshed(name).await {
             let default_model = preset.default_model();
             let provider = build_provider(
                 *preset,
@@ -592,36 +613,25 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
-async fn cmd_models(config: Config, command: Option<ModelsCommands>) -> anyhow::Result<()> {
-    match command.unwrap_or(ModelsCommands::List) {
-        ModelsCommands::List => {
-            let provider_name = config.agent.provider.name();
-            let base_url = config.agent.effective_base_url();
-            let api_key = config.resolve_api_key();
-            let catalog =
-                model_catalog::load_catalog(provider_name, base_url, &api_key, false).await;
-            let summary = model_catalog::model_summary(&catalog.entries, "", false);
-            let sections = model_catalog::model_sections(&catalog.entries, "", false);
-
-            println!(
-                "model | provider:{} | total:{} | matched:{} | recommended:{} | available:{}",
-                catalog.provider,
-                summary.total,
-                summary.matched,
-                summary.recommended,
-                summary.available
-            );
-            println!("{}", catalog.sync_status);
-            println!();
-
-            print_model_section("Recommended + Available", &sections.recommended_available);
-            print_model_section(
-                "Recommended + Unavailable",
-                &sections.recommended_unavailable,
-            );
-        }
+async fn cmd_models(config: Config) -> anyhow::Result<()> {
+    let providers = collect_providers_for_test(&config).await;
+    let catalog = model_catalog::load_catalog_multi(&providers).await;
+    let summary = model_catalog::model_summary(&catalog.entries, "", false);
+    let sections = model_catalog::model_sections(&catalog.entries, "", false);
+    let provider_names: Vec<&str> = providers.iter().map(|(n, _, _)| n.as_str()).collect();
+    println!(
+        "model | providers:{} | total:{} | matched:{} | recommended:{} | available:{}",
+        provider_names.join(","), summary.total, summary.matched, summary.recommended, summary.available
+    );
+    for status in &catalog.sync_statuses {
+        println!("{status}");
     }
-
+    println!();
+    print_model_section("Recommended + Available", &sections.recommended_available);
+    print_model_section(
+        "Recommended + Unavailable",
+        &sections.recommended_unavailable,
+    );
     Ok(())
 }
 
@@ -630,8 +640,9 @@ fn print_model_section(title: &str, entries: &[model_catalog::ModelCatalogEntry]
     println!("{title} ({})", entries.len());
     for entry in entries {
         println!(
-            "- {}  [status:{}]  [available:{}]  [source:{}]",
+            "- {}  [provider:{}]  [status:{}]  [available:{}]  [source:{}]",
             entry.id,
+            entry.provider,
             entry.status.as_str(),
             if entry.available { "yes" } else { "no" },
             entry.source.as_str()
@@ -640,6 +651,165 @@ fn print_model_section(title: &str, entries: &[model_catalog::ModelCatalogEntry]
     println!();
 }
 
+#[cfg(not(test))]
+async fn collect_providers_for_test(config: &Config) -> Vec<(String, Option<String>, String)> {
+    let mut providers = Vec::new();
+    for preset in config::ProviderPreset::all() {
+        let name = preset.name();
+        if let Some(cred) = config.resolve_credential_for_refreshed(name).await {
+            providers.push((name.to_string(), cred.base_url, cred.api_key));
+        }
+    }
+    // Ensure the currently configured provider is always included
+    let active = config.agent.provider.name().to_string();
+    if !providers.iter().any(|(n, _, _)| n == &active) {
+        let key = config.resolve_api_key_refreshed().await;
+        if !key.is_empty() {
+            providers.push((
+                active,
+                config.agent.effective_base_url().map(String::from),
+                key,
+            ));
+        }
+    }
+    providers
+}
+
+#[cfg(not(test))]
+async fn cmd_model_test(
+    mut config: Config,
+    model_name: String,
+    message: String,
+) -> anyhow::Result<()> {
+    // Look up model in catalog to determine provider
+    let providers = collect_providers_for_test(&config).await;
+    let catalog = model_catalog::load_catalog_multi(&providers).await;
+    let entry = catalog.entries.iter().find(|e| e.id == model_name);
+
+    // Override provider if found in catalog
+    if let Some(entry) = entry
+        && let Ok(preset) = entry.provider.parse::<config::ProviderPreset>()
+    {
+        config.agent.provider = preset;
+    }
+    config.agent.model = model_name.clone();
+
+    let runtime = build_runtime(&config, None).await?;
+    let channel_id = ChannelId::new("cli", "model-test");
+    let session_id = SessionId::new();
+    println!(
+        "Testing model: {} (provider: {})",
+        model_name,
+        config.agent.provider.name()
+    );
+    println!("Message: {message}");
+    println!("---");
+
+    let start = std::time::Instant::now();
+    let result = runtime
+        .process(&channel_id, &session_id, &message, None)
+        .await;
+    let elapsed = start.elapsed();
+
+    match result {
+        Ok(text) => {
+            println!("OK ({:.1}s)\n{text}", elapsed.as_secs_f64());
+            info!(model = %model_name, elapsed_ms = %elapsed.as_millis(), "Model test passed");
+        }
+        Err(e) => {
+            eprintln!("FAIL ({:.1}s): {e}", elapsed.as_secs_f64());
+            error!(model = %model_name, error = %e, "Model test failed");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<()> {
+    let providers = collect_providers_for_test(&config).await;
+    let catalog = model_catalog::load_catalog_multi(&providers).await;
+
+    // Filter to recommended + available models
+    let test_models: Vec<_> = catalog
+        .entries
+        .iter()
+        .filter(|e| e.recommended_for_coding && e.available)
+        .collect();
+
+    if test_models.is_empty() {
+        println!("No recommended & available models found. Run `openpista auth login` first.");
+        return Ok(());
+    }
+
+    println!("Testing all available models with: \"{message}\"\n");
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let total = test_models.len();
+
+    for entry in &test_models {
+        let mut test_config = config.clone();
+        if let Ok(preset) = entry.provider.parse::<config::ProviderPreset>() {
+            test_config.agent.provider = preset;
+        }
+        test_config.agent.model = entry.id.clone();
+        let runtime = match build_runtime(&test_config, None).await {
+            Ok(rt) => rt,
+            Err(e) => {
+                println!(
+                    "  [{}] {:<24} FAIL (setup): {e}",
+                    entry.provider, entry.id
+                );
+                failed += 1;
+                continue;
+            }
+        };
+
+        let channel_id = ChannelId::new("cli", "model-test");
+        let session_id = SessionId::new();
+
+        let start = std::time::Instant::now();
+        let result = runtime
+            .process(&channel_id, &session_id, &message, None)
+            .await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(text) => {
+                let preview: String = text.chars().take(50).collect();
+                let preview = preview.replace('\n', " ");
+                println!(
+                    "  [{}] {:<24} OK ({:.1}s) \u{2014} \"{}{}\"" ,
+                    entry.provider,
+                    entry.id,
+                    elapsed.as_secs_f64(),
+                    preview,
+                    if text.len() > 50 { "..." } else { "" }
+                );
+                info!(model = %entry.id, provider = %entry.provider, elapsed_ms = %elapsed.as_millis(), "Model test passed");
+                passed += 1;
+            }
+            Err(e) => {
+                println!(
+                    "  [{}] {:<24} FAIL ({:.1}s) \u{2014} {e}",
+                    entry.provider,
+                    entry.id,
+                    elapsed.as_secs_f64()
+                );
+                error!(model = %entry.id, provider = %entry.provider, error = %e, "Model test failed");
+                failed += 1;
+            }
+        }
+    }
+
+    println!("\nResults: {passed} passed, {failed} failed out of {total} models");
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
 #[cfg(not(test))]
 async fn cmd_auth_login(
     config: Config,
@@ -827,6 +997,22 @@ fn cmd_auth_status() -> anyhow::Result<()> {
         println!("  {provider}: {status}");
     }
     Ok(())
+}
+
+
+/// Returns true if the given API key came from an OpenAI OAuth flow.
+/// When `Credentials` has a matching `openai` entry with this key and a
+/// `refresh_token`, we know the key was obtained via token exchange and the
+/// user should be billed via the Responses API (subscription) rather than
+/// Chat Completions API (API credits).
+fn is_openai_oauth_credential_for_key(api_key: &str) -> bool {
+    let creds = crate::auth::Credentials::load();
+    if let Some(cred) = creds.get("openai") {
+        // Has refresh_token = came from OAuth flow (not a manual API key)
+        cred.access_token == api_key && cred.refresh_token.is_some()
+    } else {
+        false
+    }
 }
 
 /// Prints the branded farewell banner with session resume instructions.

@@ -179,6 +179,21 @@ fn credentials_path() -> std::path::PathBuf {
     crate::auth::Credentials::path()
 }
 
+
+/// Returns true if the given API key came from an OpenAI OAuth flow.
+/// When `Credentials` has a matching `openai` entry with this key and a
+/// `refresh_token`, we know the key was obtained via token exchange and the
+/// user should be billed via the Responses API (subscription) rather than
+/// Chat Completions API (API credits).
+fn is_openai_oauth_credential_for_key(api_key: &str) -> bool {
+    let creds = load_credentials(&credentials_path());
+    if let Some(cred) = creds.get("openai") {
+        cred.access_token == api_key && cred.refresh_token.is_some()
+    } else {
+        false
+    }
+}
+
 #[cfg(not(test))]
 /// Runs browser OAuth login flow for one provider.
 async fn run_oauth_login(
@@ -250,6 +265,7 @@ async fn build_and_store_credential_with_path(
                         refresh_token: None,
                         expires_at: None,
                         endpoint: intent.endpoint,
+                        id_token: None,
                     },
                     format!(
                         "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
@@ -326,6 +342,7 @@ async fn build_and_store_credential_with_path(
                     refresh_token: None,
                     expires_at: None,
                     endpoint: intent.endpoint,
+                    id_token: None,
                 },
                 format!(
                     "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
@@ -350,6 +367,7 @@ async fn build_and_store_credential_with_path(
                     refresh_token: None,
                     expires_at: None,
                     endpoint: Some(endpoint.clone()),
+                    id_token: None,
                 },
                 format!(
                     "Saved endpoint+key for '{provider_name}'. Endpoint stored as {}.",
@@ -587,6 +605,15 @@ pub async fn run_tui(
                                                         Arc::new(agent::AnthropicProvider::with_base_url(&cred.api_key, url))
                                                     } else {
                                                         Arc::new(agent::AnthropicProvider::new(&cred.api_key))
+                                                    }
+                                                } else if preset == ProviderPreset::OpenAi
+                                                    && is_openai_oauth_credential_for_key(&cred.api_key)
+                                                {
+                                                    let account_id = crate::auth::extract_chatgpt_account_id(&cred.api_key);
+                                                    if let Some(ref url) = cred.base_url {
+                                                        Arc::new(agent::ResponsesApiProvider::with_base_url(&cred.api_key, url).with_chatgpt_account_id(account_id))
+                                                    } else {
+                                                        Arc::new(agent::ResponsesApiProvider::new(&cred.api_key).with_chatgpt_account_id(account_id))
                                                     }
                                                 } else if let Some(ref url) = cred.base_url {
                                                     Arc::new(agent::OpenAiProvider::with_base_url(&cred.api_key, url, &new_model))
@@ -930,13 +957,23 @@ pub async fn run_tui(
                         {
                             let new_model = preset.default_model().to_string();
                             runtime.set_model(new_model.clone());
-                            let api_key = config.resolve_api_key();
+                            let api_key = config.resolve_api_key_refreshed().await;
                             let new_llm: Arc<dyn agent::LlmProvider> =
                                 if preset == ProviderPreset::Anthropic {
                                     if let Some(base_url) = config.agent.effective_base_url() {
                                         Arc::new(agent::AnthropicProvider::with_base_url(&api_key, base_url))
                                     } else {
                                         Arc::new(agent::AnthropicProvider::new(&api_key))
+                                    }
+                                } else if preset == ProviderPreset::OpenAi
+                                    && is_openai_oauth_credential_for_key(&api_key)
+                                {
+                                    let account_id = crate::auth::extract_chatgpt_account_id(&api_key);
+                                    let burl = config.agent.effective_base_url().map(String::from);
+                                    if let Some(url) = burl {
+                                        Arc::new(agent::ResponsesApiProvider::with_base_url(&api_key, url).with_chatgpt_account_id(account_id))
+                                    } else {
+                                        Arc::new(agent::ResponsesApiProvider::new(&api_key).with_chatgpt_account_id(account_id))
                                     }
                                 } else {
                                     let burl = config.agent.effective_base_url().map(String::from);
