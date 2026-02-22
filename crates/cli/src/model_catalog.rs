@@ -16,6 +16,8 @@ pub enum ModelStatus {
     /// Early-access or beta model.
     Preview,
     /// Status not determined.
+    /// Model is deprecated but still accessible.
+    Deprecated,
     Unknown,
 }
 
@@ -27,6 +29,7 @@ impl ModelStatus {
             Self::Stable => "stable",
             Self::Preview => "preview",
             Self::Unknown => "unknown",
+            Self::Deprecated => "deprecated",
         }
     }
 }
@@ -171,30 +174,6 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
         ],
         "openai" => vec![
             ModelCatalogEntry {
-                id: "gpt-5.3-codex".to_string(),
-                provider: p.clone(),
-                recommended_for_coding: true,
-                status: ModelStatus::Stable,
-                source: ModelSource::Docs,
-                available: true,
-            },
-            ModelCatalogEntry {
-                id: "gpt-5.3-codex-spark".to_string(),
-                provider: p.clone(),
-                recommended_for_coding: true,
-                status: ModelStatus::Stable,
-                source: ModelSource::Docs,
-                available: true,
-            },
-            ModelCatalogEntry {
-                id: "codex-mini-latest".to_string(),
-                provider: p.clone(),
-                recommended_for_coding: true,
-                status: ModelStatus::Stable,
-                source: ModelSource::Docs,
-                available: true,
-            },
-            ModelCatalogEntry {
                 id: "o3".to_string(),
                 provider: p.clone(),
                 recommended_for_coding: false,
@@ -252,9 +231,41 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
             },
             ModelCatalogEntry {
                 id: "gpt-4o-mini".to_string(),
-                provider: p,
+                provider: p.clone(),
                 recommended_for_coding: false,
                 status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-5.2-codex".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-5.3-codex".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-5.3-codex-spark".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "codex-mini-latest".to_string(),
+                provider: p,
+                recommended_for_coding: false,
+                status: ModelStatus::Deprecated,
                 source: ModelSource::Docs,
                 available: true,
             },
@@ -669,9 +680,9 @@ mod tests {
         let merged = merge_seed_with_remote(
             &seed,
             &[
-                "gpt-5-codex".to_string(),
+                "o3".to_string(),
                 "claude-sonnet-4-6".to_string(),
-                "gpt-5.2-codex".to_string(),
+                "gpt-4.1-nano".to_string(),
             ],
         );
 
@@ -679,22 +690,24 @@ mod tests {
             .into_iter()
             .map(|entry| (entry.id.clone(), entry))
             .collect();
-        // Remote-only models are added and marked available.
-        assert!(by_id["gpt-5-codex"].available);
-        assert!(by_id["claude-sonnet-4-6"].available);
+        // Seed models that also appear in remote list stay Docs-sourced and available.
+        assert!(by_id["o3"].available);
+        assert_eq!(by_id["o3"].source, ModelSource::Docs);
+        assert!(by_id["gpt-4.1-nano"].available);
+        assert_eq!(by_id["gpt-4.1-nano"].source, ModelSource::Docs);
         // Docs-sourced seed model are always available regardless of remote response.
         assert!(by_id["gpt-4o"].available);
         // Api-sourced (remote-only) model are also available.
-        assert_eq!(by_id["gpt-5.2-codex"].source, ModelSource::Api);
-        assert!(by_id["gpt-5.2-codex"].available);
-        assert!(!by_id["gpt-5.2-codex"].recommended_for_coding);
+        assert_eq!(by_id["claude-sonnet-4-6"].source, ModelSource::Api);
+        assert!(by_id["claude-sonnet-4-6"].available);
+        assert!(!by_id["claude-sonnet-4-6"].recommended_for_coding);
     }
 
     #[test]
     fn filtered_entries_apply_show_all_and_query() {
         let entries = vec![
             ModelCatalogEntry {
-                id: "gpt-5-codex".into(),
+                id: "o3".into(),
                 provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
@@ -758,7 +771,7 @@ mod tests {
     fn model_summary_counts_match_filtered_set() {
         let entries = vec![
             ModelCatalogEntry {
-                id: "gpt-5-codex".into(),
+                id: "o3".into(),
                 provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
@@ -775,7 +788,7 @@ mod tests {
             },
         ];
 
-        let summary = model_summary(&entries, "gpt", false);
+        let summary = model_summary(&entries, "o3", false);
         assert_eq!(summary.total, 2);
         assert_eq!(summary.matched, 1);
         assert_eq!(summary.recommended, 1);
