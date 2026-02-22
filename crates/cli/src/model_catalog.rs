@@ -4,11 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracing::debug;
 
-/// Default provider identifier for OpenCode Zen models.
-pub const OPENCODE_PROVIDER: &str = "opencode";
-/// Base URL for the OpenCode Zen model listing endpoint.
-#[allow(dead_code)]
-pub const OPENCODE_MODELS_URL: &str = "https://opencode.ai/zen/v1/model";
 /// Time-to-live for the on-disk model cache (24 hours).
 const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
@@ -174,7 +169,7 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
                 available: true,
             },
         ],
-        "openai" | "opencode" => vec![
+        "openai" => vec![
             ModelCatalogEntry {
                 id: "gpt-5.3-codex".to_string(),
                 provider: p.clone(),
@@ -292,12 +287,6 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
     }
 }
 
-#[allow(dead_code)]
-/// Returns the default on-disk cache path for the OpenCode provider.
-pub fn default_cache_path() -> PathBuf {
-    provider_cache_path(OPENCODE_PROVIDER)
-}
-
 /// Groups filtered catalog entries into display sections.
 pub fn model_sections(entries: &[ModelCatalogEntry], query: &str, show_all: bool) -> ModelSections {
     let filtered = filtered_entries(entries, query, show_all);
@@ -345,18 +334,6 @@ pub fn filtered_entries(
 
     result.sort_by(|a, b| a.id.cmp(&b.id));
     result
-}
-
-#[allow(dead_code)]
-/// Loads the OpenCode provider catalog, optionally refreshing from remote.
-pub async fn load_opencode_catalog(refresh: bool, api_key: &str) -> CatalogLoadResult {
-    load_catalog(
-        OPENCODE_PROVIDER,
-        Some("https://opencode.ai/zen/v1"),
-        api_key,
-        refresh,
-    )
-    .await
 }
 
 /// Merges hardcoded seed entries with remotely-discovered model ids.
@@ -494,14 +471,10 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
     let mut req_builder = client.get(url).header("anthropic-version", "2023-06-01");
 
     if proto::is_anthropic_oauth_token(api_key) {
-        return Err(
-            "Anthropic OAuth tokens (sk-ant-oat*) cannot be used to list models. \
-             Use /login and select 'API Key' instead of OAuth, \
-             or set the openpista_API_KEY environment variable."
-                .to_string(),
-        );
+        req_builder = req_builder.bearer_auth(api_key);
+    } else {
+        req_builder = req_builder.header("x-api-key", api_key);
     }
-    req_builder = req_builder.header("x-api-key", api_key);
 
     let response = req_builder
         .send()
@@ -928,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_is_rejected_by_shared_helper() {
+    fn oauth_token_detected_by_shared_helper() {
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
         assert!(!proto::is_anthropic_oauth_token(""));

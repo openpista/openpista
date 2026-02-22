@@ -65,8 +65,6 @@ pub enum ProviderPreset {
     Ollama,
     /// OpenRouter – aggregates many providers; base_url auto-set.
     OpenRouter,
-    /// OpenCode Zen endpoint – OpenAI-compatible; base_url auto-set.
-    OpenCode,
     /// Fully custom: set `base_url` and `model` manually.
     Custom,
 }
@@ -184,7 +182,6 @@ impl ProviderPreset {
             Self::Together,
             Self::Ollama,
             Self::OpenRouter,
-            Self::OpenCode,
             Self::Custom,
         ]
     }
@@ -197,7 +194,7 @@ impl ProviderPreset {
             Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
             Self::Ollama => "llama3.2",
             Self::OpenRouter => "openai/gpt-4o",
-            Self::OpenCode => "gpt-4o",
+
             Self::Custom => "",
         }
     }
@@ -210,7 +207,7 @@ impl ProviderPreset {
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Ollama => Some("http://localhost:11434/v1"),
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
-            Self::OpenCode => Some("https://opencode.ai/zen/v1"),
+
             Self::Custom => None,
         }
     }
@@ -224,7 +221,7 @@ impl ProviderPreset {
             Self::Together => "TOGETHER_API_KEY",
             Self::Ollama => "",
             Self::OpenRouter => "OPENROUTER_API_KEY",
-            Self::OpenCode => "OPENCODE_API_KEY",
+
             Self::Custom => "OPENAI_API_KEY",
         }
     }
@@ -237,7 +234,7 @@ impl ProviderPreset {
             Self::Together => "together",
             Self::Ollama => "ollama",
             Self::OpenRouter => "openrouter",
-            Self::OpenCode => "opencode",
+
             Self::Custom => "custom",
         }
     }
@@ -271,7 +268,7 @@ impl ProviderPreset {
                 default_callback_port: None,
                 redirect_path: "",
             }),
-            Self::OpenCode => None,
+
             _ => None,
         }
     }
@@ -310,7 +307,6 @@ impl ProviderPreset {
         ProviderRegistryEntry {
             name: self.name(),
             display_name: match self {
-                Self::OpenCode => "OpenCode Zen",
                 Self::OpenAi => "OpenAI (ChatGPT Plus/Pro or API key)",
                 Self::Anthropic => "Anthropic (Claude)",
                 Self::OpenRouter => "OpenRouter",
@@ -320,7 +316,6 @@ impl ProviderPreset {
             },
             category: ProviderCategory::Runtime,
             sort_order: match self {
-                Self::OpenCode => 10,
                 Self::Anthropic => 20,
                 Self::OpenAi => 40,
                 Self::OpenRouter => 60,
@@ -329,7 +324,6 @@ impl ProviderPreset {
                 Self::Custom => 150,
             },
             search_aliases: match self {
-                Self::OpenCode => &["zen", "opencode", "coding"],
                 Self::OpenAi => &["openai", "chatgpt", "gpt"],
                 Self::Anthropic => &["anthropic", "claude", "claude-3", "claude-4"],
                 Self::OpenRouter => &["router", "openrouter"],
@@ -475,7 +469,7 @@ impl std::str::FromStr for ProviderPreset {
             "together" => Ok(Self::Together),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
-            "opencode" => Ok(Self::OpenCode),
+
             "custom" => Ok(Self::Custom),
             other => Err(format!("unknown provider '{other}'")),
         }
@@ -512,7 +506,7 @@ pub fn oauth_available_for(provider_name: &str, config_client_id: &str) -> bool 
 /// Agent model/provider config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Provider preset: openai | together | ollama | openrouter | opencode | custom.
+    /// Provider preset: openai | together | ollama | openrouter | custom.
     #[serde(default)]
     pub provider: ProviderPreset,
     /// Model ID. Leave empty (or omit) to use the preset default.
@@ -847,10 +841,6 @@ mod tests {
             ProviderPreset::OpenRouter.base_url(),
             Some("https://openrouter.ai/api/v1")
         );
-        assert_eq!(
-            ProviderPreset::OpenCode.base_url(),
-            Some("https://opencode.ai/zen/v1")
-        );
 
         assert_eq!(
             ProviderPreset::Anthropic.base_url(),
@@ -880,11 +870,6 @@ mod tests {
             entries
                 .iter()
                 .any(|entry| entry.name == "openrouter" && entry.supports_runtime)
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.name == "opencode" && entry.supports_runtime)
         );
         assert!(
             entries
@@ -934,13 +919,13 @@ mod tests {
         assert_eq!(
             top,
             vec![
-                "opencode",
                 "anthropic",
                 "github-copilot",
                 "openai",
                 "google",
                 "openrouter",
-                "vercel-ai-gateway"
+                "vercel-ai-gateway",
+                "azure-openai"
             ]
         );
     }
@@ -1085,16 +1070,11 @@ api_key = "tg-key"
             "openrouter".parse::<ProviderPreset>().ok(),
             Some(ProviderPreset::OpenRouter)
         );
-        assert_eq!(
-            "opencode".parse::<ProviderPreset>().ok(),
-            Some(ProviderPreset::OpenCode)
-        );
+        assert!("opencode".parse::<ProviderPreset>().is_err());
         assert!("unknown".parse::<ProviderPreset>().is_err());
 
         assert_eq!(ProviderPreset::OpenAi.api_key_env(), "OPENAI_API_KEY");
         assert_eq!(ProviderPreset::OpenAi.name(), "openai");
-        assert_eq!(ProviderPreset::OpenCode.api_key_env(), "OPENCODE_API_KEY");
-        assert_eq!(ProviderPreset::OpenCode.name(), "opencode");
         assert_eq!(ProviderPreset::Ollama.api_key_env(), "");
         assert_eq!(ProviderPreset::Ollama.name(), "ollama");
     }
@@ -1147,24 +1127,6 @@ api_key = "tg-key"
             assert_eq!(cfg.resolve_api_key(), "legacy-key");
 
             remove_env_var("OPENAI_API_KEY");
-        });
-    }
-
-    #[test]
-    fn resolve_api_key_uses_opencode_env() {
-        with_locked_env(|| {
-            remove_env_var("openpista_API_KEY");
-            remove_env_var("OPENCODE_API_KEY");
-            remove_env_var("OPENAI_API_KEY");
-
-            let mut cfg = Config::default();
-            cfg.agent.api_key.clear();
-            cfg.agent.provider = ProviderPreset::OpenCode;
-
-            set_env_var("OPENCODE_API_KEY", "opencode-key");
-            assert_eq!(cfg.resolve_api_key(), "opencode-key");
-
-            remove_env_var("OPENCODE_API_KEY");
         });
     }
 

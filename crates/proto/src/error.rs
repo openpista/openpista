@@ -78,7 +78,7 @@ pub enum GatewayError {
 #[derive(Debug, Error)]
 pub enum LlmError {
     /// Remote API failure.
-    #[error("API error: {0}")]
+    #[error("{0}")]
     Api(String),
 
     /// Provider throttled the request.
