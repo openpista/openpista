@@ -24,6 +24,7 @@ use tracing::debug;
 pub struct ProviderCredential {
     /// Bearer access token.
     pub access_token: String,
+    /// Custom endpoint URL override for non-standard provider URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// Refresh token (if provided by the server).
@@ -44,6 +45,7 @@ impl ProviderCredential {
 /// All provider credentials, backed by `~/.openpista/credentials.toml`.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Credentials {
+    /// Map of provider name to its stored credential.
     #[serde(flatten)]
     pub providers: HashMap<String, ProviderCredential>,
 }
@@ -131,6 +133,7 @@ pub fn generate_state() -> String {
     })
 }
 
+/// Base64url-encodes raw bytes (no padding), used for PKCE values.
 fn base64url_encode(data: &[u8]) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(data)
@@ -138,7 +141,7 @@ fn base64url_encode(data: &[u8]) -> String {
 
 // ── URL helpers ───────────────────────────────────────────────────────────────
 
-/// Percent-encodes a string using RFC 3986 unreserved characters as the pass-set.
+/// Percent-encodes a string for use in URL query parameters (RFC 3986).
 fn percent_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -403,16 +406,25 @@ pub async fn login(
 
 // ── Code-display OAuth flow (Anthropic-style) ────────────────────────────────
 
+/// Holds state for the two-phase code-display OAuth flow (Anthropic-style).
+#[allow(dead_code)]
 pub struct PendingOAuthCodeDisplay {
+    /// Full authorization URL opened in the browser.
     #[allow(dead_code)]
     pub auth_url: String,
+    /// PKCE code verifier for the token exchange.
     pub code_verifier: String,
+    /// CSRF state parameter sent in the auth request.
     pub state: String,
+    /// Redirect URI registered with the OAuth provider.
     pub redirect_uri: String,
+    /// Token endpoint URL for exchanging the auth code.
     pub token_url: String,
+    /// OAuth client identifier.
     pub client_id: String,
 }
 
+/// Extracts the scheme+host origin from a URL (e.g. `https://example.com`).
 fn auth_url_origin(url: &str) -> &str {
     let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
     let origin_end = url[after_scheme..]
@@ -422,6 +434,7 @@ fn auth_url_origin(url: &str) -> &str {
     &url[..origin_end]
 }
 
+/// Initiates the code-display OAuth flow by opening the browser and returning pending state.
 #[cfg(not(test))]
 pub fn start_code_display_flow(
     _provider_name: &str,
@@ -460,6 +473,7 @@ pub fn start_code_display_flow(
     }
 }
 
+/// Test stub for code-display OAuth flow; returns deterministic pending state.
 #[cfg(test)]
 pub fn start_code_display_flow(
     _provider_name: &str,
@@ -480,6 +494,7 @@ pub fn start_code_display_flow(
     }
 }
 
+/// Exchanges an authorization code for tokens using JSON body format.
 #[cfg(not(test))]
 async fn exchange_code_json(
     token_url: &str,
@@ -527,6 +542,7 @@ async fn exchange_code_json(
     })
 }
 
+/// Completes the code-display OAuth flow by exchanging the user-provided code for tokens.
 #[cfg(not(test))]
 pub async fn complete_code_display_flow(
     pending: &PendingOAuthCodeDisplay,
@@ -545,6 +561,7 @@ pub async fn complete_code_display_flow(
     .await
 }
 
+/// Test stub; always returns an error since OAuth exchange is unavailable in tests.
 #[cfg(test)]
 pub async fn complete_code_display_flow(
     _pending: &PendingOAuthCodeDisplay,
@@ -553,6 +570,7 @@ pub async fn complete_code_display_flow(
     anyhow::bail!("complete_code_display_flow not available in tests")
 }
 
+/// Creates a permanent Anthropic API key from an OAuth access token.
 #[cfg(not(test))]
 pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<String> {
     debug!("Creating Anthropic API key from OAuth token");
@@ -592,11 +610,13 @@ pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<Stri
     Ok(parsed.raw_key)
 }
 
+/// Test stub; always returns an error since the Anthropic API is unavailable in tests.
 #[cfg(test)]
 pub async fn create_anthropic_api_key(_access_token: &str) -> anyhow::Result<String> {
     anyhow::bail!("create_anthropic_api_key not available in tests")
 }
 
+/// Strips URL fragments and whitespace from a pasted authorization code.
 fn sanitize_auth_code(raw: &str) -> String {
     let trimmed = raw.trim();
     match trimmed.find('#') {
@@ -605,6 +625,7 @@ fn sanitize_auth_code(raw: &str) -> String {
     }
 }
 
+/// Reads an authorization code from stdin (interactive prompt).
 #[cfg(not(test))]
 pub async fn read_code_from_stdin() -> anyhow::Result<String> {
     use tokio::io::AsyncBufReadExt;
@@ -619,6 +640,7 @@ pub async fn read_code_from_stdin() -> anyhow::Result<String> {
     Ok(sanitize_auth_code(&line))
 }
 
+/// Test stub; always returns an error since stdin is unavailable in tests.
 #[cfg(test)]
 pub async fn read_code_from_stdin() -> anyhow::Result<String> {
     anyhow::bail!("read_code_from_stdin not available in tests")

@@ -1,3 +1,5 @@
+//! Home/welcome screen widget — centered logo, input box, and keyboard shortcuts.
+
 use super::app::{AppState, TuiApp};
 use super::theme::THEME;
 use ratatui::{
@@ -8,6 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+/// Renders the home screen with centered logo, input box, model info, and keyboard shortcuts.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     // We want to center the whole block vertically and horizontally.
     // Let's create a centered layout.

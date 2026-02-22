@@ -4,21 +4,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Default provider identifier for OpenCode Zen models.
 pub const OPENCODE_PROVIDER: &str = "opencode";
+/// Base URL for the OpenCode Zen model listing endpoint.
 #[allow(dead_code)]
 pub const OPENCODE_MODELS_URL: &str = "https://opencode.ai/zen/v1/model";
+/// Time-to-live for the on-disk model cache (24 hours).
 const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
+/// Stability status of a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelStatus {
+    /// Generally available and production-ready.
     Stable,
+    /// Early-access or beta model.
     Preview,
+    /// Status not determined.
     Unknown,
 }
 
 impl ModelStatus {
     #[cfg_attr(test, allow(dead_code))]
+    /// Returns the lowercase string representation of this status.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Stable => "stable",
@@ -28,15 +36,20 @@ impl ModelStatus {
     }
 }
 
+/// Where the model entry originated from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelSource {
+    /// Curated from documentation.
     Docs,
+    /// Discovered via remote API.
     Api,
 }
 
 impl ModelSource {
     #[cfg_attr(test, allow(dead_code))]
+    /// Returns the lowercase string representation of this status.
+    /// Returns the lowercase string representation of this source.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Docs => "docs",
@@ -45,61 +58,93 @@ impl ModelSource {
     }
 }
 
+/// A single model entry in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
+    /// Unique model identifier (e.g. `gpt-4o`, `claude-sonnet-4-6`).
     pub id: String,
+    /// Provider that serves this model.
     #[serde(default)]
     pub provider: String,
+    /// Whether this model is recommended for coding tasks.
     pub recommended_for_coding: bool,
+    /// Stability status of the model.
     pub status: ModelStatus,
+    /// Whether the entry came from docs or the remote API.
     pub source: ModelSource,
+    /// Whether the model is currently accessible.
     pub available: bool,
 }
 
+/// Result of loading a single provider's model catalog.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CatalogLoadResult {
+    /// Provider name.
     pub provider: String,
+    /// Loaded catalog entries.
     pub entries: Vec<ModelCatalogEntry>,
+    /// Human-readable sync status message.
     pub sync_status: String,
 }
 
+/// Result of loading model catalogs from multiple providers.
 #[derive(Debug, Clone)]
 pub struct MultiCatalogLoadResult {
+    /// Merged catalog entries across all providers.
     pub entries: Vec<ModelCatalogEntry>,
+    /// Per-provider sync status messages.
     pub sync_statuses: Vec<String>,
 }
 
+/// Model entries grouped into display sections.
 #[derive(Debug, Clone, Default)]
 pub struct ModelSections {
+    /// Recommended models that are currently available.
     pub recommended_available: Vec<ModelCatalogEntry>,
+    /// Recommended models that are not currently available.
     pub recommended_unavailable: Vec<ModelCatalogEntry>,
+    /// Non-recommended models that are available.
     pub other_available: Vec<ModelCatalogEntry>,
 }
 
+/// Summary counts of a filtered model catalog query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSummary {
+    /// Total models before filtering.
     pub total: usize,
+    /// Models matching the query.
     pub matched: usize,
+    /// Matched models recommended for coding.
     pub recommended: usize,
+    /// Matched models that are available.
     pub available: usize,
 }
 
+/// Serializable on-disk cache for a provider's model catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CachedCatalog {
+    /// UTC timestamp when this cache snapshot was fetched.
     fetched_at: DateTime<Utc>,
+    /// Cached model entries.
     entries: Vec<ModelCatalogEntry>,
 }
 
+/// Wire format for the `/v1/models` JSON response.
 #[derive(Debug, Deserialize)]
 struct ZenModelsResponse {
+    /// List of model objects returned by the API.
     data: Vec<ZenModel>,
 }
 
+/// A single model object in the API response.
 #[derive(Debug, Deserialize)]
 struct ZenModel {
+    /// Model identifier string.
     id: String,
 }
 
+/// Returns hardcoded seed models for a known provider.
 pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
     let p = provider.to_string();
     match provider {
@@ -248,10 +293,12 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
 }
 
 #[allow(dead_code)]
+/// Returns the default on-disk cache path for the OpenCode provider.
 pub fn default_cache_path() -> PathBuf {
     provider_cache_path(OPENCODE_PROVIDER)
 }
 
+/// Groups filtered catalog entries into display sections.
 pub fn model_sections(entries: &[ModelCatalogEntry], query: &str, show_all: bool) -> ModelSections {
     let filtered = filtered_entries(entries, query, show_all);
     let mut sections = ModelSections::default();
@@ -269,6 +316,7 @@ pub fn model_sections(entries: &[ModelCatalogEntry], query: &str, show_all: bool
     sections
 }
 
+/// Computes summary counts for a filtered catalog query.
 pub fn model_summary(entries: &[ModelCatalogEntry], query: &str, show_all: bool) -> ModelSummary {
     let filtered = filtered_entries(entries, query, show_all);
     ModelSummary {
@@ -282,6 +330,7 @@ pub fn model_summary(entries: &[ModelCatalogEntry], query: &str, show_all: bool)
     }
 }
 
+/// Filters and sorts catalog entries by query and recommendation flag.
 pub fn filtered_entries(
     entries: &[ModelCatalogEntry],
     query: &str,
@@ -299,6 +348,7 @@ pub fn filtered_entries(
 }
 
 #[allow(dead_code)]
+/// Loads the OpenCode provider catalog, optionally refreshing from remote.
 pub async fn load_opencode_catalog(refresh: bool, api_key: &str) -> CatalogLoadResult {
     load_catalog(
         OPENCODE_PROVIDER,
@@ -309,6 +359,7 @@ pub async fn load_opencode_catalog(refresh: bool, api_key: &str) -> CatalogLoadR
     .await
 }
 
+/// Merges hardcoded seed entries with remotely-discovered model ids.
 pub fn merge_seed_with_remote(
     seed: &[ModelCatalogEntry],
     remote_ids: &[String],
@@ -353,6 +404,7 @@ pub fn merge_seed_with_remote(
     by_id.into_values().collect()
 }
 
+/// Resolves the models-list URL for a given provider and optional base URL.
 fn models_url(provider: &str, base_url: Option<&str>) -> String {
     match (provider, base_url) {
         ("anthropic", _) => "https://api.anthropic.com/v1/models".to_string(),
@@ -364,6 +416,7 @@ fn models_url(provider: &str, base_url: Option<&str>) -> String {
     }
 }
 
+/// Returns the on-disk cache file path for a specific provider.
 fn provider_cache_path(provider_name: &str) -> PathBuf {
     if let Ok(path) = std::env::var("openpista_MODELS_CACHE_PATH") {
         return PathBuf::from(path);
@@ -377,6 +430,7 @@ fn provider_cache_path(provider_name: &str) -> PathBuf {
         .join(format!("{provider_name}.json"))
 }
 
+/// Fetches model IDs from a remote OpenAI-compatible `/v1/models` endpoint.
 async fn fetch_remote_model_ids_from(url: &str, api_key: &str) -> Result<Vec<String>, String> {
     debug!(url = %url, has_key = %!api_key.is_empty(), "Fetching models");
 
@@ -427,6 +481,12 @@ async fn fetch_remote_model_ids_from(url: &str, api_key: &str) -> Result<Vec<Str
     Ok(ids)
 }
 
+/// Returns `true` if `key` looks like an Anthropic OAuth access token (`sk-ant-oat*`).
+fn is_anthropic_oauth_token(key: &str) -> bool {
+    key.starts_with("sk-ant-oat")
+}
+
+/// Fetches model IDs from the Anthropic models API with version-header auth.
 async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String> {
     let url = "https://api.anthropic.com/v1/models?limit=1000";
     debug!(url = %url, "Fetching Anthropic models");
@@ -436,10 +496,15 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
         .build()
         .map_err(|err| format!("build client: {err}"))?;
 
-    let response = client
-        .get(url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+    let mut req_builder = client.get(url).header("anthropic-version", "2023-06-01");
+
+    if is_anthropic_oauth_token(api_key) {
+        req_builder = req_builder.bearer_auth(api_key);
+    } else {
+        req_builder = req_builder.header("x-api-key", api_key);
+    }
+
+    let response = req_builder
         .send()
         .await
         .map_err(|err| format!("request to {url} failed: {err}"))?;
@@ -475,11 +540,12 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
     debug!(url = %url, count = %ids.len(), "Anthropic models fetched");
     Ok(ids)
 }
-
-
 /// Backfill empty `provider` fields on cached entries that were serialized before
 /// the provider field was added to `ModelCatalogEntry`.
-fn backfill_provider(mut entries: Vec<ModelCatalogEntry>, provider: &str) -> Vec<ModelCatalogEntry> {
+fn backfill_provider(
+    mut entries: Vec<ModelCatalogEntry>,
+    provider: &str,
+) -> Vec<ModelCatalogEntry> {
     for entry in &mut entries {
         if entry.provider.is_empty() {
             entry.provider = provider.to_string();
@@ -488,6 +554,7 @@ fn backfill_provider(mut entries: Vec<ModelCatalogEntry>, provider: &str) -> Vec
     entries
 }
 
+/// Loads a model catalog for one provider, with cache and remote fallback.
 pub async fn load_catalog(
     provider_name: &str,
     base_url: Option<&str>,
@@ -579,6 +646,7 @@ pub async fn load_catalog_multi(
     }
 }
 
+/// Case-insensitive substring match used for model search filtering.
 fn matches_query(haystack: &str, query: &str) -> bool {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -589,6 +657,7 @@ fn matches_query(haystack: &str, query: &str) -> bool {
         .contains(&trimmed.to_ascii_lowercase())
 }
 
+/// Loads a cached catalog only if it is younger than `CACHE_TTL_SECS`.
 fn load_cache_if_fresh(path: &std::path::Path) -> Option<CachedCatalog> {
     let cached = load_cache(path)?;
     let age = Utc::now()
@@ -601,11 +670,13 @@ fn load_cache_if_fresh(path: &std::path::Path) -> Option<CachedCatalog> {
     }
 }
 
+/// Loads a cached catalog from disk regardless of age.
 fn load_cache(path: &std::path::Path) -> Option<CachedCatalog> {
     let content = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
 
+/// Persists a catalog snapshot to the on-disk JSON cache.
 fn save_cache(path: &std::path::Path, cached: &CachedCatalog) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -760,5 +831,113 @@ mod tests {
         save_cache(&path, &stale).expect("save stale cache");
         assert!(load_cache_if_fresh(&path).is_none());
         assert!(load_cache(&path).is_some());
+    }
+
+    #[test]
+    fn backfill_provider_fills_empty_entries() {
+        let entries = vec![
+            ModelCatalogEntry {
+                id: "claude-sonnet-4-6".into(),
+                provider: String::new(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o".into(),
+                provider: "openai".into(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+        ];
+        let result = backfill_provider(entries, "anthropic");
+        assert_eq!(result[0].provider, "anthropic");
+        // Already-set provider should be preserved
+        assert_eq!(result[1].provider, "openai");
+    }
+
+    #[test]
+    fn backfill_provider_noop_when_all_set() {
+        let entries = vec![ModelCatalogEntry {
+            id: "gpt-4o".into(),
+            provider: "openai".into(),
+            recommended_for_coding: true,
+            status: ModelStatus::Stable,
+            source: ModelSource::Docs,
+            available: true,
+        }];
+        let result = backfill_provider(entries, "anthropic");
+        assert_eq!(result[0].provider, "openai");
+    }
+
+    #[test]
+    fn seed_models_for_anthropic_provider() {
+        let entries = seed_models_for_provider("anthropic");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|e| e.provider == "anthropic"));
+        assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
+        assert!(entries.iter().any(|e| e.id == "claude-opus-4-6"));
+    }
+
+    #[test]
+    fn seed_models_for_together_provider() {
+        let entries = seed_models_for_provider("together");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|e| e.provider == "together"));
+    }
+
+    #[test]
+    fn seed_models_for_unknown_provider_is_empty() {
+        let entries = seed_models_for_provider("nonexistent");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn model_status_as_str_returns_expected_values() {
+        assert_eq!(ModelStatus::Stable.as_str(), "stable");
+        assert_eq!(ModelStatus::Preview.as_str(), "preview");
+        assert_eq!(ModelStatus::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn model_source_as_str_returns_expected_values() {
+        assert_eq!(ModelSource::Docs.as_str(), "docs");
+        assert_eq!(ModelSource::Api.as_str(), "api");
+    }
+
+    #[test]
+    fn merge_seed_with_remote_preserves_provider_on_new_entries() {
+        let seed = seed_models_for_provider("anthropic");
+        let merged = merge_seed_with_remote(&seed, &["new-model".to_string()]);
+        let new_entry = merged
+            .iter()
+            .find(|e| e.id == "new-model")
+            .expect("new model");
+        assert_eq!(new_entry.provider, "anthropic");
+        assert_eq!(new_entry.source, ModelSource::Api);
+    }
+
+    #[test]
+    fn matches_query_handles_edge_cases() {
+        assert!(matches_query("gpt-4o", ""));
+        assert!(matches_query("gpt-4o", "  "));
+        assert!(matches_query("gpt-4o", "GPT"));
+        assert!(!matches_query("gpt-4o", "claude"));
+    }
+
+    #[test]
+    fn is_anthropic_oauth_token_detects_oauth_prefix() {
+        assert!(is_anthropic_oauth_token("sk-ant-oat01-abc123"));
+        assert!(is_anthropic_oauth_token("sk-ant-oat02-xyz"));
+    }
+
+    #[test]
+    fn is_anthropic_oauth_token_rejects_permanent_key() {
+        assert!(!is_anthropic_oauth_token("sk-ant-api03-abc123"));
+        assert!(!is_anthropic_oauth_token("some-random-key"));
+        assert!(!is_anthropic_oauth_token(""));
     }
 }

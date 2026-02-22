@@ -1,3 +1,5 @@
+//! Chat history widget — renders messages, tool calls, and text selection overlay.
+
 use super::app::{TuiApp, TuiMessage};
 use super::selection::compute_text_grid;
 use super::theme::THEME;
@@ -9,6 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+/// Renders the chat history area with user/assistant messages, tool calls, and text selection overlay.
 pub fn render(app: &mut TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let mut lines: Vec<Line<'_>> = Vec::new();
 

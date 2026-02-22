@@ -90,7 +90,9 @@ pub enum TuiMessage {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Screen {
     #[default]
+    /// The home/welcome screen shown before entering chat.
     Home,
+    /// The active chat conversation screen.
     Chat,
 }
 
@@ -173,9 +175,13 @@ pub struct AuthSubmission {
 /// A session entry displayed in the sidebar.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
+    /// Unique session identifier.
     pub id: SessionId,
+    /// Channel identifier (e.g. `cli:tui`, `telegram:123`).
     pub channel_id: String,
+    /// Timestamp of the most recent message in this session.
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Short preview text of the last message for sidebar display.
     pub preview: String,
 }
 
@@ -301,6 +307,7 @@ impl TuiApp {
         self.pending_model_change.take()
     }
 
+    /// Returns the sidebar `Rect` for the given full-frame area, or `None` if the sidebar is hidden.
     pub fn compute_sidebar_area(&self, full_area: Rect) -> Option<Rect> {
         if !self.sidebar_visible || self.screen != Screen::Chat {
             return None;
@@ -444,6 +451,7 @@ impl TuiApp {
         })
     }
 
+    /// Finalises the auth-validation flow and pushes a success or failure message to chat.
     pub fn complete_auth_validation(
         &mut self,
         provider: String,
@@ -466,6 +474,7 @@ impl TuiApp {
         self.push_assistant("Login cancelled.".to_string());
     }
 
+    /// Transitions to the `LoginBrowsing` state, optionally pre-filtering by `seed` provider name.
     pub fn open_login_browser(&mut self, seed: Option<String>) {
         self.input.clear();
         self.cursor_pos = 0;
@@ -483,14 +492,17 @@ impl TuiApp {
         };
     }
 
+    /// Takes the pending `AuthLoginIntent` that was set during the login browser flow.
     pub fn take_pending_auth_intent(&mut self) -> Option<AuthLoginIntent> {
         self.pending_auth_intent.take()
     }
 
+    /// Re-opens the openai method selector and displays `message` as an error.
     pub fn reopen_openai_method_with_error(&mut self, message: String) {
         self.reopen_method_selector_with_error("openai", message);
     }
 
+    /// Re-opens the method-selector step for `provider`, showing `message` as the last error.
     pub fn reopen_method_selector_with_error(&mut self, provider: &str, message: String) {
         self.state = AppState::LoginBrowsing {
             query: provider.to_string(),
@@ -506,6 +518,7 @@ impl TuiApp {
         };
     }
 
+    /// Re-opens the provider-selection step, showing `message` as an error banner.
     pub fn reopen_provider_selection_with_error(&mut self, message: String) {
         self.state = AppState::LoginBrowsing {
             query: String::new(),
@@ -562,6 +575,7 @@ impl TuiApp {
         }
     }
 
+    /// Returns the current model-browser search query, or `None` if the browser is not active.
     pub fn model_browser_query(&self) -> Option<String> {
         match &self.state {
             AppState::ModelBrowsing { query, .. } => Some(query.clone()),
@@ -569,6 +583,7 @@ impl TuiApp {
         }
     }
 
+    /// Updates the model-browser sync-status label to indicate a refresh is in progress.
     pub fn mark_model_refreshing(&mut self) {
         if let AppState::ModelBrowsing {
             last_sync_status, ..
@@ -578,6 +593,7 @@ impl TuiApp {
         }
     }
 
+    /// Returns `true` once if the user pressed `r` to request a model-catalog refresh, then resets the flag.
     pub fn take_model_refresh_request(&mut self) -> bool {
         let requested = self.model_refresh_requested;
         self.model_refresh_requested = false;
@@ -1812,6 +1828,7 @@ impl TuiApp {
         );
     }
 
+    /// Returns the number of user/assistant message pairs in the conversation history.
     pub fn conversation_count(&self) -> usize {
         self.messages
             .iter()
@@ -1819,6 +1836,7 @@ impl TuiApp {
             .count()
     }
 
+    /// Sets `history_scroll` to its maximum value so the next render shows the latest messages.
     pub fn scroll_to_bottom(&mut self) {
         // Set to a large value; render_history clamps it to max_scroll.
         self.history_scroll = u16::MAX;

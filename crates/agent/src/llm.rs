@@ -31,6 +31,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// Creates a system-role message with the given content.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: proto::Role::System,
@@ -41,6 +42,7 @@ impl ChatMessage {
         }
     }
 
+    /// Creates a user-role message with the given content.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: proto::Role::User,
@@ -51,6 +53,7 @@ impl ChatMessage {
         }
     }
 
+    /// Creates an assistant-role message with the given content.
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: proto::Role::Assistant,
@@ -61,6 +64,7 @@ impl ChatMessage {
         }
     }
 
+    /// Creates a tool-result message linking a call id, tool name, and output content.
     pub fn tool_result(
         tool_call_id: impl Into<String>,
         tool_name: impl Into<String>,

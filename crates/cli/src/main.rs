@@ -825,6 +825,7 @@ fn cmd_auth_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prints the branded farewell banner with session resume instructions.
 fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     let session_str = session_id.as_str();
     let short_session = if session_str.len() > 8 {
@@ -854,6 +855,7 @@ fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     println!();
 }
 
+/// Returns whether a response should be routed to the mobile adapter.
 fn should_send_mobile_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("mobile:")
 }
@@ -868,6 +870,7 @@ fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
 }
 
+/// Extracts a [`WorkerReport`] from event metadata, if present.
 fn parse_worker_report(event: &ChannelEvent) -> Option<WorkerReport> {
     let metadata = event.metadata.clone()?;
     let report: WorkerReport = serde_json::from_value(metadata).ok()?;

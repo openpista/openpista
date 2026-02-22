@@ -6,67 +6,111 @@ use ratatui::style::palette::tailwind;
 /// The application theme — all visual tokens in one place.
 pub struct Theme {
     // ── Base ──
+    /// Background color for the main application surface.
     pub bg: Color,
+    /// Primary foreground/text color.
     pub fg: Color,
+    /// Dimmed foreground for less prominent text.
     pub fg_dim: Color,
+    /// Muted foreground for minimal-emphasis elements.
     pub fg_muted: Color,
+    /// Default border color for panels and widgets.
     pub border: Color,
+    /// Border color for the active/focused widget.
     pub border_active: Color,
+    /// Border color for a secondary-focused widget.
     pub border_focused: Color,
 
     // ── Accent / Brand ──
+    /// Primary accent/brand color.
     pub accent: Color,
+    /// Dimmed accent for subtle branding elements.
     pub accent_dim: Color,
+    /// Bright accent for high-emphasis elements.
     pub accent_bright: Color,
 
     // ── Semantic ──
+    /// Color for success indicators.
     pub success: Color,
+    /// Color for warning indicators.
     pub warning: Color,
+    /// Color for error indicators.
     pub error: Color,
+    /// Color for informational indicators.
     pub info: Color,
 
     // ── Chat roles ──
+    /// Label color for user messages in chat.
     pub user_label: Color,
+    /// Label color for assistant responses in chat.
     pub assistant_label: Color,
+    /// Color for tool call notifications.
     pub tool_call: Color,
+    /// Color for tool result output.
     pub tool_result: Color,
 
     // ── Status bar ──
+    /// Workspace name color in the status bar.
     pub status_workspace: Color,
+    /// Git branch name color in the status bar.
     pub status_branch: Color,
+    /// Spinner animation color in the status bar.
     pub status_spinner: Color,
+    /// Hint/keybinding text color in the status bar.
     pub status_hint: Color,
 
     // ── Sidebar ──
+    /// Border around the session sidebar panel.
     pub sidebar_border: Color,
+    /// Indicator mark for the active session entry.
     pub sidebar_active_indicator: Color,
+    /// Hover highlight color for sidebar entries.
     pub sidebar_hover: Color,
+    /// Session preview text color in the sidebar.
     pub sidebar_text: Color,
+    /// Relative timestamp color in the sidebar.
     pub sidebar_time: Color,
+    /// Horizontal divider between sidebar entries.
     pub sidebar_divider: Color,
 
     // ── Home screen ──
+    /// ASCII art logo color on the welcome screen.
     pub logo: Color,
+    /// Background for the home-screen input box.
     pub home_input_bg: Color,
+    /// Keyboard shortcut key label color.
     pub home_shortcut_key: Color,
+    /// Keyboard shortcut description text color.
     pub home_shortcut_desc: Color,
+    /// Tip bullet icon color on the welcome screen.
     pub home_tip_icon: Color,
 
     // ── Command palette ──
+    /// Border around the command palette popup.
     pub palette_border: Color,
+    /// Command name text in the palette list.
     pub palette_cmd: Color,
+    /// Command description text in the palette list.
     pub palette_desc: Color,
+    /// Foreground color for the currently selected palette item.
     pub palette_selected_fg: Color,
+    /// Authenticated-provider indicator dot in the palette.
     pub palette_auth_dot: Color,
 
     // ── Login/Model browser ──
+    /// Title bar text in the browser overlay.
     pub browser_title: Color,
+    /// Selected-row marker in the browser list.
     pub browser_selected_marker: Color,
+    /// Search query text in the browser.
     pub browser_search: Color,
+    /// Footer hint text in the browser overlay.
     pub browser_footer: Color,
 
     // ── Text selection ──
+    /// Background highlight for mouse-selected text.
     pub selection_bg: Color,
+    /// Foreground color for mouse-selected text.
     pub selection_fg: Color,
 }
 
@@ -143,3 +187,36 @@ impl Theme {
 
 /// Global theme instance.
 pub const THEME: Theme = Theme::default_dark();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_dark_theme_has_distinct_colors() {
+        let theme = Theme::default_dark();
+        // Verify key color assignments are not the same
+        assert_ne!(theme.bg, theme.fg);
+        assert_ne!(theme.accent, theme.error);
+        assert_ne!(theme.user_label, theme.assistant_label);
+    }
+
+    #[test]
+    fn global_theme_is_accessible() {
+        // Ensures THEME constant is valid and usable
+        let _ = THEME.bg;
+        let _ = THEME.fg;
+        let _ = THEME.accent;
+        let _ = THEME.error;
+        let _ = THEME.success;
+        let _ = THEME.warning;
+        let _ = THEME.info;
+        let _ = THEME.user_label;
+        let _ = THEME.assistant_label;
+        let _ = THEME.tool_call;
+        let _ = THEME.tool_result;
+        let _ = THEME.sidebar_border;
+        let _ = THEME.logo;
+        let _ = THEME.selection_bg;
+    }
+}
