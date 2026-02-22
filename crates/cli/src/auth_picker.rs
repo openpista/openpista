@@ -12,7 +12,7 @@ pub enum AuthMethodChoice {
 impl AuthMethodChoice {
     pub fn label(self) -> &'static str {
         match self {
-            Self::OAuth => "ChatGPT Plus/Pro (OAuth)",
+            Self::OAuth => "Browser login (OAuth)",
             Self::ApiKey => "Manually enter API key",
         }
     }
@@ -71,7 +71,7 @@ fn grouped_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
 }
 
 pub fn provider_step_for_entry(entry: &ProviderRegistryEntry) -> LoginBrowseStep {
-    if entry.name == "openai" {
+    if entry.name == "openai" || entry.name == "anthropic" {
         LoginBrowseStep::SelectMethod
     } else {
         match entry.auth_mode {
@@ -91,7 +91,7 @@ pub fn api_key_method_for_provider(
     provider: &str,
     preferred: Option<AuthMethodChoice>,
 ) -> AuthMethodChoice {
-    if provider == "openai" {
+    if provider == "openai" || provider == "anthropic" {
         preferred.unwrap_or(AuthMethodChoice::OAuth)
     } else {
         preferred.unwrap_or(AuthMethodChoice::ApiKey)
@@ -237,33 +237,15 @@ fn render_cli_picker(state: &CliPickerState) -> anyhow::Result<()> {
             if providers.is_empty() {
                 lines.push(format!("No matches for '{}'.", state.query));
             } else {
-                lines.push("Runtime".to_string());
-                let mut runtime_count = 0usize;
+                let creds = crate::auth::Credentials::load();
                 for (idx, entry) in providers.iter().enumerate() {
-                    if !matches!(entry.category, ProviderCategory::Runtime) {
-                        continue;
-                    }
-                    runtime_count += 1;
                     let marker = if idx == state.cursor { ">" } else { " " };
-                    lines.push(format!("{marker} {}", entry.display_name));
-                }
-                if runtime_count == 0 {
-                    lines.push("  (none)".to_string());
-                }
-
-                lines.push(String::new());
-                lines.push("Extension".to_string());
-                let mut extension_count = 0usize;
-                for (idx, entry) in providers.iter().enumerate() {
-                    if !matches!(entry.category, ProviderCategory::Extension) {
-                        continue;
-                    }
-                    extension_count += 1;
-                    let marker = if idx == state.cursor { ">" } else { " " };
-                    lines.push(format!("{marker} {}", entry.display_name));
-                }
-                if extension_count == 0 {
-                    lines.push("  (none)".to_string());
+                    let auth_dot = if creds.get(entry.name).is_some_and(|c| !c.is_expired()) {
+                        " \x1b[32m\u{25cf}\x1b[0m"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!("{marker} {}{auth_dot}", entry.display_name));
                 }
             }
             lines.push(String::new());
@@ -512,9 +494,17 @@ pub fn run_cli_auth_picker(
                 (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(None),
                 (_, KeyCode::Esc) => {
                     if let Some(provider) = state.selected_provider {
-                        if provider.name == "openai" {
+                        if matches!(
+                            provider_step_for_entry(&provider),
+                            LoginBrowseStep::SelectMethod
+                        ) {
                             state.step = LoginBrowseStep::SelectMethod;
-                            state.cursor = 1;
+                            state.cursor =
+                                if matches!(state.selected_method, Some(AuthMethodChoice::OAuth)) {
+                                    0
+                                } else {
+                                    1
+                                };
                         } else if matches!(provider.auth_mode, LoginAuthMode::EndpointAndKey) {
                             state.step = LoginBrowseStep::InputEndpoint;
                             state.input_buffer = state.endpoint.clone().unwrap_or_default();
@@ -685,6 +675,12 @@ mod tests {
             provider_step_for_entry(&azure),
             LoginBrowseStep::InputEndpoint
         );
+
+        let anthropic = provider_by_name("anthropic").expect("anthropic provider");
+        assert_eq!(
+            provider_step_for_entry(&anthropic),
+            LoginBrowseStep::SelectMethod
+        );
     }
 
     #[test]
@@ -699,6 +695,14 @@ mod tests {
         );
         assert_eq!(
             api_key_method_for_provider("together", None),
+            AuthMethodChoice::ApiKey
+        );
+        assert_eq!(
+            api_key_method_for_provider("anthropic", None),
+            AuthMethodChoice::OAuth
+        );
+        assert_eq!(
+            api_key_method_for_provider("anthropic", Some(AuthMethodChoice::ApiKey)),
             AuthMethodChoice::ApiKey
         );
     }

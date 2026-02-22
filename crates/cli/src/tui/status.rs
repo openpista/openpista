@@ -1,8 +1,9 @@
 use super::app::{AppState, TuiApp};
+use super::theme::THEME;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -14,22 +15,20 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
         AppState::Idle => Line::from(vec![
             Span::styled(
                 format!(" {} ", app.workspace_name),
-                Style::default().fg(Color::Rgb(115, 138, 172)),
+                Style::default().fg(THEME.status_workspace),
             ),
-            Span::styled(" ⭘ ", Style::default().fg(Color::Green)),
+            Span::styled(" ⭘ ", Style::default().fg(THEME.success)),
             Span::styled(
                 format!("{} ", app.branch_name),
-                Style::default().fg(Color::Rgb(115, 138, 172)),
+                Style::default().fg(THEME.status_branch),
             ),
             Span::styled(
                 format!(" 💚 {} MCP /status ", app.mcp_count),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  Enter:send  ↑↓:scroll  Ctrl+C:quit",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.status_hint),
             ),
         ]),
         AppState::Thinking { round } => {
@@ -37,15 +36,15 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     format!(" {} ", app.workspace_name),
-                    Style::default().fg(Color::Rgb(115, 138, 172)),
+                    Style::default().fg(THEME.status_workspace),
                 ),
                 Span::styled(
                     format!(" {spinner} Thinking... "),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.status_spinner),
                 ),
                 Span::styled(
                     format!("[round {round}]"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.status_hint),
                 ),
             ])
         }
@@ -54,13 +53,13 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     format!(" {} ", app.workspace_name),
-                    Style::default().fg(Color::Rgb(115, 138, 172)),
+                    Style::default().fg(THEME.status_workspace),
                 ),
                 Span::styled(
                     format!(" {spinner} Running "),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(THEME.status_spinner),
                 ),
-                Span::styled(tool_name.clone(), Style::default().fg(Color::Cyan)),
+                Span::styled(tool_name.clone(), Style::default().fg(THEME.info)),
             ])
         }
         AppState::AuthPrompting {
@@ -76,23 +75,23 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             };
             Line::from(Span::styled(
                 format!(" Enter API key for {provider} ({env_name}){endpoint_hint}  Ctrl+C:cancel"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.status_hint),
             ))
         }
         AppState::AuthValidating { provider } => {
             let spinner = SPINNER[(app.spinner_tick as usize) % SPINNER.len()];
             Line::from(vec![Span::styled(
                 format!(" {spinner} Saving credential for {provider}... "),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(THEME.status_spinner),
             )])
         }
         AppState::LoginBrowsing { .. } => Line::from(Span::styled(
             " Login browser active ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME.status_hint),
         )),
         AppState::ModelBrowsing { .. } => Line::from(Span::styled(
             " Model browser active ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(THEME.status_hint),
         )),
     };
 
@@ -103,7 +102,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 
     let version_text = Line::from(Span::styled(
         format!("{}  ", app.version),
-        Style::default().fg(Color::Rgb(115, 138, 172)),
+        Style::default().fg(THEME.status_workspace),
     ));
     frame.render_widget(Paragraph::new(version_text).right_aligned(), chunks[1]);
 }

@@ -7,7 +7,6 @@
 //! 4. The authorization code is exchanged for tokens at the token endpoint.
 //! 5. Credentials are persisted to `~/.openpista/credentials.toml`.
 
-#[cfg(not(test))]
 use crate::config::OAuthEndpoints;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -16,6 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(not(test))]
 use std::time::Duration;
+use tracing::debug;
 
 // ── Credential types ──────────────────────────────────────────────────────────
 
@@ -60,6 +60,7 @@ impl Credentials {
     /// Loads credentials from disk. Returns an empty set on any I/O or parse error.
     pub fn load() -> Self {
         let path = Self::path();
+        debug!(path = %path.display(), exists = %path.exists(), "Loading credentials");
         if !path.exists() {
             return Self::default();
         }
@@ -76,6 +77,7 @@ impl Credentials {
         }
         let content = toml::to_string(self).context("failed to serialize credentials")?;
         std::fs::write(path, content)?;
+        debug!(path = %path.display(), providers = %self.providers.len(), "Credentials saved");
         Ok(())
     }
 
@@ -330,10 +332,14 @@ pub async fn login(
     callback_port: u16,
     timeout_secs: u64,
 ) -> anyhow::Result<ProviderCredential> {
+    debug!(provider = %provider_name, port = %callback_port, "Starting OAuth PKCE flow");
     let code_verifier = generate_code_verifier();
     let code_challenge = compute_code_challenge(&code_verifier);
     let state = generate_state();
-    let redirect_uri = format!("http://localhost:{callback_port}/auth/callback");
+    let redirect_uri = format!(
+        "http://localhost:{callback_port}{}",
+        endpoints.redirect_path
+    );
 
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}\
@@ -364,6 +370,7 @@ pub async fn login(
     .context("authorization timed out — no callback received within the time limit")?
     .context("failed to receive OAuth callback")?;
 
+    debug!(provider = %provider_name, "OAuth callback received, verifying state");
     // CSRF check
     let received_state = params.get("state").map(|s| s.as_str()).unwrap_or("");
     anyhow::ensure!(
@@ -392,6 +399,229 @@ pub async fn login(
         &code_verifier,
     )
     .await
+}
+
+// ── Code-display OAuth flow (Anthropic-style) ────────────────────────────────
+
+pub struct PendingOAuthCodeDisplay {
+    #[allow(dead_code)]
+    pub auth_url: String,
+    pub code_verifier: String,
+    pub state: String,
+    pub redirect_uri: String,
+    pub token_url: String,
+    pub client_id: String,
+}
+
+fn auth_url_origin(url: &str) -> &str {
+    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let origin_end = url[after_scheme..]
+        .find('/')
+        .map(|i| after_scheme + i)
+        .unwrap_or(url.len());
+    &url[..origin_end]
+}
+
+#[cfg(not(test))]
+pub fn start_code_display_flow(
+    _provider_name: &str,
+    endpoints: &OAuthEndpoints,
+    client_id: &str,
+) -> PendingOAuthCodeDisplay {
+    let code_verifier = generate_code_verifier();
+    let code_challenge = compute_code_challenge(&code_verifier);
+    let state = generate_state();
+    let redirect_uri = format!(
+        "{}{}",
+        auth_url_origin(endpoints.auth_url),
+        endpoints.redirect_path
+    );
+
+    let auth_url = format!(
+        "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}\
+         &code_challenge={}&code_challenge_method=S256&state={}",
+        endpoints.auth_url,
+        percent_encode(client_id),
+        percent_encode(&redirect_uri),
+        percent_encode(endpoints.scope),
+        percent_encode(&code_challenge),
+        percent_encode(&state),
+    );
+
+    open_browser(&auth_url);
+
+    PendingOAuthCodeDisplay {
+        auth_url,
+        code_verifier,
+        state,
+        redirect_uri,
+        token_url: endpoints.token_url.to_string(),
+        client_id: client_id.to_string(),
+    }
+}
+
+#[cfg(test)]
+pub fn start_code_display_flow(
+    _provider_name: &str,
+    endpoints: &OAuthEndpoints,
+    client_id: &str,
+) -> PendingOAuthCodeDisplay {
+    PendingOAuthCodeDisplay {
+        auth_url: endpoints.auth_url.to_string(),
+        code_verifier: "test_verifier".to_string(),
+        state: "test_state".to_string(),
+        redirect_uri: format!(
+            "{}{}",
+            auth_url_origin(endpoints.auth_url),
+            endpoints.redirect_path
+        ),
+        token_url: endpoints.token_url.to_string(),
+        client_id: client_id.to_string(),
+    }
+}
+
+#[cfg(not(test))]
+async fn exchange_code_json(
+    token_url: &str,
+    client_id: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    state: &str,
+) -> anyhow::Result<ProviderCredential> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "state": state,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    });
+
+    let token: TokenResponse = client
+        .post(token_url)
+        .json(&body)
+        .send()
+        .await
+        .context("token exchange request failed")?
+        .error_for_status()
+        .context("token endpoint returned an error status")?
+        .json()
+        .await
+        .context("failed to parse token response")?;
+
+    let expires_at = token
+        .expires_in
+        .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+
+    Ok(ProviderCredential {
+        access_token: token.access_token,
+        endpoint: None,
+        refresh_token: token.refresh_token,
+        expires_at,
+    })
+}
+
+#[cfg(not(test))]
+pub async fn complete_code_display_flow(
+    pending: &PendingOAuthCodeDisplay,
+    code: &str,
+) -> anyhow::Result<ProviderCredential> {
+    debug!("Completing code-display OAuth flow, exchanging code for token");
+    let clean_code = sanitize_auth_code(code);
+    exchange_code_json(
+        &pending.token_url,
+        &pending.client_id,
+        &clean_code,
+        &pending.redirect_uri,
+        &pending.code_verifier,
+        &pending.state,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub async fn complete_code_display_flow(
+    _pending: &PendingOAuthCodeDisplay,
+    _code: &str,
+) -> anyhow::Result<ProviderCredential> {
+    anyhow::bail!("complete_code_display_flow not available in tests")
+}
+
+#[cfg(not(test))]
+pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<String> {
+    debug!("Creating Anthropic API key from OAuth token");
+    #[derive(serde::Deserialize)]
+    struct CreateApiKeyResponse {
+        raw_key: String,
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let body = client
+        .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
+        .bearer_auth(access_token)
+        .header("anthropic-version", "2023-06-01")
+        .json(&serde_json::json!({"name": "openpista"}))
+        .send()
+        .await
+        .context("create_api_key request failed")?
+        .error_for_status()
+        .context("create_api_key endpoint returned error")?
+        .text()
+        .await
+        .context("failed to read create_api_key response body")?;
+
+    let parsed: CreateApiKeyResponse = serde_json::from_str(&body).with_context(|| {
+        let preview = if body.len() > 512 {
+            &body[..512]
+        } else {
+            &body
+        };
+        format!("failed to parse create_api_key response: {preview}")
+    })?;
+
+    Ok(parsed.raw_key)
+}
+
+#[cfg(test)]
+pub async fn create_anthropic_api_key(_access_token: &str) -> anyhow::Result<String> {
+    anyhow::bail!("create_anthropic_api_key not available in tests")
+}
+
+fn sanitize_auth_code(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.find('#') {
+        Some(pos) => trimmed[..pos].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+#[cfg(not(test))]
+pub async fn read_code_from_stdin() -> anyhow::Result<String> {
+    use tokio::io::AsyncBufReadExt;
+    print!("Authorization code: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let line = stdin
+        .lines()
+        .next_line()
+        .await?
+        .context("no input received")?;
+    Ok(sanitize_auth_code(&line))
+}
+
+#[cfg(test)]
+pub async fn read_code_from_stdin() -> anyhow::Result<String> {
+    anyhow::bail!("read_code_from_stdin not available in tests")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -476,6 +706,14 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_auth_code_strips_fragment() {
+        assert_eq!(sanitize_auth_code("abc123#frag"), "abc123");
+        assert_eq!(sanitize_auth_code("  abc123  "), "abc123");
+        assert_eq!(sanitize_auth_code("abc123#"), "abc123");
+        assert_eq!(sanitize_auth_code("abc123"), "abc123");
+    }
+
+    #[test]
     fn credentials_set_get_remove_roundtrip() {
         let mut creds = Credentials::default();
         let cred = ProviderCredential {
@@ -538,5 +776,41 @@ mod tests {
             loaded.get("openai").unwrap().refresh_token.as_deref(),
             Some("rt-test")
         );
+    }
+
+    #[test]
+    fn auth_url_origin_extracts_scheme_and_host() {
+        assert_eq!(
+            auth_url_origin("https://console.anthropic.com/oauth/authorize"),
+            "https://console.anthropic.com"
+        );
+        assert_eq!(
+            auth_url_origin("https://auth.openai.com/oauth/authorize"),
+            "https://auth.openai.com"
+        );
+        assert_eq!(
+            auth_url_origin("http://localhost:8080/callback"),
+            "http://localhost:8080"
+        );
+    }
+
+    #[test]
+    fn start_code_display_flow_returns_pending_state() {
+        let endpoints = OAuthEndpoints {
+            auth_url: "https://console.anthropic.com/oauth/authorize",
+            token_url: "https://console.anthropic.com/v1/oauth/token",
+            scope: "org:create_api_key",
+            default_client_id: Some("test-client-id"),
+            default_callback_port: None,
+            redirect_path: "/oauth/code/callback",
+        };
+        let pending = start_code_display_flow("anthropic", &endpoints, "test-client-id");
+        assert_eq!(
+            pending.redirect_uri,
+            "https://console.anthropic.com/oauth/code/callback"
+        );
+        assert_eq!(pending.client_id, "test-client-id");
+        assert!(!pending.code_verifier.is_empty());
+        assert!(!pending.state.is_empty());
     }
 }

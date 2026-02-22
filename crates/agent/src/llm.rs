@@ -158,7 +158,12 @@ impl LlmProvider for OpenAiProvider {
             .build()
             .map_err(|e| LlmError::Serialization(e.to_string()))?;
 
-        debug!("Sending request to OpenAI model: {}", req.model);
+        debug!(
+            model = %req.model,
+            messages = %req.messages.len(),
+            tools = %req.tools.len(),
+            "Sending request to OpenAI"
+        );
 
         let response = self
             .client

@@ -20,9 +20,7 @@ impl PidFile {
     /// Returns the default PID file path under `~/.openpista/`.
     pub fn default_path() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".openpista")
-            .join("openpista.pid")
+        PathBuf::from(home).join(".openpista").join("openpista.pid")
     }
 
     pub async fn write(&self) -> std::io::Result<()> {
