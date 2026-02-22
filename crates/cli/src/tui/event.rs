@@ -597,22 +597,7 @@ pub async fn run_tui(
                                 if let Some(session_cmd) = parse_session_command(&message) {
                                     match session_cmd {
                                         SessionCommand::List => {
-                                            if app.session_list.is_empty() {
-                                                app.push_assistant("No sessions found.".to_string());
-                                            } else {
-                                                let mut lines = vec!["**Sessions:**".to_string()];
-                                                for (i, entry) in app.session_list.iter().enumerate() {
-                                                    let active = if entry.id.as_str() == app.session_id.as_str() { " ← active" } else { "" };
-                                                    lines.push(format!(
-                                                        "{}. `{}` — {}{}",
-                                                        i + 1,
-                                                        entry.id.as_str(),
-                                                        entry.preview,
-                                                        active,
-                                                    ));
-                                                }
-                                                app.push_assistant(lines.join("\n"));
-                                            }
+                                            app.open_session_browser();
                                         }
                                         SessionCommand::New => {
                                             let new_sid = proto::SessionId::new();
@@ -1208,6 +1193,15 @@ pub async fn run_tui(
                 session_id = new_session_id.clone();
                 app.load_session_messages(new_session_id, messages);
             }
+        }
+
+        // ── Handle session browser new request ───────────────
+        if app.session_browser_new_requested {
+            app.session_browser_new_requested = false;
+            let new_sid = proto::SessionId::new();
+            app.load_session_messages(new_sid.clone(), Vec::new());
+            app.push_assistant(format!("New session created: `{}`", new_sid.as_str()));
+            session_id = new_sid;
         }
 
         // ── Handle confirmed session deletion ─────────────────────
