@@ -1860,7 +1860,7 @@ mod tests {
     fn sample_models() -> Vec<model_catalog::ModelCatalogEntry> {
         vec![
             model_catalog::ModelCatalogEntry {
-                id: "gpt-5-codex".to_string(),
+                id: "o3".to_string(),
                 provider: String::new(),
                 recommended_for_coding: true,
                 status: model_catalog::ModelStatus::Stable,
@@ -2143,7 +2143,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(app.model_name, "gpt-5-codex");
+        assert_eq!(app.model_name, "o3");
         assert_eq!(app.state, AppState::Idle);
         assert!(matches!(
             app.messages.last(),
