@@ -230,7 +230,7 @@ pub struct TuiApp {
     pending_auth_intent: Option<AuthLoginIntent>,
     /// Selected row in the command palette popup.
     command_palette_cursor: usize,
-    /// Provider name used for auth status check (e.g. "openai", "opencode").
+    /// Provider name used for auth status check (e.g. "openai", "anthropic").
     pub provider_name: String,
     /// Set when the user selects a model in the model browser; consumed by the event loop. (model_id, provider_name)
     pending_model_change: Option<(String, String)>,
@@ -277,7 +277,7 @@ impl TuiApp {
             spinner_tick: 0,
             should_quit: false,
             model_entries: Vec::new(),
-            model_provider: model_catalog::OPENCODE_PROVIDER.to_string(),
+            model_provider: "openai".to_string(),
             model_refresh_requested: false,
             pending_auth_intent: None,
             command_palette_cursor: 0,
@@ -2133,7 +2133,7 @@ mod tests {
     fn model_browser_enter_selects_model_for_session() {
         let mut app = make_app();
         app.open_model_browser(
-            "opencode".to_string(),
+            "openai".to_string(),
             sample_models(),
             String::new(),
             "Synced from remote".to_string(),
@@ -2155,7 +2155,7 @@ mod tests {
     fn model_browser_refresh_hotkey_sets_request_flag() {
         let mut app = make_app();
         app.open_model_browser(
-            "opencode".to_string(),
+            "openai".to_string(),
             sample_models(),
             String::new(),
             "Synced from remote".to_string(),
@@ -2171,7 +2171,7 @@ mod tests {
     fn model_browser_search_mode_esc_then_close() {
         let mut app = make_app();
         app.open_model_browser(
-            "opencode".to_string(),
+            "openai".to_string(),
             sample_models(),
             String::new(),
             "Synced from remote".to_string(),
@@ -2204,7 +2204,7 @@ mod tests {
     fn model_browser_slash_starts_search_mode() {
         let mut app = make_app();
         app.open_model_browser(
-            "opencode".to_string(),
+            "openai".to_string(),
             sample_models(),
             String::new(),
             "Synced from remote".to_string(),

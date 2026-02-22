@@ -182,7 +182,9 @@ async fn main() -> anyhow::Result<()> {
                 .with_writer(writer)
                 .with_target(true)
                 .with_ansi(false)
-                .with_filter(EnvFilter::new("debug"));
+                .with_filter(EnvFilter::new(
+                    "debug,hyper_util=info,rustls=info,reqwest=info,sqlx=info",
+                ));
             tracing_subscriber::registry()
                 .with(console)
                 .with(file)
@@ -201,7 +203,9 @@ async fn main() -> anyhow::Result<()> {
                 .with_writer(writer)
                 .with_target(true)
                 .with_ansi(false)
-                .with_filter(EnvFilter::new("debug"));
+                .with_filter(EnvFilter::new(
+                    "debug,hyper_util=info,rustls=info,reqwest=info,sqlx=info",
+                ));
             tracing_subscriber::registry()
                 .with(console)
                 .with(file)
