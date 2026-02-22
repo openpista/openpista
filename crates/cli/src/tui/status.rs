@@ -116,6 +116,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             " Model browser active ",
             Style::default().fg(THEME.status_hint),
         )),
+        AppState::SessionBrowsing { .. } => Line::from(Span::styled(
+            " Session browser active ",
+            Style::default().fg(THEME.status_hint),
+        )),
         AppState::ConfirmDelete { .. } => Line::from(Span::styled(
             " Confirm delete — y/Enter: delete, n/Esc: cancel ",
             Style::default().fg(THEME.error),

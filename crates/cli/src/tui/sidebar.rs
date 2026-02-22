@@ -129,7 +129,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// Truncates a string to `max_len` characters, appending `…` if shortened.
-fn truncate_str(s: &str, max_len: usize) -> String {
+pub fn truncate_str(s: &str, max_len: usize) -> String {
     if max_len == 0 {
         return String::new();
     }
@@ -146,7 +146,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 /// Formats a UTC timestamp as a human-readable relative time (e.g. "5m ago").
-fn format_relative_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
+pub fn format_relative_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
     let now = chrono::Utc::now();
     let diff = now.signed_duration_since(*dt);
 

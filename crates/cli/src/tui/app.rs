@@ -60,7 +60,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/session",
-        description: "List sessions",
+        description: "Browse sessions",
     },
     SlashCommand {
         name: "/session new",
@@ -173,6 +173,17 @@ pub enum AppState {
         /// Whether in-browser search mode is active.
         search_active: bool,
     },
+    /// Browse sessions in a dedicated TUI screen.
+    SessionBrowsing {
+        /// Case-insensitive substring query for filtering.
+        query: String,
+        /// Selected row index among visible sessions.
+        cursor: usize,
+        /// Scroll offset for session list.
+        scroll: u16,
+        /// Whether in-browser search mode is active.
+        search_active: bool,
+    },
     /// Confirmation dialog before deleting a session.
     ConfirmDelete {
         /// Session ID being deleted.
@@ -279,6 +290,8 @@ pub struct TuiApp {
     pub chat_text_grid: Vec<Vec<char>>,
     /// Scroll value after clamping to max_scroll (set each render; used for text extraction).
     pub chat_scroll_clamped: u16,
+    /// Pending session browser action: create new session (consumed by event loop).
+    pub session_browser_new_requested: bool,
 }
 
 impl TuiApp {
@@ -323,6 +336,7 @@ impl TuiApp {
             chat_area: None,
             chat_text_grid: Vec::new(),
             chat_scroll_clamped: 0,
+            session_browser_new_requested: false,
         }
     }
 
@@ -657,6 +671,55 @@ impl TuiApp {
 
         let visible_len = self.visible_model_entries(&query).len();
         if let AppState::ModelBrowsing { cursor, scroll, .. } = &mut self.state {
+            if visible_len == 0 {
+                *cursor = 0;
+                *scroll = 0;
+                return;
+            }
+            *cursor = (*cursor).min(visible_len.saturating_sub(1));
+            if (*cursor as u16) < *scroll {
+                *scroll = *cursor as u16;
+            } else {
+                *scroll = (*cursor as u16).saturating_sub(2);
+            }
+        }
+    }
+
+    // ── Session browser ──────────────────────────────────────
+
+    /// Opens the session browser view.
+    pub fn open_session_browser(&mut self) {
+        self.state = AppState::SessionBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            search_active: false,
+        };
+    }
+
+    /// Returns visible sessions filtered by the given query string.
+    pub fn visible_sessions(&self, query: &str) -> Vec<&SessionEntry> {
+        if query.trim().is_empty() {
+            self.session_list.iter().collect()
+        } else {
+            let q = query.to_lowercase();
+            self.session_list
+                .iter()
+                .filter(|e| {
+                    e.preview.to_lowercase().contains(&q)
+                        || e.id.as_str().to_lowercase().contains(&q)
+                })
+                .collect()
+        }
+    }
+
+    fn clamp_session_cursor(&mut self) {
+        let query = match &self.state {
+            AppState::SessionBrowsing { query, .. } => query.clone(),
+            _ => return,
+        };
+        let visible_len = self.visible_sessions(&query).len();
+        if let AppState::SessionBrowsing { cursor, scroll, .. } = &mut self.state {
             if visible_len == 0 {
                 *cursor = 0;
                 *scroll = 0;
@@ -1311,6 +1374,137 @@ impl TuiApp {
             return;
         }
 
+        // ── SessionBrowsing state ─────────────────────────────
+        let session_browsing = matches!(self.state, AppState::SessionBrowsing { .. });
+        if session_browsing {
+            let mut close_browser = false;
+            let mut load_selected = false;
+            let mut create_new = false;
+            let mut delete_selected = false;
+            let mut should_clamp = false;
+
+            if let AppState::SessionBrowsing {
+                query,
+                cursor,
+                scroll,
+                search_active,
+            } = &mut self.state
+            {
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
+                    (_, KeyCode::Esc) => {
+                        if *search_active {
+                            *search_active = false;
+                        } else {
+                            close_browser = true;
+                        }
+                    }
+                    (_, KeyCode::Char('s')) | (_, KeyCode::Char('/')) if !*search_active => {
+                        *search_active = true
+                    }
+                    (_, KeyCode::Enter) if !*search_active => load_selected = true,
+                    (_, KeyCode::Char('n')) if !*search_active => create_new = true,
+                    (_, KeyCode::Char('d')) | (_, KeyCode::Delete) if !*search_active => {
+                        delete_selected = true
+                    }
+                    (_, KeyCode::Char('j')) if !*search_active => {
+                        *cursor = cursor.saturating_add(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Char('k')) if !*search_active => {
+                        *cursor = cursor.saturating_sub(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Down) if !*search_active => {
+                        *cursor = cursor.saturating_add(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Up) if !*search_active => {
+                        *cursor = cursor.saturating_sub(1);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::PageDown) if !*search_active => {
+                        *cursor = cursor.saturating_add(10);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::PageUp) if !*search_active => {
+                        *cursor = cursor.saturating_sub(10);
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Backspace) if *search_active => {
+                        query.pop();
+                        *cursor = 0;
+                        *scroll = 0;
+                        should_clamp = true;
+                    }
+                    (_, KeyCode::Char(c)) if *search_active => {
+                        query.push(c);
+                        *cursor = 0;
+                        *scroll = 0;
+                        should_clamp = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            if close_browser {
+                self.state = AppState::Idle;
+                return;
+            }
+
+            if create_new {
+                self.session_browser_new_requested = true;
+                self.state = AppState::Idle;
+                return;
+            }
+
+            if load_selected {
+                if let Some((query, cursor)) = match &self.state {
+                    AppState::SessionBrowsing { query, cursor, .. } => {
+                        Some((query.clone(), *cursor))
+                    }
+                    _ => None,
+                } {
+                    let visible = self.visible_sessions(&query);
+                    if let Some(selected) = visible.get(cursor) {
+                        self.set_pending_sidebar_selection(selected.id.clone());
+                    }
+                }
+                self.state = AppState::Idle;
+                return;
+            }
+
+            if delete_selected
+                && let Some((query, cursor)) = match &self.state {
+                    AppState::SessionBrowsing { query, cursor, .. } => {
+                        Some((query.clone(), *cursor))
+                    }
+                    _ => None,
+                }
+            {
+                let visible = self.visible_sessions(&query);
+                if let Some(selected) = visible.get(cursor) {
+                    // Find the index in session_list for sidebar_hover
+                    let target_id = selected.id.clone();
+                    if let Some(idx) = self
+                        .session_list
+                        .iter()
+                        .position(|e| e.id.as_str() == target_id.as_str())
+                    {
+                        self.sidebar_hover = Some(idx);
+                        self.state = AppState::Idle;
+                        self.request_delete_session();
+                        return;
+                    }
+                }
+            }
+
+            if should_clamp {
+                self.clamp_session_cursor();
+            }
+            return;
+        }
+
         let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
 
         match (key.modifiers, key.code) {
@@ -1429,6 +1623,11 @@ impl TuiApp {
 
         if matches!(self.state, AppState::ModelBrowsing { .. }) {
             self.render_model_browser(frame, area);
+            return;
+        }
+
+        if matches!(self.state, AppState::SessionBrowsing { .. }) {
+            self.render_session_browser(frame, area);
             return;
         }
 
@@ -1909,6 +2108,138 @@ impl TuiApp {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " s or /:search  j/k,↑/↓:move  PgUp/PgDn:page  Enter:use model  r:refresh  Esc:back/close ",
+                Style::default().fg(THEME.browser_footer),
+            )),
+            footer[1],
+        );
+
+        if *search_active {
+            let cursor_col = query.chars().count() as u16;
+            frame.set_cursor_position((footer[0].x + 18 + cursor_col, footer[0].y));
+        }
+    }
+
+    fn render_session_browser(&self, frame: &mut Frame<'_>, area: Rect) {
+        let AppState::SessionBrowsing {
+            query,
+            cursor,
+            scroll,
+            search_active,
+        } = &self.state
+        else {
+            return;
+        };
+
+        let entries = self.visible_sessions(query);
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+        let header = Line::from(vec![
+            Span::styled(
+                " Sessions ",
+                Style::default()
+                    .fg(THEME.browser_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({}) ", entries.len()),
+                Style::default().fg(THEME.fg_muted),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(header), chunks[0]);
+
+        let mut lines: Vec<Line<'_>> = Vec::new();
+        let mut visible_index = 0usize;
+        if entries.is_empty() {
+            lines.push(Line::from(Span::styled(
+                if query.trim().is_empty() {
+                    "  No sessions available.".to_string()
+                } else {
+                    format!("  No matches for '{}'.", query)
+                },
+                Style::default().fg(THEME.warning),
+            )));
+        } else {
+            for entry in &entries {
+                let selected = visible_index == *cursor;
+                let is_active = entry.id.as_str() == self.session_id.as_str();
+                let id_short = if entry.id.as_str().len() > 8 {
+                    &entry.id.as_str()[..8]
+                } else {
+                    entry.id.as_str()
+                };
+                let preview = crate::tui::sidebar::truncate_str(&entry.preview, 40);
+                let time_str = crate::tui::sidebar::format_relative_time(&entry.updated_at);
+                let active_marker = if is_active { " ← active" } else { "" };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if selected { "› " } else { "  " },
+                        if selected {
+                            Style::default()
+                                .fg(THEME.browser_selected_marker)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(THEME.fg_muted)
+                        },
+                    ),
+                    Span::styled(
+                        id_short.to_string(),
+                        Style::default()
+                            .fg(if is_active { THEME.accent } else { THEME.fg })
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(
+                        format!("  {}", preview),
+                        Style::default().fg(THEME.fg_muted),
+                    ),
+                    Span::styled(format!("  {}", time_str), Style::default().fg(THEME.fg_dim)),
+                    Span::styled(active_marker.to_string(), Style::default().fg(THEME.accent)),
+                ]));
+                visible_index += 1;
+            }
+        }
+
+        let content_height = lines.len() as u16;
+        let visible_height = chunks[1].height.saturating_sub(2);
+        let max_scroll = content_height.saturating_sub(visible_height);
+        let effective_scroll = (*scroll).min(max_scroll);
+
+        let list = Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(THEME.fg_muted)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((effective_scroll, 0));
+        frame.render_widget(list, chunks[1]);
+
+        let footer =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[2]);
+        let query_label = if *search_active {
+            format!(" Search (typing): {}", query)
+        } else {
+            format!(" Search: {}", query)
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                query_label,
+                Style::default().fg(THEME.browser_footer),
+            )),
+            footer[0],
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " s or /:search  j/k,↑/↓:move  PgUp/PgDn:page  Enter:load  n:new  d:delete  Esc:back/close ",
                 Style::default().fg(THEME.browser_footer),
             )),
             footer[1],
