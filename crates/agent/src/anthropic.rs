@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use proto::{LlmError, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
 
@@ -132,6 +132,10 @@ impl LlmProvider for AnthropicProvider {
             tools = %anthropic_req.tools.len(),
             "Sending request to Anthropic"
         );
+        trace!(
+            "Anthropic request body: {}",
+            serde_json::to_string(&anthropic_req).unwrap_or_default()
+        );
 
         let mut req_builder = self
             .client
@@ -140,14 +144,10 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json");
 
         if proto::is_anthropic_oauth_token(&self.api_key) {
-            return Err(LlmError::Api(
-                "OAuth tokens (sk-ant-oat*) are not supported by the Anthropic Messages API. \
-                 Use /login and select 'API Key' instead of OAuth, \
-                 or set the openpista_API_KEY environment variable."
-                    .to_string(),
-            ));
+            req_builder = req_builder.bearer_auth(&self.api_key);
+        } else {
+            req_builder = req_builder.header("x-api-key", &self.api_key);
         }
-        req_builder = req_builder.header("x-api-key", &self.api_key);
 
         let response = req_builder
             .json(&anthropic_req)
@@ -167,8 +167,23 @@ impl LlmProvider for AnthropicProvider {
             .map_err(|e| LlmError::Api(e.to_string()))?;
 
         if !status.is_success() {
-            let preview: String = body.chars().take(500).collect();
-            return Err(LlmError::Api(format!("HTTP {status}: {preview}")));
+            debug!(status = %status, body = %body.chars().take(500).collect::<String>(), "Anthropic error response");
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(msg) = parsed["error"]["message"].as_str()
+            {
+                let hint = if parsed["error"]["type"].as_str() == Some("authentication_error") {
+                    " Use /login to re-authenticate."
+                } else if msg.to_lowercase().contains("credit balance") {
+                    " Visit https://console.anthropic.com to add credits."
+                } else {
+                    ""
+                };
+                return Err(LlmError::Api(format!("{msg}{hint}")));
+            }
+            return Err(LlmError::Api(format!(
+                "HTTP {status}: {}",
+                body.chars().take(500).collect::<String>()
+            )));
         }
 
         let anthropic_resp: AnthropicResponse = serde_json::from_str(&body).map_err(|e| {
@@ -177,6 +192,12 @@ impl LlmProvider for AnthropicProvider {
                 body.chars().take(200).collect::<String>()
             ))
         })?;
+
+        debug!(
+            stop_reason = ?anthropic_resp.stop_reason,
+            content_blocks = %anthropic_resp.content.len(),
+            "Anthropic response parsed"
+        );
 
         if anthropic_resp.stop_reason.as_deref() == Some("tool_use") {
             let tool_calls: Vec<ToolCall> = anthropic_resp
@@ -538,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_is_rejected_early() {
+    fn oauth_token_detected_by_shared_helper() {
         // Verify the shared helper correctly identifies OAuth tokens
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));

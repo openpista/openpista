@@ -169,12 +169,19 @@ impl LlmProvider for OpenAiProvider {
             "Sending request to OpenAI"
         );
 
-        let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| LlmError::Api(e.to_string()))?;
+        let response = self.client.chat().create(request).await.map_err(|e| {
+            let msg = e.to_string();
+            debug!(error = %msg, "OpenAI API error");
+            let hint = if msg.contains("does not exist") || msg.contains("model_not_found") {
+                " Try /model to select a different model."
+            } else if msg.to_lowercase().contains("billing") || msg.to_lowercase().contains("quota")
+            {
+                " Check your OpenAI billing at https://platform.openai.com."
+            } else {
+                ""
+            };
+            LlmError::Api(format!("{msg}{hint}"))
+        })?;
 
         let choice = response
             .choices

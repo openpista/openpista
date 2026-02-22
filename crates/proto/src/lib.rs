@@ -22,9 +22,8 @@ pub use tool::{ToolCall, ToolDefinition, ToolResult};
 /// Returns `true` when the key looks like an Anthropic OAuth access token
 /// (`sk-ant-oat*`) rather than a permanent API key (`sk-ant-api*`).
 ///
-/// Anthropic's Messages API does not accept OAuth tokens — only permanent
-/// API keys sent via the `x-api-key` header. This helper is used across
-/// crates to reject OAuth tokens early with a clear error message.
+/// When this returns `true`, callers should use `Authorization: Bearer`
+/// instead of `x-api-key` for Anthropic API requests.
 pub fn is_anthropic_oauth_token(key: &str) -> bool {
     key.starts_with("sk-ant-oat")
 }
