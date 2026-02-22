@@ -414,7 +414,7 @@ pub async fn run_tui(
     runtime: Arc<agent::AgentRuntime>,
     skill_loader: Arc<SkillLoader>,
     channel_id: ChannelId,
-    session_id: SessionId,
+    mut session_id: SessionId,
     model_name: String,
     mut config: Config,
 ) -> anyhow::Result<()> {
@@ -452,6 +452,16 @@ pub async fn run_tui(
                     },
                 )
                 .collect();
+        }
+    }
+
+    // Resume existing session: load messages if the session already has history
+    {
+        let memory = runtime.memory().clone();
+        if let Ok(messages) = memory.load_session(&session_id).await
+            && !messages.is_empty()
+        {
+            app.load_session_messages(session_id.clone(), messages);
         }
     }
 
@@ -549,7 +559,7 @@ pub async fn run_tui(
                                 let rt = Arc::clone(&runtime);
                                 let sl = Arc::clone(&skill_loader);
                                 let ch = channel_id.clone();
-                                let sess = session_id.clone();
+                                let sess = app.session_id.clone();
 
                                 let handle = tokio::spawn(async move {
                                     let skills_ctx = sl.load_context().await;
@@ -762,6 +772,7 @@ pub async fn run_tui(
                                         let idx = (inner_y / entry_height) as usize;
                                         if idx < app.session_list.len() {
                                             app.sidebar_hover = Some(idx);
+                                            app.select_sidebar_session();
                                         }
                                     }
                                 }
@@ -915,6 +926,23 @@ pub async fn run_tui(
                 app.scroll_to_bottom();
                 agent_task = None;
                 progress_rx = None;
+                // Refresh sidebar after agent completion
+                let memory = runtime.memory().clone();
+                if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                    app.refresh_session_list(
+                        sessions
+                            .into_iter()
+                            .map(|(id, channel_id, updated_at, preview)| {
+                                super::app::SessionEntry {
+                                    id,
+                                    channel_id,
+                                    updated_at,
+                                    preview,
+                                }
+                            })
+                            .collect(),
+                    );
+                }
             }
 
             result = async {
@@ -1030,6 +1058,43 @@ pub async fn run_tui(
 
             _ = spinner_interval.tick(), if app.state != AppState::Idle => {
                 app.spinner_tick = app.spinner_tick.wrapping_add(1);
+            }
+        }
+
+        // ── Handle sidebar session selection ──────────────────────
+        if let Some(new_session_id) = app.take_pending_sidebar_selection() {
+            let memory = runtime.memory().clone();
+            if let Ok(messages) = memory.load_session(&new_session_id).await {
+                session_id = new_session_id.clone();
+                app.load_session_messages(new_session_id, messages);
+            }
+        }
+
+        // ── Handle confirmed session deletion ─────────────────────
+        if let Some(del_id) = app.take_confirmed_delete() {
+            let memory = runtime.memory().clone();
+            let _ = memory.delete_session(&del_id).await;
+            app.remove_session_from_list(&del_id);
+            // If we deleted the active session, create a new one
+            if del_id.as_str() == session_id.as_str() {
+                session_id = SessionId::new();
+                app.load_session_messages(session_id.clone(), Vec::new());
+            }
+            // Refresh sidebar
+            if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                app.refresh_session_list(
+                    sessions
+                        .into_iter()
+                        .map(
+                            |(id, channel_id, updated_at, preview)| super::app::SessionEntry {
+                                id,
+                                channel_id,
+                                updated_at,
+                                preview,
+                            },
+                        )
+                        .collect(),
+                );
             }
         }
 
