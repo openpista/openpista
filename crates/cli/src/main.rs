@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[cfg(not(test))]
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 #[cfg(not(test))]
-use agent::{AgentRuntime, OpenAiProvider, SqliteMemory, ToolRegistry};
+use agent::{AgentRuntime, AnthropicProvider, OpenAiProvider, SqliteMemory, ToolRegistry};
 #[cfg(not(test))]
 use channels::{ChannelAdapter, CliAdapter, MobileAdapter, TelegramAdapter};
 #[cfg(not(test))]
@@ -37,7 +37,7 @@ use tools::{
 #[cfg(not(test))]
 use tracing::{error, info, warn};
 #[cfg(not(test))]
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Top-level command-line arguments for the openpista application.
 #[derive(Parser)]
@@ -52,6 +52,10 @@ struct Cli {
     #[arg(short, long, default_value = "info")]
     log_level: String,
 
+    /// Enable debug logging to ~/.openpista/debug.log
+    #[arg(long, default_value_t = false)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -60,7 +64,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the full-screen TUI (default when no subcommand is given)
-    Tui,
+    Tui {
+        /// Resume an existing session by its ID
+        #[arg(short = 's', long)]
+        session: Option<String>,
+    },
 
     /// Start the daemon (gateway + all enabled channels)
     Start,
@@ -73,9 +81,9 @@ enum Commands {
     },
 
     /// Browse model catalog entries
-    Models {
+    Model {
         #[command(subcommand)]
-        command: ModelsCommands,
+        command: Option<ModelsCommands>,
     },
 
     /// Manage provider credentials via OAuth 2.0 PKCE browser login
@@ -85,10 +93,10 @@ enum Commands {
     },
 }
 
-/// `models` sub-subcommands.
+/// `model` sub-subcommands.
 #[derive(Subcommand)]
 enum ModelsCommands {
-    /// List recommended coding models
+    /// List recommended coding model
     List,
 }
 
@@ -140,21 +148,71 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Determine effective command (default to Tui if none given)
-    let command = cli.command.unwrap_or(Commands::Tui);
-    let is_tui = matches!(command, Commands::Tui);
+    let command = cli.command.unwrap_or(Commands::Tui { session: None });
+    let is_tui = matches!(command, Commands::Tui { .. });
 
-    // Initialize tracing — suppress in TUI mode to avoid corrupting the display
-    let filter =
+    // Initialize tracing — suppress console output in TUI mode to avoid corrupting the display.
+    // When --debug is passed, also write debug-level logs to ~/.openpista/debug.log.
+    let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
-    if is_tui {
-        fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::sink)
-            .with_target(false)
-            .init();
+    // WorkerGuard must outlive main() so buffered file writes are flushed on exit.
+    let _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+    let debug_writer = if cli.debug {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let log_dir = std::path::PathBuf::from(home).join(".openpista");
+        std::fs::create_dir_all(&log_dir).ok();
+        let appender = tracing_appender::rolling::never(&log_dir, "debug.log");
+        let (writer, guard) = tracing_appender::non_blocking(appender);
+        _file_guard = Some(guard);
+        Some(writer)
     } else {
-        fmt().with_env_filter(filter).with_target(false).init();
+        _file_guard = None;
+        None
+    };
+
+    match (is_tui, debug_writer) {
+        (true, Some(writer)) => {
+            let console = fmt::layer()
+                .with_writer(std::io::sink)
+                .with_target(false)
+                .with_filter(console_filter);
+            let file = fmt::layer()
+                .with_writer(writer)
+                .with_target(true)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("debug"));
+            tracing_subscriber::registry()
+                .with(console)
+                .with(file)
+                .init();
+        }
+        (true, None) => {
+            fmt()
+                .with_env_filter(console_filter)
+                .with_writer(std::io::sink)
+                .with_target(false)
+                .init();
+        }
+        (false, Some(writer)) => {
+            let console = fmt::layer().with_target(false).with_filter(console_filter);
+            let file = fmt::layer()
+                .with_writer(writer)
+                .with_target(true)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("debug"));
+            tracing_subscriber::registry()
+                .with(console)
+                .with(file)
+                .init();
+        }
+        (false, None) => {
+            fmt()
+                .with_env_filter(console_filter)
+                .with_target(false)
+                .init();
+        }
     }
 
     // Load config
@@ -164,10 +222,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     match command {
-        Commands::Tui => cmd_tui(config).await,
+        Commands::Tui { session } => cmd_tui(config, session).await,
         Commands::Start => cmd_start(config).await,
         Commands::Run { exec } => cmd_run(config, exec).await,
-        Commands::Models { command } => cmd_models(command).await,
+        Commands::Model { command } => cmd_models(config, command).await,
         Commands::Auth { command } => match command {
             AuthCommands::Login {
                 provider,
@@ -196,22 +254,54 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(not(test))]
 /// Starts the full-screen TUI for interactive agent sessions.
-async fn cmd_tui(config: Config) -> anyhow::Result<()> {
+async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> {
     let runtime = build_runtime(&config, None).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
     let channel_id = ChannelId::new("cli", "tui");
-    let session_id = SessionId::new();
+    let session_id = match session {
+        Some(id) => SessionId::from(id),
+        None => SessionId::new(),
+    };
     let model_name = config.agent.effective_model().to_string();
 
     tui::run_tui(
         runtime,
         skill_loader,
         channel_id,
-        session_id,
+        session_id.clone(),
         model_name,
         config.clone(),
     )
-    .await
+    .await?;
+
+    print_goodbye_banner(&session_id, config.agent.effective_model());
+    Ok(())
+}
+
+#[cfg(not(test))]
+/// Builds an LLM provider instance for the given preset, API key, optional base URL, and model.
+fn build_provider(
+    preset: config::ProviderPreset,
+    api_key: &str,
+    base_url: Option<&str>,
+    model: &str,
+) -> Arc<dyn agent::LlmProvider> {
+    match preset {
+        config::ProviderPreset::Anthropic => {
+            if let Some(base_url) = base_url {
+                Arc::new(AnthropicProvider::with_base_url(api_key, base_url))
+            } else {
+                Arc::new(AnthropicProvider::new(api_key))
+            }
+        }
+        _ => {
+            if let Some(base_url) = base_url {
+                Arc::new(OpenAiProvider::with_base_url(api_key, base_url, model))
+            } else {
+                Arc::new(OpenAiProvider::new(api_key, model))
+            }
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -242,19 +332,47 @@ async fn build_runtime(
     if api_key.is_empty() {
         warn!("No API key configured. Set openpista_API_KEY or OPENAI_API_KEY.");
     }
-
     let model = config.agent.effective_model().to_string();
-    let llm: Arc<dyn agent::LlmProvider> = if let Some(base_url) = config.agent.effective_base_url()
-    {
-        Arc::new(OpenAiProvider::with_base_url(&api_key, base_url, &model))
-    } else {
-        Arc::new(OpenAiProvider::new(&api_key, &model))
-    };
+    let llm = build_provider(
+        config.agent.provider,
+        &api_key,
+        config.agent.effective_base_url(),
+        &model,
+    );
 
-    Ok(Arc::new(
-        AgentRuntime::new(llm, registry, memory, &model, config.agent.max_tool_rounds)
-            .with_worker_report_quic_addr(worker_report_quic_addr),
-    ))
+    let runtime = Arc::new(
+        AgentRuntime::new(
+            llm,
+            registry,
+            memory,
+            config.agent.provider.name(),
+            &model,
+            config.agent.max_tool_rounds,
+        )
+        .with_worker_report_quic_addr(worker_report_quic_addr),
+    );
+
+    // Register all authenticated providers so the runtime can switch between them.
+    for preset in config::ProviderPreset::all() {
+        let name = preset.name();
+        // Skip the active provider — already registered by AgentRuntime::new.
+        if name == config.agent.provider.name() {
+            continue;
+        }
+        if let Some(cred) = config.resolve_credential_for(name) {
+            let default_model = preset.default_model();
+            let provider = build_provider(
+                *preset,
+                &cred.api_key,
+                cred.base_url.as_deref(),
+                default_model,
+            );
+            runtime.register_provider(name, provider);
+            info!(provider = %name, "Registered additional provider");
+        }
+    }
+
+    Ok(runtime)
 }
 
 #[cfg(not(test))]
@@ -470,15 +588,19 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
-async fn cmd_models(command: ModelsCommands) -> anyhow::Result<()> {
-    match command {
+async fn cmd_models(config: Config, command: Option<ModelsCommands>) -> anyhow::Result<()> {
+    match command.unwrap_or(ModelsCommands::List) {
         ModelsCommands::List => {
-            let catalog = model_catalog::load_opencode_catalog(false).await;
+            let provider_name = config.agent.provider.name();
+            let base_url = config.agent.effective_base_url();
+            let api_key = config.resolve_api_key();
+            let catalog =
+                model_catalog::load_catalog(provider_name, base_url, &api_key, false).await;
             let summary = model_catalog::model_summary(&catalog.entries, "", false);
             let sections = model_catalog::model_sections(&catalog.entries, "", false);
 
             println!(
-                "Models | provider:{} | total:{} | matched:{} | recommended:{} | available:{}",
+                "model | provider:{} | total:{} | matched:{} | recommended:{} | available:{}",
                 catalog.provider,
                 summary.total,
                 summary.matched,
@@ -703,7 +825,35 @@ fn cmd_auth_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns whether a response should be routed to the mobile QUIC adapter.
+fn print_goodbye_banner(session_id: &SessionId, model: &str) {
+    let session_str = session_id.as_str();
+    let short_session = if session_str.len() > 8 {
+        &session_str[..8]
+    } else {
+        session_str
+    };
+
+    println!();
+    println!("  \x1b[1;32m                            _     _      \x1b[0m");
+    println!("  \x1b[1;32m  ___  _ __  ___ _ __  _ __(_)___| |_ __ _\x1b[0m");
+    println!("  \x1b[1;32m / _ \\| '_ \\/ _ \\ '_ \\| '_ \\| / __| __/ _` |\x1b[0m");
+    println!("  \x1b[1;32m| (_) | |_) |  __/ | | | |_) | \\__ \\ || (_| |\x1b[0m");
+    println!("  \x1b[1;32m \\___/| .__/ \\___|_| |_| .__/|_|___/\\__\\__,_|\x1b[0m");
+    println!("  \x1b[1;32m      |_|              |_|                   \x1b[0m");
+    println!();
+    println!(
+        "  \x1b[1;37mSession\x1b[0m   \x1b[32m{}\x1b[0m",
+        session_str
+    );
+    println!("  \x1b[1;37mModel\x1b[0m     \x1b[32m{}\x1b[0m", model);
+    println!();
+    println!(
+        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista -s {}\x1b[0m",
+        short_session
+    );
+    println!();
+}
+
 fn should_send_mobile_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("mobile:")
 }
@@ -827,5 +977,17 @@ exit_code: 0"
     #[test]
     fn format_run_header_embeds_exec_text() {
         assert_eq!(format_run_header("ls -la"), "Running: ls -la");
+    }
+
+    #[test]
+    fn print_goodbye_banner_does_not_panic() {
+        let session = SessionId::from("abcdef12-3456-7890-abcd-ef1234567890");
+        print_goodbye_banner(&session, "gpt-4o");
+    }
+
+    #[test]
+    fn print_goodbye_banner_short_session_id() {
+        let session = SessionId::from("short");
+        print_goodbye_banner(&session, "claude-sonnet-4-20250514");
     }
 }

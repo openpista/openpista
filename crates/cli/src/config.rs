@@ -2,6 +2,17 @@ use proto::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tracing::debug;
+
+/// Resolved credential for a specific provider.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ResolvedCredential {
+    /// API key or access token.
+    pub api_key: String,
+    /// Optional base URL for the provider.
+    pub base_url: Option<String>,
+}
 
 /// OAuth 2.0 PKCE application endpoints for a provider.
 pub struct OAuthEndpoints {
@@ -15,8 +26,12 @@ pub struct OAuthEndpoints {
     /// Users can override via `oauth_client_id` config or `openpista_OAUTH_CLIENT_ID`.
     pub default_client_id: Option<&'static str>,
     /// Default local callback port registered with the OAuth provider.
-    /// `None` means use the globally configured port.
+    /// `None` means the provider uses a remote redirect (code-display flow).
     pub default_callback_port: Option<u16>,
+    /// Path component of the OAuth redirect URI.
+    /// For localhost flows: appended to `http://localhost:{port}`.
+    /// For code-display flows: appended to the auth URL origin.
+    pub redirect_path: &'static str,
 }
 
 impl OAuthEndpoints {
@@ -42,8 +57,8 @@ pub enum ProviderPreset {
     /// OpenAI API (api.openai.com). Default.
     #[default]
     OpenAi,
-    GlueGoogle,
-    GlueGpt,
+    /// Anthropic Messages API (api.anthropic.com).
+    Anthropic,
     /// Together.ai – OpenAI-compatible endpoint; base_url auto-set.
     Together,
     /// Local Ollama instance – OpenAI-compatible; base_url auto-set, no API key needed.
@@ -102,17 +117,6 @@ pub struct ProviderRegistryEntry {
 }
 
 const EXTENSION_PROVIDER_SLOTS: &[ProviderRegistryEntry] = &[
-    ProviderRegistryEntry {
-        name: "anthropic",
-        display_name: "Anthropic",
-        category: ProviderCategory::Extension,
-        sort_order: 20,
-        search_aliases: &["claude", "anthropic"],
-        auth_mode: LoginAuthMode::ApiKey,
-        api_key_env: "ANTHROPIC_API_KEY",
-        endpoint_env: None,
-        supports_runtime: false,
-    },
     ProviderRegistryEntry {
         name: "github-copilot",
         display_name: "GitHub Copilot",
@@ -176,8 +180,7 @@ impl ProviderPreset {
     pub const fn all() -> &'static [Self] {
         &[
             Self::OpenAi,
-            Self::GlueGoogle,
-            Self::GlueGpt,
+            Self::Anthropic,
             Self::Together,
             Self::Ollama,
             Self::OpenRouter,
@@ -190,12 +193,11 @@ impl ProviderPreset {
     pub fn default_model(&self) -> &'static str {
         match self {
             Self::OpenAi => "gpt-4o",
-            Self::GlueGoogle => "gemini-3.1-pro-preview",
-            Self::GlueGpt => "gpt-5.3-codex",
+            Self::Anthropic => "claude-sonnet-4-6",
             Self::Together => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
             Self::Ollama => "llama3.2",
             Self::OpenRouter => "openai/gpt-4o",
-            Self::OpenCode => "gpt-5-codex",
+            Self::OpenCode => "gpt-4o",
             Self::Custom => "",
         }
     }
@@ -204,8 +206,7 @@ impl ProviderPreset {
     pub fn base_url(&self) -> Option<&'static str> {
         match self {
             Self::OpenAi => None,
-            Self::GlueGoogle => None,
-            Self::GlueGpt => None,
+            Self::Anthropic => Some("https://api.anthropic.com"),
             Self::Together => Some("https://api.together.xyz/v1"),
             Self::Ollama => Some("http://localhost:11434/v1"),
             Self::OpenRouter => Some("https://openrouter.ai/api/v1"),
@@ -219,8 +220,7 @@ impl ProviderPreset {
     pub fn api_key_env(&self) -> &'static str {
         match self {
             Self::OpenAi => "OPENAI_API_KEY",
-            Self::GlueGoogle => "GOOGLE_API_KEY",
-            Self::GlueGpt => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
             Self::Together => "TOGETHER_API_KEY",
             Self::Ollama => "",
             Self::OpenRouter => "OPENROUTER_API_KEY",
@@ -233,8 +233,7 @@ impl ProviderPreset {
     pub fn name(&self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
-            Self::GlueGoogle => "glue-google",
-            Self::GlueGpt => "glue-gpt",
+            Self::Anthropic => "anthropic",
             Self::Together => "together",
             Self::Ollama => "ollama",
             Self::OpenRouter => "openrouter",
@@ -254,14 +253,23 @@ impl ProviderPreset {
                 scope: "openid profile email offline_access",
                 default_client_id: Some("app_EMoamEEZ73f0CkXaXp7hrann"),
                 default_callback_port: Some(1455),
+                redirect_path: "/auth/callback",
             }),
-            Self::GlueGoogle => None,
+            Self::Anthropic => Some(OAuthEndpoints {
+                auth_url: "https://console.anthropic.com/oauth/authorize",
+                token_url: "https://console.anthropic.com/v1/oauth/token",
+                scope: "org:create_api_key user:profile user:inference",
+                default_client_id: Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e"),
+                default_callback_port: None,
+                redirect_path: "/oauth/code/callback",
+            }),
             Self::OpenRouter => Some(OAuthEndpoints {
                 auth_url: "https://openrouter.ai/auth",
                 token_url: "https://openrouter.ai/api/v1/auth/keys",
                 scope: "",
                 default_client_id: None,
                 default_callback_port: None,
+                redirect_path: "",
             }),
             Self::OpenCode => None,
             _ => None,
@@ -304,31 +312,28 @@ impl ProviderPreset {
             display_name: match self {
                 Self::OpenCode => "OpenCode Zen",
                 Self::OpenAi => "OpenAI (ChatGPT Plus/Pro or API key)",
+                Self::Anthropic => "Anthropic (Claude)",
                 Self::OpenRouter => "OpenRouter",
                 Self::Together => "Together",
                 Self::Ollama => "Ollama",
-                Self::GlueGoogle => "Glue Google",
-                Self::GlueGpt => "Glue GPT",
                 Self::Custom => "Custom OpenAI-Compatible",
             },
             category: ProviderCategory::Runtime,
             sort_order: match self {
                 Self::OpenCode => 10,
+                Self::Anthropic => 20,
                 Self::OpenAi => 40,
                 Self::OpenRouter => 60,
                 Self::Together => 110,
-                Self::GlueGoogle => 120,
-                Self::GlueGpt => 130,
                 Self::Ollama => 140,
                 Self::Custom => 150,
             },
             search_aliases: match self {
                 Self::OpenCode => &["zen", "opencode", "coding"],
                 Self::OpenAi => &["openai", "chatgpt", "gpt"],
+                Self::Anthropic => &["anthropic", "claude", "claude-3", "claude-4"],
                 Self::OpenRouter => &["router", "openrouter"],
                 Self::Together => &["together", "llama", "mixtral"],
-                Self::GlueGoogle => &["google", "gemini", "glue"],
-                Self::GlueGpt => &["gpt", "glue"],
                 Self::Ollama => &["ollama", "local"],
                 Self::Custom => &["custom", "openai-compatible", "proxy"],
             },
@@ -466,8 +471,7 @@ impl std::str::FromStr for ProviderPreset {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAi),
-            "glue-google" => Ok(Self::GlueGoogle),
-            "glue-gpt" => Ok(Self::GlueGpt),
+            "anthropic" | "claude" => Ok(Self::Anthropic),
             "together" => Ok(Self::Together),
             "ollama" => Ok(Self::Ollama),
             "openrouter" => Ok(Self::OpenRouter),
@@ -478,16 +482,29 @@ impl std::str::FromStr for ProviderPreset {
     }
 }
 
+/// Returns OAuth endpoints for extension providers that support browser login.
+pub fn extension_oauth_endpoints(provider_name: &str) -> Option<OAuthEndpoints> {
+    let _ = provider_name;
+    None
+}
+
 /// Returns true if OAuth login is available for the given provider name.
-/// Checks user-configured client ID first, then provider's built-in default.
+/// Checks user-configured client ID first, then provider's built-in default,
+/// then extension provider endpoints.
 pub fn oauth_available_for(provider_name: &str, config_client_id: &str) -> bool {
     if !config_client_id.trim().is_empty() {
         return true;
     }
-    provider_name
+    if provider_name
         .parse::<ProviderPreset>()
         .ok()
         .and_then(|p| p.oauth_endpoints())
+        .and_then(|e| e.default_client_id)
+        .is_some()
+    {
+        return true;
+    }
+    extension_oauth_endpoints(provider_name)
         .and_then(|e| e.default_client_id)
         .is_some()
 }
@@ -650,14 +667,13 @@ impl Config {
                 return Some(cwd);
             }
             let home = std::env::var("HOME").ok()?;
-            let home_config = PathBuf::from(home)
-                .join(".openpista")
-                .join("config.toml");
+            let home_config = PathBuf::from(home).join(".openpista").join("config.toml");
             if home_config.exists() {
                 return Some(home_config);
             }
             None
         });
+        debug!(path = ?config_path, "Config file resolved");
 
         let mut config = if let Some(path) = config_path {
             let content = std::fs::read_to_string(&path).map_err(ConfigError::Io)?;
@@ -688,6 +704,12 @@ impl Config {
             config.skills.workspace = workspace;
         }
 
+        debug!(
+            provider = %config.agent.provider.name(),
+            model = %config.agent.effective_model(),
+            base_url = ?config.agent.effective_base_url(),
+            "Config loaded"
+        );
         Ok(config)
     }
 
@@ -700,6 +722,7 @@ impl Config {
     /// 4. `OPENAI_API_KEY` (legacy fallback)
     pub fn resolve_api_key(&self) -> String {
         if !self.agent.api_key.is_empty() {
+            debug!(source = "config", provider = %self.agent.provider.name(), "API key resolved");
             return self.agent.api_key.clone();
         }
 
@@ -708,6 +731,7 @@ impl Config {
         if let Some(cred) = creds.get(self.agent.provider.name())
             && !cred.is_expired()
         {
+            debug!(source = "credential_store", provider = %self.agent.provider.name(), "API key resolved");
             return cred.access_token.clone();
         }
 
@@ -716,11 +740,72 @@ impl Config {
         if !env_var.is_empty()
             && let Ok(key) = std::env::var(env_var)
         {
+            debug!(source = "env", env_var = %env_var, "API key resolved");
             return key;
         }
 
         // Legacy fallback
-        std::env::var("OPENAI_API_KEY").unwrap_or_default()
+        let fallback = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        if fallback.is_empty() {
+            debug!(provider = %self.agent.provider.name(), "No API key found from any source");
+        } else {
+            debug!(
+                source = "legacy_fallback",
+                "API key resolved from OPENAI_API_KEY"
+            );
+        }
+        fallback
+    }
+
+    /// Resolves the API key for an arbitrary provider name (not just the configured one).
+    /// Used by multi-provider model catalog loading.
+    ///
+    /// Priority:
+    /// 1. If `provider_name` matches the configured provider, use `resolve_api_key()`
+    /// 2. Valid (non-expired) token stored by `openpista auth login`
+    /// 3. Provider-specific environment variable
+    pub fn resolve_credential_for(&self, provider_name: &str) -> Option<ResolvedCredential> {
+        // If it's the configured provider, delegate to the existing method
+        if provider_name == self.agent.provider.name() {
+            let key = self.resolve_api_key();
+            if key.is_empty() {
+                return None;
+            }
+            return Some(ResolvedCredential {
+                api_key: key,
+                base_url: self.agent.effective_base_url().map(String::from),
+            });
+        }
+
+        // Try credential store
+        let creds = crate::auth::Credentials::load();
+        if let Some(cred) = creds.get(provider_name)
+            && !cred.is_expired()
+        {
+            let base_url = provider_name
+                .parse::<ProviderPreset>()
+                .ok()
+                .and_then(|p| p.base_url().map(String::from));
+            return Some(ResolvedCredential {
+                api_key: cred.access_token.clone(),
+                base_url,
+            });
+        }
+
+        // Try provider-specific env var
+        if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
+            let env_var = preset.api_key_env();
+            if !env_var.is_empty()
+                && let Ok(key) = std::env::var(env_var)
+            {
+                return Some(ResolvedCredential {
+                    api_key: key,
+                    base_url: preset.base_url().map(String::from),
+                });
+            }
+        }
+
+        None
     }
 }
 
@@ -768,6 +853,15 @@ mod tests {
         );
 
         assert_eq!(
+            ProviderPreset::Anthropic.base_url(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            ProviderPreset::Anthropic.default_model(),
+            "claude-sonnet-4-6"
+        );
+
+        assert_eq!(
             ProviderPreset::Together.default_model(),
             "meta-llama/Llama-3.3-70B-Instruct-Turbo"
         );
@@ -795,7 +889,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.name == "anthropic" && !entry.supports_runtime)
+                .any(|entry| entry.name == "anthropic" && entry.supports_runtime)
         );
         assert!(
             entries
@@ -1072,5 +1166,35 @@ api_key = "tg-key"
 
             remove_env_var("OPENCODE_API_KEY");
         });
+    }
+
+    #[test]
+    fn anthropic_preset_oauth_endpoints_are_configured() {
+        let ep = ProviderPreset::Anthropic
+            .oauth_endpoints()
+            .expect("anthropic oauth endpoints");
+        assert!(ep.auth_url.contains("anthropic.com"));
+        assert!(ep.token_url.contains("anthropic.com"));
+        assert!(ep.default_client_id.is_some());
+        assert!(ep.default_callback_port.is_none());
+        assert!(!ep.redirect_path.is_empty());
+    }
+
+    #[test]
+    fn extension_oauth_endpoints_returns_none_for_unknown() {
+        assert!(extension_oauth_endpoints("unknown-provider").is_none());
+    }
+
+    #[test]
+    fn oauth_available_for_anthropic_with_default_client_id() {
+        assert!(oauth_available_for("anthropic", ""));
+    }
+
+    #[test]
+    fn anthropic_registry_entry_has_oauth_auth_mode_and_runtime_category() {
+        let entry = provider_registry_entry("anthropic").expect("anthropic entry");
+        assert_eq!(entry.auth_mode, LoginAuthMode::OAuth);
+        assert_eq!(entry.category, ProviderCategory::Runtime);
+        assert!(entry.supports_runtime);
     }
 }

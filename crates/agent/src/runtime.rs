@@ -18,10 +18,12 @@ Be helpful, concise, and safe. Always confirm before running potentially destruc
 
 /// The main agent runtime: manages the ReAct loop
 pub struct AgentRuntime {
-    llm: Arc<dyn LlmProvider>,
+    llm: std::sync::RwLock<Arc<dyn LlmProvider>>,
+    providers: std::sync::RwLock<std::collections::HashMap<String, Arc<dyn LlmProvider>>>,
+    active_provider: std::sync::RwLock<String>,
     tools: Arc<ToolRegistry>,
     memory: Arc<SqliteMemory>,
-    model: String,
+    model: std::sync::RwLock<String>,
     max_tool_rounds: usize,
     worker_report_quic_addr: Option<String>,
 }
@@ -32,17 +34,70 @@ impl AgentRuntime {
         llm: Arc<dyn LlmProvider>,
         tools: Arc<ToolRegistry>,
         memory: Arc<SqliteMemory>,
+        provider_name: &str,
         model: impl Into<String>,
         max_tool_rounds: usize,
     ) -> Self {
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(provider_name.to_string(), Arc::clone(&llm));
         Self {
-            llm,
+            llm: std::sync::RwLock::new(llm),
+            providers: std::sync::RwLock::new(providers),
+            active_provider: std::sync::RwLock::new(provider_name.to_string()),
             tools,
             memory,
-            model: model.into(),
+            model: std::sync::RwLock::new(model.into()),
             max_tool_rounds,
             worker_report_quic_addr: None,
         }
+    }
+
+    pub fn memory(&self) -> &Arc<SqliteMemory> {
+        &self.memory
+    }
+
+    pub fn set_model(&self, model: String) {
+        *self.model.write().expect("model lock") = model;
+    }
+
+    /// Replaces the active LLM provider (e.g. after switching from OpenAI to Anthropic).
+    pub fn set_llm(&self, llm: Arc<dyn LlmProvider>) {
+        *self.llm.write().expect("llm lock") = llm;
+    }
+
+    /// Registers an additional LLM provider by name.
+    pub fn register_provider(&self, name: &str, llm: Arc<dyn LlmProvider>) {
+        self.providers
+            .write()
+            .expect("providers lock")
+            .insert(name.to_string(), llm);
+    }
+
+    /// Switches the active LLM provider to a previously registered one.
+    pub fn switch_provider(&self, name: &str) -> Result<(), String> {
+        let providers = self.providers.read().expect("providers lock");
+        let provider = providers
+            .get(name)
+            .ok_or_else(|| format!("unknown provider: {name}"))?;
+        *self.llm.write().expect("llm lock") = Arc::clone(provider);
+        *self.active_provider.write().expect("active_provider lock") = name.to_string();
+        Ok(())
+    }
+
+    /// Returns the name of the currently active provider.
+    pub fn active_provider_name(&self) -> String {
+        self.active_provider
+            .read()
+            .expect("active_provider lock")
+            .clone()
+    }
+
+    /// Returns the names of all registered providers.
+    pub fn registered_providers(&self) -> Vec<String> {
+        let providers = self.providers.read().expect("providers lock");
+        let mut names: Vec<String> = providers.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Sets the orchestrator QUIC address injected into `container.run` calls.
@@ -126,11 +181,14 @@ impl AgentRuntime {
             let req = ChatRequest {
                 messages: messages.clone(),
                 tools: tool_defs.clone(),
-                model: self.model.clone(),
+                model: self.model.read().expect("model lock").clone(),
             };
 
             debug!("LLM call (round {round}) for session {session_id}");
-            let response = self.llm.chat(req).await.map_err(proto::Error::Llm)?;
+            let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
+            let t0 = std::time::Instant::now();
+            let response = llm.chat(req).await.map_err(proto::Error::Llm)?;
+            debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
 
             match response {
                 ChatResponse::Text(text) => {
@@ -283,14 +341,17 @@ impl AgentRuntime {
             let req = ChatRequest {
                 messages: messages.clone(),
                 tools: tool_defs.clone(),
-                model: self.model.clone(),
+                model: self.model.read().expect("model lock").clone(),
             };
 
             // Progress: LLM thinking
             let _ = progress_tx.try_send(proto::ProgressEvent::LlmThinking { round });
 
             debug!("LLM call (round {round}) for session {session_id}");
-            let response = self.llm.chat(req).await.map_err(proto::Error::Llm)?;
+            let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
+            let t0 = std::time::Instant::now();
+            let response = llm.chat(req).await.map_err(proto::Error::Llm)?;
+            debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
 
             match response {
                 ChatResponse::Text(text) => {
@@ -564,7 +625,14 @@ mod tests {
             "assistant reply".to_string(),
         )]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory.clone(),
+            "mock-provider",
+            "mock-model",
+            4,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-1");
 
@@ -594,7 +662,14 @@ mod tests {
             ChatResponse::Text("done".to_string()),
         ]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory.clone(),
+            "mock-provider",
+            "mock-model",
+            4,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-2");
 
@@ -625,7 +700,14 @@ mod tests {
         };
         let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(vec![tool_call])]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 1);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            1,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-3");
 
@@ -643,7 +725,14 @@ mod tests {
     async fn process_propagates_llm_provider_error() {
         let llm = Arc::new(MockLlm::new(Vec::new()));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 2);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            2,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-llm-error");
 
@@ -666,7 +755,14 @@ mod tests {
             delay: std::time::Duration::from_millis(200),
         });
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 2);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            2,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-llm-timeout");
 
@@ -683,7 +779,14 @@ mod tests {
     async fn process_with_progress_emits_thinking_and_returns_text() {
         let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            4,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-progress-1");
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -713,7 +816,14 @@ mod tests {
             ChatResponse::Text("final".to_string()),
         ]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            4,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-progress-2");
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
@@ -806,7 +916,14 @@ mod tests {
     async fn record_worker_report_persists_tool_message() {
         let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm, build_registry(), memory.clone(), "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory.clone(),
+            "mock-provider",
+            "mock-model",
+            4,
+        );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-worker-report");
         let report = proto::WorkerReport::new(
@@ -861,5 +978,55 @@ exit_code: 0"
 
         let empty = build_system_prompt(Some(""));
         assert!(!empty.contains("Available Skills"));
+    }
+
+    #[tokio::test]
+    async fn register_and_switch_provider() {
+        let llm1 = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "from-first".to_string(),
+        )]));
+        let llm2 = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "from-second".to_string(),
+        )]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm1, build_registry(), memory, "first", "mock-model", 4);
+        assert_eq!(runtime.active_provider_name(), "first");
+
+        runtime.register_provider("second", llm2);
+        runtime
+            .switch_provider("second")
+            .expect("switch should succeed");
+        assert_eq!(runtime.active_provider_name(), "second");
+
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-switch");
+        let text = runtime
+            .process(&channel, &session, "hello", None)
+            .await
+            .expect("process should succeed");
+        assert_eq!(text, "from-second");
+    }
+
+    #[test]
+    fn switch_unknown_provider_fails() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let memory = rt.block_on(open_temp_memory());
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "default", "m", 1);
+        let err = runtime.switch_provider("nonexistent");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("unknown provider"));
+    }
+
+    #[test]
+    fn registered_providers_returns_all_names() {
+        let llm1 = Arc::new(MockLlm::new(vec![]));
+        let llm2 = Arc::new(MockLlm::new(vec![]));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let memory = rt.block_on(open_temp_memory());
+        let runtime = AgentRuntime::new(llm1, build_registry(), memory, "alpha", "m", 1);
+        runtime.register_provider("beta", llm2);
+        let names = runtime.registered_providers();
+        assert_eq!(names, vec!["alpha", "beta"]);
     }
 }

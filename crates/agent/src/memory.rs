@@ -156,7 +156,43 @@ impl SqliteMemory {
             .collect())
     }
 
-    /// Update session timestamp
+    pub async fn list_sessions_with_preview(
+        &self,
+    ) -> Result<Vec<(SessionId, String, chrono::DateTime<chrono::Utc>, String)>, DatabaseError>
+    {
+        let rows = sqlx::query(
+            r#"SELECT s.id, s.channel_id, s.updated_at,
+                      COALESCE(
+                        (SELECT content FROM messages
+                         WHERE session_id = s.id AND role = 'user'
+                         ORDER BY created_at ASC LIMIT 1),
+                        ''
+                      ) AS preview
+               FROM sessions s
+               ORDER BY s.updated_at DESC"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let updated_str: String = row.get("updated_at");
+                let updated = chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let preview: String = row.get("preview");
+                (
+                    SessionId::from(row.get::<String, _>("id")),
+                    row.get::<String, _>("channel_id"),
+                    updated,
+                    preview,
+                )
+            })
+            .collect())
+    }
+
     pub async fn touch_session(&self, session_id: &SessionId) -> Result<(), DatabaseError> {
         sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
             .bind(chrono::Utc::now().to_rfc3339())

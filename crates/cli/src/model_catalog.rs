@@ -2,9 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use tracing::debug;
 
 pub const OPENCODE_PROVIDER: &str = "opencode";
-pub const OPENCODE_MODELS_URL: &str = "https://opencode.ai/zen/v1/models";
+#[allow(dead_code)]
+pub const OPENCODE_MODELS_URL: &str = "https://opencode.ai/zen/v1/model";
 const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +18,7 @@ pub enum ModelStatus {
 }
 
 impl ModelStatus {
+    #[cfg_attr(test, allow(dead_code))]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Stable => "stable",
@@ -33,6 +36,7 @@ pub enum ModelSource {
 }
 
 impl ModelSource {
+    #[cfg_attr(test, allow(dead_code))]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Docs => "docs",
@@ -44,6 +48,8 @@ impl ModelSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
     pub id: String,
+    #[serde(default)]
+    pub provider: String,
     pub recommended_for_coding: bool,
     pub status: ModelStatus,
     pub source: ModelSource,
@@ -55,6 +61,12 @@ pub struct CatalogLoadResult {
     pub provider: String,
     pub entries: Vec<ModelCatalogEntry>,
     pub sync_status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MultiCatalogLoadResult {
+    pub entries: Vec<ModelCatalogEntry>,
+    pub sync_statuses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,64 +100,156 @@ struct ZenModel {
     id: String,
 }
 
-pub fn seed_models() -> Vec<ModelCatalogEntry> {
-    vec![
-        ModelCatalogEntry {
-            id: "gpt-5-codex".to_string(),
+pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
+    let p = provider.to_string();
+    match provider {
+        "anthropic" => vec![
+            ModelCatalogEntry {
+                id: "claude-sonnet-4-6".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "claude-opus-4-6".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "claude-haiku-4-5".to_string(),
+                provider: p,
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+        ],
+        "openai" | "opencode" => vec![
+            ModelCatalogEntry {
+                id: "gpt-5.3-codex".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-5.3-codex-spark".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "codex-mini-latest".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "o3".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "o3-mini".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "o4-mini".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4.1".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4.1-mini".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4.1-nano".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o-mini".to_string(),
+                provider: p,
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+        ],
+        "together" => vec![ModelCatalogEntry {
+            id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".to_string(),
+            provider: p,
             recommended_for_coding: true,
             status: ModelStatus::Stable,
             source: ModelSource::Docs,
-            available: false,
-        },
-        ModelCatalogEntry {
-            id: "claude-sonnet-4.5".to_string(),
+            available: true,
+        }],
+        "openrouter" => vec![ModelCatalogEntry {
+            id: "openai/gpt-4o".to_string(),
+            provider: p,
             recommended_for_coding: true,
             status: ModelStatus::Stable,
             source: ModelSource::Docs,
-            available: false,
-        },
-        ModelCatalogEntry {
-            id: "claude-sonnet-4.6".to_string(),
+            available: true,
+        }],
+        "ollama" => vec![ModelCatalogEntry {
+            id: "llama3.2".to_string(),
+            provider: p,
             recommended_for_coding: true,
             status: ModelStatus::Stable,
             source: ModelSource::Docs,
-            available: false,
-        },
-        ModelCatalogEntry {
-            id: "gemini-3.1-pro".to_string(),
-            recommended_for_coding: true,
-            status: ModelStatus::Stable,
-            source: ModelSource::Docs,
-            available: false,
-        },
-        ModelCatalogEntry {
-            id: "qwen3-coder".to_string(),
-            recommended_for_coding: true,
-            status: ModelStatus::Unknown,
-            source: ModelSource::Docs,
-            available: false,
-        },
-        ModelCatalogEntry {
-            id: "devstral".to_string(),
-            recommended_for_coding: true,
-            status: ModelStatus::Unknown,
-            source: ModelSource::Docs,
-            available: false,
-        },
-    ]
+            available: true,
+        }],
+        _ => vec![],
+    }
 }
 
+#[allow(dead_code)]
 pub fn default_cache_path() -> PathBuf {
-    if let Ok(path) = std::env::var("openpista_MODELS_CACHE_PATH") {
-        return PathBuf::from(path);
-    }
-
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".openpista")
-        .join("cache")
-        .join("models")
-        .join("opencode.json")
+    provider_cache_path(OPENCODE_PROVIDER)
 }
 
 pub fn model_sections(entries: &[ModelCatalogEntry], query: &str, show_all: bool) -> ModelSections {
@@ -194,59 +298,15 @@ pub fn filtered_entries(
     result
 }
 
-pub async fn load_opencode_catalog(refresh: bool) -> CatalogLoadResult {
-    let cache_path = default_cache_path();
-
-    if !refresh && let Some(cached) = load_cache_if_fresh(&cache_path) {
-        return CatalogLoadResult {
-            provider: OPENCODE_PROVIDER.to_string(),
-            entries: cached.entries,
-            sync_status: format!(
-                "Using cache (fetched_at={})",
-                cached.fetched_at.format("%Y-%m-%d %H:%M UTC")
-            ),
-        };
-    }
-
-    match fetch_remote_model_ids().await {
-        Ok(ids) => {
-            let entries = merge_seed_with_remote(&seed_models(), &ids);
-            let now = Utc::now();
-            let cached = CachedCatalog {
-                fetched_at: now,
-                entries: entries.clone(),
-            };
-            let _ = save_cache(&cache_path, &cached);
-
-            CatalogLoadResult {
-                provider: OPENCODE_PROVIDER.to_string(),
-                entries,
-                sync_status: format!(
-                    "Synced from remote ({} models, fetched_at={})",
-                    ids.len(),
-                    now.format("%Y-%m-%d %H:%M UTC")
-                ),
-            }
-        }
-        Err(err) => {
-            if let Some(cached) = load_cache(&cache_path) {
-                CatalogLoadResult {
-                    provider: OPENCODE_PROVIDER.to_string(),
-                    entries: cached.entries,
-                    sync_status: format!("Remote failed, using cache ({})", sanitize_error(&err)),
-                }
-            } else {
-                CatalogLoadResult {
-                    provider: OPENCODE_PROVIDER.to_string(),
-                    entries: seed_models(),
-                    sync_status: format!(
-                        "Remote/cache unavailable, using embedded seed list ({})",
-                        sanitize_error(&err)
-                    ),
-                }
-            }
-        }
-    }
+#[allow(dead_code)]
+pub async fn load_opencode_catalog(refresh: bool, api_key: &str) -> CatalogLoadResult {
+    load_catalog(
+        OPENCODE_PROVIDER,
+        Some("https://opencode.ai/zen/v1"),
+        api_key,
+        refresh,
+    )
+    .await
 }
 
 pub fn merge_seed_with_remote(
@@ -254,6 +314,7 @@ pub fn merge_seed_with_remote(
     remote_ids: &[String],
 ) -> Vec<ModelCatalogEntry> {
     let remote_set: BTreeSet<String> = remote_ids.iter().cloned().collect();
+    let default_provider = seed.first().map(|e| e.provider.clone()).unwrap_or_default();
     let mut by_id: BTreeMap<String, ModelCatalogEntry> = seed
         .iter()
         .cloned()
@@ -269,6 +330,7 @@ pub fn merge_seed_with_remote(
             remote_id.to_string(),
             ModelCatalogEntry {
                 id: remote_id.to_string(),
+                provider: default_provider.clone(),
                 recommended_for_coding: false,
                 status: ModelStatus::Unknown,
                 source: ModelSource::Api,
@@ -279,9 +341,9 @@ pub fn merge_seed_with_remote(
 
     for entry in by_id.values_mut() {
         match entry.source {
-            ModelSource::Docs => {
-                entry.available = remote_set.contains(&entry.id);
-            }
+            // Docs-sourced model are manually curated and always available.
+            // The remote API is used to discover additional model, not to gate known ones.
+            ModelSource::Docs => {}
             ModelSource::Api => {
                 entry.available = true;
             }
@@ -289,6 +351,232 @@ pub fn merge_seed_with_remote(
     }
 
     by_id.into_values().collect()
+}
+
+fn models_url(provider: &str, base_url: Option<&str>) -> String {
+    match (provider, base_url) {
+        ("anthropic", _) => "https://api.anthropic.com/v1/models".to_string(),
+        (_, Some(url)) => {
+            let trimmed = url.trim_end_matches('/');
+            format!("{trimmed}/models")
+        }
+        (_, None) => "https://api.openai.com/v1/models".to_string(),
+    }
+}
+
+fn provider_cache_path(provider_name: &str) -> PathBuf {
+    if let Ok(path) = std::env::var("openpista_MODELS_CACHE_PATH") {
+        return PathBuf::from(path);
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".openpista")
+        .join("cache")
+        .join("models")
+        .join(format!("{provider_name}.json"))
+}
+
+async fn fetch_remote_model_ids_from(url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    debug!(url = %url, has_key = %!api_key.is_empty(), "Fetching models");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("build client: {err}"))?;
+
+    let mut req = client.get(url);
+    if !api_key.is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|err| format!("request to {url} failed: {err}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("read body from {url}: {err}"))?;
+
+    if !status.is_success() {
+        let preview: String = body.chars().take(200).collect();
+        debug!(url = %url, status = %status.as_u16(), body = %preview, "Models fetch failed");
+        return Err(format!(
+            "HTTP {} from {}: {}",
+            status.as_u16(),
+            url,
+            preview
+        ));
+    }
+
+    let parsed: ZenModelsResponse =
+        serde_json::from_str(&body).map_err(|err| format!("json decode from {url}: {err}"))?;
+
+    let mut ids: Vec<String> = parsed
+        .data
+        .into_iter()
+        .map(|item| item.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    debug!(url = %url, count = %ids.len(), "Models fetched");
+    Ok(ids)
+}
+
+async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String> {
+    let url = "https://api.anthropic.com/v1/models?limit=1000";
+    debug!(url = %url, "Fetching Anthropic models");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("build client: {err}"))?;
+
+    let response = client
+        .get(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|err| format!("request to {url} failed: {err}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("read body from {url}: {err}"))?;
+
+    if !status.is_success() {
+        let preview: String = body.chars().take(200).collect();
+        debug!(url = %url, status = %status.as_u16(), body = %preview, "Anthropic models fetch failed");
+        return Err(format!(
+            "HTTP {} from {}: {}",
+            status.as_u16(),
+            url,
+            preview
+        ));
+    }
+
+    let parsed: ZenModelsResponse =
+        serde_json::from_str(&body).map_err(|err| format!("json decode from {url}: {err}"))?;
+
+    let mut ids: Vec<String> = parsed
+        .data
+        .into_iter()
+        .map(|item| item.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    debug!(url = %url, count = %ids.len(), "Anthropic models fetched");
+    Ok(ids)
+}
+
+
+/// Backfill empty `provider` fields on cached entries that were serialized before
+/// the provider field was added to `ModelCatalogEntry`.
+fn backfill_provider(mut entries: Vec<ModelCatalogEntry>, provider: &str) -> Vec<ModelCatalogEntry> {
+    for entry in &mut entries {
+        if entry.provider.is_empty() {
+            entry.provider = provider.to_string();
+        }
+    }
+    entries
+}
+
+pub async fn load_catalog(
+    provider_name: &str,
+    base_url: Option<&str>,
+    api_key: &str,
+    refresh: bool,
+) -> CatalogLoadResult {
+    debug!(provider = %provider_name, refresh = %refresh, "Loading model catalog");
+    if api_key.is_empty() {
+        debug!(provider = %provider_name, "API key is empty; fetch will likely fail");
+    }
+    let cache_path = provider_cache_path(provider_name);
+
+    if !refresh && let Some(cached) = load_cache_if_fresh(&cache_path) {
+        debug!(provider = %provider_name, entries = %cached.entries.len(), "Using cached catalog");
+        return CatalogLoadResult {
+            provider: provider_name.to_string(),
+            entries: backfill_provider(cached.entries, provider_name),
+            sync_status: format!(
+                "Using cache (fetched_at={})",
+                cached.fetched_at.format("%Y-%m-%d %H:%M UTC")
+            ),
+        };
+    }
+
+    let seed = seed_models_for_provider(provider_name);
+    let fetch_result = if provider_name == "anthropic" {
+        fetch_anthropic_model_ids(api_key).await
+    } else {
+        let url = models_url(provider_name, base_url);
+        fetch_remote_model_ids_from(&url, api_key).await
+    };
+    match fetch_result {
+        Ok(ids) => {
+            let entries = merge_seed_with_remote(&seed, &ids);
+            debug!(provider = %provider_name, remote = %ids.len(), merged = %entries.len(), "Catalog synced from remote");
+            let now = Utc::now();
+            let cached = CachedCatalog {
+                fetched_at: now,
+                entries: entries.clone(),
+            };
+            let _ = save_cache(&cache_path, &cached);
+
+            CatalogLoadResult {
+                provider: provider_name.to_string(),
+                entries,
+                sync_status: format!(
+                    "Synced from {} ({} models, fetched_at={})",
+                    provider_name,
+                    ids.len(),
+                    now.format("%Y-%m-%d %H:%M UTC")
+                ),
+            }
+        }
+        Err(err) => {
+            debug!(provider = %provider_name, error = %err, "Catalog fetch failed, using fallback");
+            if let Some(cached) = load_cache(&cache_path) {
+                CatalogLoadResult {
+                    provider: provider_name.to_string(),
+                    entries: backfill_provider(cached.entries, provider_name),
+                    sync_status: format!("Fetch failed: {err} — using cache"),
+                }
+            } else {
+                CatalogLoadResult {
+                    provider: provider_name.to_string(),
+                    entries: seed,
+                    sync_status: format!("Fetch failed: {err} — using defaults"),
+                }
+            }
+        }
+    }
+}
+
+/// Loads model catalogs from multiple providers and merges them into a single list.
+pub async fn load_catalog_multi(
+    providers: &[(String, Option<String>, String)],
+) -> MultiCatalogLoadResult {
+    let mut all_entries = Vec::new();
+    let mut sync_statuses = Vec::new();
+
+    for (provider_name, base_url, api_key) in providers {
+        let result = load_catalog(provider_name, base_url.as_deref(), api_key, false).await;
+        sync_statuses.push(format!("{}: {}", provider_name, result.sync_status));
+        all_entries.extend(result.entries);
+    }
+
+    MultiCatalogLoadResult {
+        entries: all_entries,
+        sync_statuses,
+    }
 }
 
 fn matches_query(haystack: &str, query: &str) -> bool {
@@ -299,10 +587,6 @@ fn matches_query(haystack: &str, query: &str) -> bool {
     haystack
         .to_ascii_lowercase()
         .contains(&trimmed.to_ascii_lowercase())
-}
-
-fn sanitize_error(err: &str) -> String {
-    err.replace('\n', " ")
 }
 
 fn load_cache_if_fresh(path: &std::path::Path) -> Option<CachedCatalog> {
@@ -331,34 +615,6 @@ fn save_cache(path: &std::path::Path, cached: &CachedCatalog) -> Result<(), std:
     std::fs::write(path, payload)
 }
 
-async fn fetch_remote_model_ids() -> Result<Vec<String>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|err| format!("build client: {err}"))?;
-
-    let body: ZenModelsResponse = client
-        .get(OPENCODE_MODELS_URL)
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("http status: {err}"))?
-        .json()
-        .await
-        .map_err(|err| format!("json decode: {err}"))?;
-
-    let mut ids: Vec<String> = body
-        .data
-        .into_iter()
-        .map(|item| item.id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect();
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,12 +622,12 @@ mod tests {
 
     #[test]
     fn merge_seed_with_remote_marks_availability_and_adds_remote_only() {
-        let seed = seed_models();
+        let seed = seed_models_for_provider("openai");
         let merged = merge_seed_with_remote(
             &seed,
             &[
                 "gpt-5-codex".to_string(),
-                "claude-sonnet-4.6".to_string(),
+                "claude-sonnet-4-6".to_string(),
                 "gpt-5.2-codex".to_string(),
             ],
         );
@@ -380,10 +636,14 @@ mod tests {
             .into_iter()
             .map(|entry| (entry.id.clone(), entry))
             .collect();
+        // Remote-only models are added and marked available.
         assert!(by_id["gpt-5-codex"].available);
-        assert!(by_id["claude-sonnet-4.6"].available);
-        assert!(!by_id["qwen3-coder"].available);
+        assert!(by_id["claude-sonnet-4-6"].available);
+        // Docs-sourced seed model are always available regardless of remote response.
+        assert!(by_id["gpt-4o"].available);
+        // Api-sourced (remote-only) model are also available.
         assert_eq!(by_id["gpt-5.2-codex"].source, ModelSource::Api);
+        assert!(by_id["gpt-5.2-codex"].available);
         assert!(!by_id["gpt-5.2-codex"].recommended_for_coding);
     }
 
@@ -392,6 +652,7 @@ mod tests {
         let entries = vec![
             ModelCatalogEntry {
                 id: "gpt-5-codex".into(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
                 source: ModelSource::Docs,
@@ -399,6 +660,7 @@ mod tests {
             },
             ModelCatalogEntry {
                 id: "gpt-5.2".into(),
+                provider: String::new(),
                 recommended_for_coding: false,
                 status: ModelStatus::Unknown,
                 source: ModelSource::Api,
@@ -419,6 +681,7 @@ mod tests {
         let entries = vec![
             ModelCatalogEntry {
                 id: "a".into(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
                 source: ModelSource::Docs,
@@ -426,6 +689,7 @@ mod tests {
             },
             ModelCatalogEntry {
                 id: "b".into(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
                 source: ModelSource::Docs,
@@ -433,6 +697,7 @@ mod tests {
             },
             ModelCatalogEntry {
                 id: "c".into(),
+                provider: String::new(),
                 recommended_for_coding: false,
                 status: ModelStatus::Unknown,
                 source: ModelSource::Api,
@@ -451,6 +716,7 @@ mod tests {
         let entries = vec![
             ModelCatalogEntry {
                 id: "gpt-5-codex".into(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
                 source: ModelSource::Docs,
@@ -458,6 +724,7 @@ mod tests {
             },
             ModelCatalogEntry {
                 id: "devstral".into(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: ModelStatus::Unknown,
                 source: ModelSource::Docs,
@@ -479,7 +746,7 @@ mod tests {
 
         let cached = CachedCatalog {
             fetched_at: Utc::now(),
-            entries: seed_models(),
+            entries: seed_models_for_provider("openai"),
         };
 
         save_cache(&path, &cached).expect("save cache");
@@ -488,7 +755,7 @@ mod tests {
 
         let stale = CachedCatalog {
             fetched_at: Utc::now() - Duration::seconds(CACHE_TTL_SECS + 1),
-            entries: seed_models(),
+            entries: seed_models_for_provider("openai"),
         };
         save_cache(&path, &stale).expect("save stale cache");
         assert!(load_cache_if_fresh(&path).is_none());

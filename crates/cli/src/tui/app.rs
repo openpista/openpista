@@ -1,21 +1,64 @@
 //! TUI application state, rendering, and input handling.
 #![allow(dead_code)]
 
+use super::theme::THEME;
 use crate::auth_picker::{self, AuthLoginIntent, AuthMethodChoice, LoginBrowseStep};
-use crate::config::{LoginAuthMode, ProviderCategory};
+use crate::config::LoginAuthMode;
 use crate::model_catalog;
 use proto::{ChannelId, ProgressEvent, SessionId};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::collections::HashSet;
 
 /// Spinner animation frames (Braille pattern).
 const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+
+// ─── Command palette ──────────────────────────────────────────
+
+struct SlashCommand {
+    name: &'static str,
+    description: &'static str,
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/model",
+        description: "Browse & select model",
+    },
+    SlashCommand {
+        name: "/model list",
+        description: "Print available models to chat",
+    },
+    SlashCommand {
+        name: "/login",
+        description: "Change API credentials",
+    },
+    SlashCommand {
+        name: "/connection",
+        description: "Change credentials (alias)",
+    },
+    SlashCommand {
+        name: "/clear",
+        description: "Clear conversation history",
+    },
+    SlashCommand {
+        name: "/help",
+        description: "Show available commands",
+    },
+    SlashCommand {
+        name: "/quit",
+        description: "Exit TUI",
+    },
+    SlashCommand {
+        name: "/exit",
+        description: "Exit TUI",
+    },
+];
 
 // ─── Data types ──────────────────────────────────────────────
 
@@ -127,6 +170,15 @@ pub struct AuthSubmission {
     pub api_key: String,
 }
 
+/// A session entry displayed in the sidebar.
+#[derive(Debug, Clone)]
+pub struct SessionEntry {
+    pub id: SessionId,
+    pub channel_id: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub preview: String,
+}
+
 // ─── TuiApp ──────────────────────────────────────────────────
 
 /// Full state for the TUI session.
@@ -170,6 +222,28 @@ pub struct TuiApp {
     model_refresh_requested: bool,
     /// Pending auth submission from login browser.
     pending_auth_intent: Option<AuthLoginIntent>,
+    /// Selected row in the command palette popup.
+    command_palette_cursor: usize,
+    /// Provider name used for auth status check (e.g. "openai", "opencode").
+    pub provider_name: String,
+    /// Set when the user selects a model in the model browser; consumed by the event loop. (model_id, provider_name)
+    pending_model_change: Option<(String, String)>,
+    /// Session list for sidebar display.
+    pub session_list: Vec<SessionEntry>,
+    /// Index of sidebar item under mouse hover.
+    pub sidebar_hover: Option<usize>,
+    /// Scroll offset for sidebar.
+    pub sidebar_scroll: u16,
+    /// Whether the sidebar is visible.
+    pub sidebar_visible: bool,
+    /// Current mouse text selection state.
+    pub text_selection: super::selection::TextSelection,
+    /// Bounding rect of the chat widget (set each render; used for mouse hit-testing).
+    pub chat_area: Option<Rect>,
+    /// Character grid mirroring the chat render layout (set each render; used for text extraction).
+    pub chat_text_grid: Vec<Vec<char>>,
+    /// Scroll value after clamping to max_scroll (set each render; used for text extraction).
+    pub chat_scroll_clamped: u16,
 }
 
 impl TuiApp {
@@ -178,6 +252,7 @@ impl TuiApp {
         model_name: impl Into<String>,
         session_id: SessionId,
         channel_id: ChannelId,
+        provider_name: impl Into<String>,
     ) -> Self {
         Self {
             messages: Vec::new(),
@@ -199,7 +274,75 @@ impl TuiApp {
             model_provider: model_catalog::OPENCODE_PROVIDER.to_string(),
             model_refresh_requested: false,
             pending_auth_intent: None,
+            command_palette_cursor: 0,
+            provider_name: provider_name.into(),
+            pending_model_change: None,
+            session_list: Vec::new(),
+            sidebar_hover: None,
+            sidebar_scroll: 0,
+            sidebar_visible: true,
+            text_selection: super::selection::TextSelection::new(),
+            chat_area: None,
+            chat_text_grid: Vec::new(),
+            chat_scroll_clamped: 0,
         }
+    }
+
+    /// Returns `true` if the configured provider has a valid (non-expired) stored credential.
+    pub fn is_authenticated(&self) -> bool {
+        let creds = crate::auth::Credentials::load();
+        creds
+            .get(&self.provider_name)
+            .is_some_and(|c| !c.is_expired())
+    }
+
+    /// Takes the pending model change set by the model browser on selection.
+    pub fn take_pending_model_change(&mut self) -> Option<(String, String)> {
+        self.pending_model_change.take()
+    }
+
+    pub fn compute_sidebar_area(&self, full_area: Rect) -> Option<Rect> {
+        if !self.sidebar_visible || self.screen != Screen::Chat {
+            return None;
+        }
+        let h_chunks = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(crate::tui::sidebar::sidebar_width()),
+        ])
+        .split(full_area);
+        Some(h_chunks[1])
+    }
+
+    // ── Command palette ──────────────────────────────────────
+
+    pub(crate) fn is_palette_active(&self) -> bool {
+        self.state == AppState::Idle && self.input.starts_with('/')
+    }
+
+    fn palette_filtered_commands(&self) -> Vec<&'static SlashCommand> {
+        let q = self.input.to_ascii_lowercase();
+        SLASH_COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(q.as_str()))
+            .collect()
+    }
+
+    /// Resolves the palette selection into `self.input` and closes the palette.
+    /// Returns the command name so the caller can process it through the normal
+    /// command pipeline (e.g. `/models` needs async model loading in event.rs).
+    pub fn take_palette_command(&mut self) -> Option<String> {
+        if !self.is_palette_active() {
+            return None;
+        }
+        let name = self
+            .palette_filtered_commands()
+            .get(self.command_palette_cursor)
+            .map(|c| c.name.to_string())?;
+        self.input = name.clone();
+        self.cursor_pos = self.input.len();
+        self.command_palette_cursor = 0;
+        self.screen = Screen::Chat;
+        Some(name)
     }
 
     // ── State mutations ──────────────────────────────────────
@@ -244,7 +387,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/models - browse model catalog (search with s, refresh with r)\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -256,7 +399,7 @@ impl TuiApp {
                     Some(seed)
                 });
             }
-            "/models" => {
+            "/model" => {
                 self.push_assistant(
                     "Loading model catalog... (inside browser: s or / to search, r to refresh)"
                         .to_string(),
@@ -345,12 +488,16 @@ impl TuiApp {
     }
 
     pub fn reopen_openai_method_with_error(&mut self, message: String) {
+        self.reopen_method_selector_with_error("openai", message);
+    }
+
+    pub fn reopen_method_selector_with_error(&mut self, provider: &str, message: String) {
         self.state = AppState::LoginBrowsing {
-            query: "openai".to_string(),
+            query: provider.to_string(),
             cursor: 0,
             scroll: 0,
             step: LoginBrowseStep::SelectMethod,
-            selected_provider: Some("openai".to_string()),
+            selected_provider: Some(provider.to_string()),
             selected_method: None,
             input_buffer: String::new(),
             masked_buffer: String::new(),
@@ -427,7 +574,7 @@ impl TuiApp {
             last_sync_status, ..
         } = &mut self.state
         {
-            *last_sync_status = "Refreshing models...".to_string();
+            *last_sync_status = "Refreshing model...".to_string();
         }
     }
 
@@ -442,13 +589,15 @@ impl TuiApp {
         let all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
         let recommended_keys: HashSet<&str> =
             recommended.iter().map(|entry| entry.id.as_str()).collect();
-        let all_models: Vec<_> = all_models
+        let other: Vec<_> = all_models
             .into_iter()
             .filter(|entry| !recommended_keys.contains(entry.id.as_str()))
             .collect();
         let mut rows = Vec::new();
         rows.extend(recommended);
-        rows.extend(all_models);
+        rows.extend(other);
+        // Only show model that are available.
+        rows.retain(|entry| entry.available);
         rows
     }
 
@@ -663,7 +812,9 @@ impl TuiApp {
                                             ));
                                         }
                                         LoginAuthMode::OAuth => {
-                                            if selected.name == "openai" {
+                                            if selected.name == "openai"
+                                                || selected.name == "anthropic"
+                                            {
                                                 *step = LoginBrowseStep::SelectMethod;
                                             } else {
                                                 pending_intent = Some(AuthLoginIntent {
@@ -756,13 +907,20 @@ impl TuiApp {
                         (KeyModifiers::CONTROL, KeyCode::Char('c')) => close_browser = true,
                         (_, KeyCode::Esc) => {
                             let provider = selected_provider.clone().unwrap_or_default();
-                            if provider == "openai"
-                                && matches!(selected_method, Some(AuthMethodChoice::ApiKey))
-                            {
-                                *step = LoginBrowseStep::SelectMethod;
-                                *cursor = 1;
-                            } else if let Some(entry) = auth_picker::provider_by_name(&provider) {
-                                if matches!(entry.auth_mode, LoginAuthMode::EndpointAndKey) {
+                            if let Some(entry) = auth_picker::provider_by_name(&provider) {
+                                if matches!(
+                                    auth_picker::provider_step_for_entry(&entry),
+                                    LoginBrowseStep::SelectMethod
+                                ) {
+                                    *step = LoginBrowseStep::SelectMethod;
+                                    *cursor =
+                                        if matches!(selected_method, Some(AuthMethodChoice::OAuth))
+                                        {
+                                            0
+                                        } else {
+                                            1
+                                        };
+                                } else if matches!(entry.auth_mode, LoginAuthMode::EndpointAndKey) {
                                     *step = LoginBrowseStep::InputEndpoint;
                                     input_buffer.clear();
                                     if let Some(saved_endpoint) = endpoint.as_ref() {
@@ -915,12 +1073,15 @@ impl TuiApp {
                     let visible = self.visible_model_entries(&query);
                     if let Some(selected) = visible.get(cursor) {
                         self.model_name = selected.id.clone();
+                        self.pending_model_change =
+                            Some((selected.id.clone(), selected.provider.clone()));
                         self.push_assistant(format!(
-                            "Selected model '{}' for this session.",
-                            selected.id
+                            "Selected model '{}' (provider: {}) for this session.",
+                            selected.id, selected.provider
                         ));
                     }
                 }
+                self.state = AppState::Idle;
                 return;
             }
 
@@ -934,10 +1095,37 @@ impl TuiApp {
 
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
-                if self.state == AppState::Idle {
+                if self.text_selection.is_active() {
+                    // Copy selected text then dismiss selection; do NOT quit.
+                    if let Some((start, end)) = self.text_selection.ordered_range() {
+                        let grid = self.chat_text_grid.clone();
+                        let scroll = self.chat_scroll_clamped;
+                        if let Some(text) =
+                            super::selection::extract_selected_text(&grid, start, end, scroll)
+                        {
+                            super::selection::copy_to_clipboard(&text);
+                        }
+                    }
+                    self.text_selection.clear();
+                } else if self.is_palette_active() {
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                    self.command_palette_cursor = 0;
+                } else if self.state == AppState::Idle {
                     self.should_quit = true;
                 } else if matches!(self.state, AppState::AuthPrompting { .. }) {
                     self.cancel_auth_prompt();
+                }
+            }
+            (_, KeyCode::Tab) if self.is_palette_active() => {
+                let cmd_name = self
+                    .palette_filtered_commands()
+                    .get(self.command_palette_cursor)
+                    .map(|c| c.name.to_string());
+                if let Some(name) = cmd_name {
+                    self.input = name.clone();
+                    self.cursor_pos = name.len();
+                    self.command_palette_cursor = 0;
                 }
             }
             (_, KeyCode::Enter) if self.state == AppState::Idle => {
@@ -950,6 +1138,7 @@ impl TuiApp {
             (_, KeyCode::Char(c)) if is_input_active => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
+                self.command_palette_cursor = 0;
             }
             (_, KeyCode::Backspace) if is_input_active => {
                 if self.cursor_pos > 0 {
@@ -960,6 +1149,7 @@ impl TuiApp {
                         .unwrap_or(0);
                     self.input.drain(prev..self.cursor_pos);
                     self.cursor_pos = prev;
+                    self.command_palette_cursor = 0;
                 }
             }
             (_, KeyCode::Left) if is_input_active => {
@@ -980,6 +1170,13 @@ impl TuiApp {
                         .unwrap_or(self.input.len());
                 }
             }
+            (_, KeyCode::Up) if self.is_palette_active() => {
+                self.command_palette_cursor = self.command_palette_cursor.saturating_sub(1);
+            }
+            (_, KeyCode::Down) if self.is_palette_active() => {
+                let max = self.palette_filtered_commands().len().saturating_sub(1);
+                self.command_palette_cursor = (self.command_palette_cursor + 1).min(max);
+            }
             (_, KeyCode::Up) => {
                 self.history_scroll = self.history_scroll.saturating_sub(1);
             }
@@ -999,7 +1196,7 @@ impl TuiApp {
     // ── Rendering ────────────────────────────────────────────
 
     /// Render the entire TUI into the given frame.
-    pub fn render(&self, frame: &mut Frame<'_>) {
+    pub fn render(&mut self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
         if matches!(self.state, AppState::LoginBrowsing { .. }) {
@@ -1022,19 +1219,34 @@ impl TuiApp {
                 crate::tui::status::render(self, frame, chunks[1]);
             }
             Screen::Chat => {
-                // Layout for chat: title(1) | history(fill) | status(1) | input(3)
+                let sidebar_w = if self.sidebar_visible {
+                    crate::tui::sidebar::sidebar_width()
+                } else {
+                    0
+                };
+                let h_chunks =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(sidebar_w)])
+                        .split(area);
+
+                let main_area = h_chunks[0];
+                let sidebar_area = h_chunks[1];
+
                 let chunks = Layout::vertical([
                     Constraint::Length(1),
                     Constraint::Min(0),
                     Constraint::Length(1),
                     Constraint::Length(3),
                 ])
-                .split(area);
+                .split(main_area);
 
                 self.render_title(frame, chunks[0]);
                 crate::tui::chat::render(self, frame, chunks[1]);
                 crate::tui::status::render(self, frame, chunks[2]);
                 self.render_input(frame, chunks[3]);
+
+                if self.sidebar_visible {
+                    crate::tui::sidebar::render(self, frame, sidebar_area);
+                }
             }
         }
     }
@@ -1046,7 +1258,7 @@ impl TuiApp {
             scroll,
             step,
             selected_provider,
-            selected_method: _,
+            selected_method,
             input_buffer,
             masked_buffer,
             last_error,
@@ -1068,12 +1280,12 @@ impl TuiApp {
                 Span::styled(
                     " Add credential ",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(THEME.browser_title)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     " /login or /connection ",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.fg_muted),
                 ),
             ])),
             chunks[0],
@@ -1089,49 +1301,48 @@ impl TuiApp {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     format!(" Search: {}", query),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.browser_search),
                 )));
 
                 let providers = self.visible_login_provider_entries(query);
+                let creds = crate::auth::Credentials::load();
                 if providers.is_empty() {
                     lines.push(Line::from(Span::styled(
                         format!(" No matches for '{}'.", query),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(THEME.warning),
                     )));
                 } else {
                     for (idx, entry) in providers.iter().enumerate() {
                         let selected = idx == *cursor;
                         let marker = if selected { "●" } else { "○" };
-                        let badge = match entry.category {
-                            ProviderCategory::Runtime => "runtime",
-                            ProviderCategory::Extension => "extension",
-                        };
-                        lines.push(Line::from(vec![
+                        let is_authed = creds.get(entry.name).is_some_and(|c| !c.is_expired());
+                        let mut spans = vec![
                             Span::styled(
                                 format!(" {} ", marker),
                                 if selected {
                                     Style::default()
-                                        .fg(Color::Cyan)
+                                        .fg(THEME.browser_selected_marker)
                                         .add_modifier(Modifier::BOLD)
                                 } else {
-                                    Style::default().fg(Color::DarkGray)
+                                    Style::default().fg(THEME.fg_muted)
                                 },
                             ),
                             Span::styled(
                                 entry.display_name,
                                 if selected {
-                                    Style::default()
-                                        .fg(Color::White)
-                                        .add_modifier(Modifier::BOLD)
+                                    Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD)
                                 } else {
-                                    Style::default().fg(Color::White)
+                                    Style::default().fg(THEME.fg)
                                 },
                             ),
-                            Span::styled(
-                                format!(" [{}]", badge),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
+                        ];
+                        if is_authed {
+                            spans.push(Span::styled(
+                                " ●",
+                                Style::default().fg(THEME.palette_auth_dot),
+                            ));
+                        }
+                        lines.push(Line::from(spans));
                     }
                 }
             }
@@ -1146,7 +1357,7 @@ impl TuiApp {
                         " Provider: {}",
                         selected_provider.as_deref().unwrap_or("openai")
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.fg_muted),
                 )));
                 let methods = [AuthMethodChoice::OAuth, AuthMethodChoice::ApiKey];
                 for (idx, method) in methods.iter().enumerate() {
@@ -1156,10 +1367,10 @@ impl TuiApp {
                             if selected { " ● " } else { " ○ " },
                             if selected {
                                 Style::default()
-                                    .fg(Color::Cyan)
+                                    .fg(THEME.browser_selected_marker)
                                     .add_modifier(Modifier::BOLD)
                             } else {
-                                Style::default().fg(Color::DarkGray)
+                                Style::default().fg(THEME.fg_muted)
                             },
                         ),
                         Span::styled(
@@ -1184,7 +1395,7 @@ impl TuiApp {
                         " Provider: {}",
                         selected_provider.as_deref().unwrap_or("provider")
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.fg_muted),
                 )));
                 lines.push(Line::from(Span::raw(format!(
                     " Endpoint: {}",
@@ -1192,8 +1403,20 @@ impl TuiApp {
                 ))));
             }
             LoginBrowseStep::InputApiKey => {
+                let is_code_display = matches!(selected_method, Some(AuthMethodChoice::OAuth));
+                let title = if is_code_display {
+                    " Enter authorization code "
+                } else {
+                    " Enter API key "
+                };
+                let label = if is_code_display { "Code" } else { "API key" };
+                let display = if is_code_display {
+                    input_buffer.as_str()
+                } else {
+                    masked_buffer.as_str()
+                };
                 lines.push(Line::from(Span::styled(
-                    " Enter API key ",
+                    title,
                     Style::default().add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1202,18 +1425,21 @@ impl TuiApp {
                         " Provider: {}",
                         selected_provider.as_deref().unwrap_or("provider")
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(THEME.fg_muted),
                 )));
+                if is_code_display {
+                    lines.push(Line::from(Span::styled(
+                        " Paste the code shown in your browser after authorizing.",
+                        Style::default().fg(THEME.warning),
+                    )));
+                }
                 if let Some(endpoint) = endpoint {
                     lines.push(Line::from(Span::styled(
                         format!(" Endpoint: {}", endpoint),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(THEME.fg_muted),
                     )));
                 }
-                lines.push(Line::from(Span::raw(format!(
-                    " API key: {}",
-                    masked_buffer
-                ))));
+                lines.push(Line::from(Span::raw(format!(" {}: {}", label, display))));
             }
         }
 
@@ -1221,7 +1447,9 @@ impl TuiApp {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("Error: {}", error),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(THEME.error)
+                    .add_modifier(Modifier::BOLD),
             )));
         }
 
@@ -1233,7 +1461,7 @@ impl TuiApp {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(THEME.fg_muted)),
             )
             .wrap(Wrap { trim: false })
             .scroll((effective_scroll, 0));
@@ -1244,14 +1472,14 @@ impl TuiApp {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " ↑/↓ to select • Enter: confirm • Type: to search/input ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.browser_footer),
             )),
             footer[0],
         );
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " Esc: back/close • j/k: move • PgUp/PgDn: page ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.browser_footer),
             )),
             footer[1],
         );
@@ -1266,11 +1494,19 @@ impl TuiApp {
                 frame.set_cursor_position((chunks[1].x + 12 + cursor_col, chunks[1].y + 4));
             }
             LoginBrowseStep::InputApiKey => {
-                let cursor_col = masked_buffer.chars().count() as u16;
-                let endpoint_offset = if endpoint.is_some() { 1 } else { 0 };
+                let is_code_display = matches!(selected_method, Some(AuthMethodChoice::OAuth));
+                let display_len = if is_code_display {
+                    input_buffer.chars().count()
+                } else {
+                    masked_buffer.chars().count()
+                };
+                // " Code: " = 7, " API key: " = 10
+                let label_offset: u16 = if is_code_display { 8 } else { 11 };
+                let hint_offset: u16 = if is_code_display { 1 } else { 0 };
+                let endpoint_offset: u16 = if endpoint.is_some() { 1 } else { 0 };
                 frame.set_cursor_position((
-                    chunks[1].x + 11 + cursor_col,
-                    chunks[1].y + 4 + endpoint_offset,
+                    chunks[1].x + label_offset + display_len as u16,
+                    chunks[1].y + 4 + hint_offset + endpoint_offset,
                 ));
             }
             LoginBrowseStep::SelectMethod => {}
@@ -1289,12 +1525,7 @@ impl TuiApp {
             return;
         };
 
-        let summary = model_catalog::model_summary(&self.model_entries, query, true);
-        let recommended = model_catalog::filtered_entries(&self.model_entries, query, false);
-        let mut all_models = model_catalog::filtered_entries(&self.model_entries, query, true);
-        let recommended_ids: HashSet<&str> =
-            recommended.iter().map(|entry| entry.id.as_str()).collect();
-        all_models.retain(|entry| !recommended_ids.contains(entry.id.as_str()));
+        let entries = self.visible_model_entries(query);
 
         let chunks = Layout::vertical([
             Constraint::Length(1),
@@ -1307,140 +1538,69 @@ impl TuiApp {
             Span::styled(
                 " Models ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(THEME.browser_title)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    " provider:{}  total:{} matched:{} recommended:{} available:{} ",
-                    self.model_provider,
-                    summary.total,
-                    summary.matched,
-                    summary.recommended,
-                    summary.available
-                ),
-                Style::default().fg(Color::DarkGray),
+                format!("({}) ", self.model_provider),
+                Style::default().fg(THEME.fg_muted),
             ),
             Span::styled(
                 format!(" {} ", last_sync_status),
-                Style::default().fg(Color::Green),
+                Style::default().fg(if last_sync_status.starts_with("Offline") {
+                    THEME.warning
+                } else {
+                    THEME.fg_muted
+                }),
             ),
         ]);
         frame.render_widget(Paragraph::new(header), chunks[0]);
 
         let mut lines: Vec<Line<'_>> = Vec::new();
         let mut visible_index = 0usize;
-        let no_matches =
-            !query.trim().is_empty() && recommended.is_empty() && all_models.is_empty();
-        if no_matches {
+        if entries.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("No matches for '{}'.", query),
-                Style::default().fg(Color::Yellow),
+                if query.trim().is_empty() {
+                    "  No models available.".to_string()
+                } else {
+                    format!("  No matches for '{}'.", query)
+                },
+                Style::default().fg(THEME.warning),
             )));
         } else {
-            lines.push(Line::from(Span::styled(
-                " Recommended ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            if recommended.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (none)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            } else {
-                for entry in recommended {
-                    let selected = visible_index == *cursor;
-                    let id_color = if query.trim().is_empty() {
-                        Color::White
-                    } else {
-                        Color::Yellow
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            if selected {
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
+            for entry in entries {
+                let selected = visible_index == *cursor;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if selected { "› " } else { "  " },
+                        if selected {
+                            Style::default()
+                                .fg(THEME.browser_selected_marker)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(THEME.fg_muted)
+                        },
+                    ),
+                    Span::styled(
+                        entry.id,
+                        Style::default()
+                            .fg(if query.trim().is_empty() {
+                                THEME.fg
                             } else {
-                                Style::default().fg(Color::DarkGray)
-                            },
-                        ),
-                        Span::styled(
-                            entry.id,
-                            Style::default().fg(id_color).add_modifier(if selected {
+                                THEME.warning
+                            })
+                            .add_modifier(if selected {
                                 Modifier::BOLD
                             } else {
                                 Modifier::empty()
                             }),
-                        ),
-                        Span::styled(
-                            format!(
-                                "  [status:{}] [available:{}] [source:{}]",
-                                entry.status.as_str(),
-                                if entry.available { "yes" } else { "no" },
-                                entry.source.as_str()
-                            ),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                    visible_index += 1;
-                }
-            }
-
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " All Models ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            if all_models.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (none)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            } else {
-                for entry in all_models {
-                    let selected = visible_index == *cursor;
-                    let id_color = if query.trim().is_empty() {
-                        Color::White
-                    } else {
-                        Color::Yellow
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            if selected {
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            },
-                        ),
-                        Span::styled(
-                            entry.id,
-                            Style::default().fg(id_color).add_modifier(if selected {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                        ),
-                        Span::styled(
-                            format!(
-                                "  [status:{}] [available:{}] [source:{}]",
-                                entry.status.as_str(),
-                                if entry.available { "yes" } else { "no" },
-                                entry.source.as_str()
-                            ),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                    visible_index += 1;
-                }
+                    ),
+                    Span::styled(
+                        format!("  [{}]", entry.provider),
+                        Style::default().fg(THEME.fg_muted),
+                    ),
+                ]));
+                visible_index += 1;
             }
         }
 
@@ -1453,7 +1613,7 @@ impl TuiApp {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(THEME.fg_muted)),
             )
             .wrap(Wrap { trim: false })
             .scroll((effective_scroll, 0));
@@ -1469,14 +1629,14 @@ impl TuiApp {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 query_label,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.browser_footer),
             )),
             footer[0],
         );
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " s or /:search  j/k,↑/↓:move  PgUp/PgDn:page  Enter:use model  r:refresh  Esc:back/close ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.browser_footer),
             )),
             footer[1],
         );
@@ -1492,16 +1652,16 @@ impl TuiApp {
             Span::styled(
                 " Chat ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(THEME.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" model:{} ", self.model_name),
-                Style::default().fg(Color::White),
+                Style::default().fg(THEME.fg),
             ),
             Span::styled(
                 format!(" session:{} ", self.session_id.as_str()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(THEME.fg_muted),
             ),
         ]);
         frame.render_widget(Paragraph::new(title), area);
@@ -1511,9 +1671,9 @@ impl TuiApp {
         let is_idle_or_prompting =
             matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
         let border_color = if is_idle_or_prompting {
-            Color::Cyan
+            THEME.accent
         } else {
-            Color::DarkGray
+            THEME.fg_muted
         };
 
         let mut display_text = if self.input.is_empty() && is_idle_or_prompting {
@@ -1532,7 +1692,7 @@ impl TuiApp {
         }
 
         let input_style = if self.input.is_empty() && is_idle_or_prompting {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(THEME.fg_muted)
         } else {
             Style::default()
         };
@@ -1554,9 +1714,111 @@ impl TuiApp {
             let cursor_col = self.input[..self.cursor_pos].chars().count() as u16;
             frame.set_cursor_position((area.x + 1 + cursor_col, area.y + 1));
         }
+
+        if self.is_palette_active() {
+            self.render_command_palette(frame, area);
+        }
     }
 
-    /// Ensure scroll is at the bottom (for auto-scroll on new messages).
+    pub(crate) fn render_command_palette(&self, frame: &mut Frame<'_>, input_area: Rect) {
+        let cmds = self.palette_filtered_commands();
+        if cmds.is_empty() {
+            return;
+        }
+
+        let popup_h = cmds.len() as u16 + 2; // content + top/bottom border
+        let popup_y = input_area.y.saturating_sub(popup_h);
+        let popup_rect = Rect {
+            x: input_area.x,
+            y: popup_y,
+            width: input_area.width,
+            height: popup_h,
+        };
+
+        // Name column width = longest command name.
+        let name_w = cmds.iter().map(|c| c.name.len()).max().unwrap_or(0);
+
+        let authenticated = self.is_authenticated();
+        let lines: Vec<Line<'_>> = cmds
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let sel = i == self.command_palette_cursor;
+                let arrow = if sel { "› " } else { "  " };
+                let pad = " ".repeat(name_w.saturating_sub(cmd.name.len()) + 2);
+                let is_login = cmd.name == "/login" || cmd.name == "/connection";
+                let auth_dot = if is_login && authenticated {
+                    Some(Span::styled(
+                        "● ",
+                        Style::default().fg(THEME.palette_auth_dot),
+                    ))
+                } else {
+                    None
+                };
+                let mut spans = vec![
+                    Span::styled(
+                        arrow,
+                        Style::default().fg(if sel {
+                            THEME.palette_cmd
+                        } else {
+                            THEME.fg_muted
+                        }),
+                    ),
+                    Span::styled(
+                        cmd.name,
+                        Style::default().fg(THEME.palette_cmd).add_modifier(if sel {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                    ),
+                    Span::raw(pad),
+                ];
+                if let Some(dot) = auth_dot {
+                    spans.push(dot);
+                }
+                spans.push(Span::styled(
+                    cmd.description,
+                    Style::default()
+                        .fg(if sel {
+                            THEME.palette_selected_fg
+                        } else {
+                            THEME.palette_desc
+                        })
+                        .add_modifier(if sel {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ));
+                Line::from(spans)
+            })
+            .collect();
+
+        frame.render_widget(Clear, popup_rect);
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(THEME.palette_border))
+                    .title(Span::styled(
+                        " Commands ",
+                        Style::default()
+                            .fg(THEME.palette_border)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            ),
+            popup_rect,
+        );
+    }
+
+    pub fn conversation_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| matches!(m, TuiMessage::User(_) | TuiMessage::Assistant(_)))
+            .count()
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         // Set to a large value; render_history clamps it to max_scroll.
         self.history_scroll = u16::MAX;
@@ -1569,13 +1831,19 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     fn make_app() -> TuiApp {
-        TuiApp::new("gpt-4o", SessionId::new(), ChannelId::from("cli:tui"))
+        TuiApp::new(
+            "gpt-4o",
+            SessionId::new(),
+            ChannelId::from("cli:tui"),
+            "openai",
+        )
     }
 
     fn sample_models() -> Vec<model_catalog::ModelCatalogEntry> {
         vec![
             model_catalog::ModelCatalogEntry {
                 id: "gpt-5-codex".to_string(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: model_catalog::ModelStatus::Stable,
                 source: model_catalog::ModelSource::Docs,
@@ -1583,6 +1851,7 @@ mod tests {
             },
             model_catalog::ModelCatalogEntry {
                 id: "claude-sonnet-4.6".to_string(),
+                provider: String::new(),
                 recommended_for_coding: true,
                 status: model_catalog::ModelStatus::Stable,
                 source: model_catalog::ModelSource::Docs,
@@ -1857,6 +2126,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.model_name, "gpt-5-codex");
+        assert_eq!(app.state, AppState::Idle);
         assert!(matches!(
             app.messages.last(),
             Some(TuiMessage::Assistant(text)) if text.contains("Selected model")
@@ -2102,5 +2372,103 @@ mod tests {
         let mut app = make_app();
         app.scroll_to_bottom();
         assert_eq!(app.history_scroll, u16::MAX);
+    }
+
+    // ── Command picker tests ────────────────────────────────
+
+    #[test]
+    fn command_picker_activates_on_slash() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        assert!(!app.is_palette_active());
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.is_palette_active());
+        assert!(app.input.starts_with('/'));
+    }
+
+    #[test]
+    fn command_picker_filters_by_query() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(app.is_palette_active());
+        let cmds = app.palette_filtered_commands();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name, "/help");
+    }
+
+    #[test]
+    fn command_picker_cursor_navigation() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(app.command_palette_cursor, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.command_palette_cursor, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.command_palette_cursor, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.command_palette_cursor, 1);
+
+        // Up at 0 stays at 0
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn command_picker_enter_selects() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Type "/he" to filter to /help, then select via take_palette_command
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(app.is_palette_active());
+        let cmd = app.take_palette_command();
+        assert_eq!(cmd, Some("/help".to_string()));
+        assert_eq!(app.input, "/help");
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn command_picker_esc_cancels() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(app.is_palette_active());
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.is_palette_active());
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor_pos, 0);
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn command_picker_deactivates_on_non_slash() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.is_palette_active());
+
+        // Backspace removes the "/" → picker deactivates
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(!app.is_palette_active());
+        assert_eq!(app.input, "");
     }
 }

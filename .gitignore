@@ -18,6 +18,7 @@ config.toml
 *.key
 *.cert
 *.pid
+*.log
 
 # skills
 skills/hello-wasm/target
@@ -26,3 +27,6 @@ skills/hello-wasm/target
 .DS_Store
 .sisyphus/
 
+
+CLAUDE.md
+.claude

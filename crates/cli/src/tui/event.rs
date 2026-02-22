@@ -4,13 +4,19 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use crossterm::{
-    event::{Event, EventStream, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseButton,
+        MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
 use proto::{ChannelId, ProgressEvent, SessionId};
+use ratatui::layout::Position;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use skills::SkillLoader;
 use tokio::sync::mpsc;
@@ -21,29 +27,106 @@ use crate::config::{
     Config, LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry,
 };
 use crate::model_catalog;
+use tracing::debug;
 
 const OAUTH_CALLBACK_PORT: u16 = 9009;
+
+fn format_model_list(
+    entries: &[model_catalog::ModelCatalogEntry],
+    sync_statuses: &[String],
+) -> String {
+    use model_catalog::ModelSource;
+    let recommended: Vec<_> = entries
+        .iter()
+        .filter(|e| e.recommended_for_coding && e.available)
+        .collect();
+    let other: Vec<_> = entries
+        .iter()
+        .filter(|e| !e.recommended_for_coding && e.available)
+        .collect();
+
+    let mut out = format!("Models — {} total\n", entries.len());
+    if !recommended.is_empty() {
+        out.push_str("\nRecommended:\n");
+        for e in &recommended {
+            let tag = if e.source == ModelSource::Api {
+                " (api)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("  ★  {} [{}]{}\n", e.id, e.provider, tag));
+        }
+    }
+    if !other.is_empty() {
+        out.push_str("\nOther:\n");
+        for e in &other {
+            let tag = if e.source == ModelSource::Api {
+                " (api)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("     {} [{}]{}\n", e.id, e.provider, tag));
+        }
+    }
+
+    if !sync_statuses.is_empty() {
+        out.push_str(&format!("\nSync: {}", sync_statuses.join("; ")));
+    }
+    out
+}
+
+/// Collects (provider_name, base_url, api_key) tuples for all authenticated providers.
+fn collect_authenticated_providers(config: &Config) -> Vec<(String, Option<String>, String)> {
+    use crate::config::ProviderPreset;
+    let mut providers = Vec::new();
+    for preset in ProviderPreset::all() {
+        let name = preset.name();
+        if let Some(cred) = config.resolve_credential_for(name) {
+            providers.push((name.to_string(), cred.base_url, cred.api_key));
+        }
+    }
+    // Ensure the currently configured provider is always included
+    let active = config.agent.provider.name().to_string();
+    if !providers.iter().any(|(n, _, _)| n == &active) {
+        let key = config.resolve_api_key();
+        if !key.is_empty() {
+            providers.push((
+                active,
+                config.agent.effective_base_url().map(String::from),
+                key,
+            ));
+        }
+    }
+    providers
+}
 const OAUTH_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelsCommand {
     Browse,
+    List,
     Invalid(String),
 }
 
 fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
     let mut parts = raw.split_whitespace();
-    if parts.next()? != "/models" {
+    if parts.next()? != "/model" {
         return None;
     }
 
-    if parts.next().is_none() {
-        Some(ModelsCommand::Browse)
-    } else {
-        Some(ModelsCommand::Invalid(
-            "Use /models, then press s to search and r to refresh.".to_string(),
-        ))
+    match parts.next() {
+        None => Some(ModelsCommand::Browse),
+        Some("list") => Some(ModelsCommand::List),
+        Some(_) => Some(ModelsCommand::Invalid(
+            "Use /model to browse or /model list to print models.".to_string(),
+        )),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelTaskMode {
+    Browse(String),
+    List,
 }
 
 /// Basic API key validation for interactive TUI login input.
@@ -137,11 +220,7 @@ async fn build_and_store_credential_with_path(
         )
     })?;
     let provider_name = entry.name.to_string();
-    let resolved_method = if entry.name == "openai" {
-        intent.auth_method
-    } else {
-        AuthMethodChoice::ApiKey
-    };
+    let resolved_method = intent.auth_method;
 
     let (credential, success_message) = match entry.auth_mode {
         LoginAuthMode::OAuth => {
@@ -163,14 +242,13 @@ async fn build_and_store_credential_with_path(
                     ),
                 )
             } else {
-                let preset = ProviderPreset::from_str(entry.name).map_err(|_| {
-                    format!(
-                        "Provider '{provider_name}' is an extension slot and does not yet support runtime OAuth"
-                    )
-                })?;
-                let endpoints = preset.oauth_endpoints().ok_or_else(|| {
-                    format!("Provider '{provider_name}' does not support OAuth login")
-                })?;
+                let endpoints = ProviderPreset::from_str(entry.name)
+                    .ok()
+                    .and_then(|p| p.oauth_endpoints())
+                    .or_else(|| crate::config::extension_oauth_endpoints(&provider_name))
+                    .ok_or_else(|| {
+                        format!("Provider '{provider_name}' does not support OAuth login")
+                    })?;
 
                 let client_id = endpoints
                     .effective_client_id(&config.agent.oauth_client_id)
@@ -178,11 +256,54 @@ async fn build_and_store_credential_with_path(
                     .ok_or_else(|| {
                         "No OAuth client ID configured. Set openpista_OAUTH_CLIENT_ID environment variable or add oauth_client_id to [agent] in config.toml.".to_string()
                     })?;
-                let effective_port = endpoints.default_callback_port.unwrap_or(port);
-                let credential =
-                    run_oauth_login(&provider_name, &endpoints, &client_id, effective_port, timeout)
+
+                let oauth_credential = if endpoints.default_callback_port.is_none()
+                    && !endpoints.redirect_path.is_empty()
+                {
+                    let pending = crate::auth::start_code_display_flow(
+                        &provider_name,
+                        &endpoints,
+                        &client_id,
+                    );
+                    let code = if let Some(c) = intent.api_key.as_deref().filter(|s| !s.is_empty())
+                    {
+                        c.to_string()
+                    } else {
+                        crate::auth::read_code_from_stdin()
+                            .await
+                            .map_err(|e| e.to_string())?
+                    };
+                    crate::auth::complete_code_display_flow(&pending, &code)
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| e.to_string())?
+                } else {
+                    let effective_port = endpoints.default_callback_port.unwrap_or(port);
+                    run_oauth_login(
+                        &provider_name,
+                        &endpoints,
+                        &client_id,
+                        effective_port,
+                        timeout,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                };
+
+                let credential = if provider_name == "anthropic" {
+                    let permanent_key =
+                        crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
+                            .await
+                            .map_err(|e| format!("Failed to create Anthropic API key: {e}"))?;
+                    crate::auth::ProviderCredential {
+                        access_token: permanent_key,
+                        refresh_token: None,
+                        expires_at: None,
+                        endpoint: None,
+                    }
+                } else {
+                    oauth_credential
+                };
+
                 (
                     credential,
                     format!(
@@ -281,7 +402,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
     }
 }
 
@@ -292,19 +413,44 @@ pub async fn run_tui(
     channel_id: ChannelId,
     session_id: SessionId,
     model_name: String,
-    config: Config,
+    mut config: Config,
 ) -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let _guard = TerminalGuard; // Drop restores terminal
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    debug!(session = %session_id, model = %model_name, provider = %config.agent.provider.name(), "TUI started");
+
     // App state
-    let mut app = TuiApp::new(&model_name, session_id.clone(), channel_id.clone());
+    let mut app = TuiApp::new(
+        &model_name,
+        session_id.clone(),
+        channel_id.clone(),
+        config.agent.provider.name(),
+    );
+
+    // Load session list for sidebar
+    {
+        let memory = runtime.memory().clone();
+        if let Ok(sessions) = memory.list_sessions_with_preview().await {
+            app.session_list = sessions
+                .into_iter()
+                .map(
+                    |(id, channel_id, updated_at, preview)| super::app::SessionEntry {
+                        id,
+                        channel_id,
+                        updated_at,
+                        preview,
+                    },
+                )
+                .collect();
+        }
+    }
 
     // Crossterm event stream (async)
     let mut crossterm_stream = EventStream::new();
@@ -313,8 +459,12 @@ pub async fn run_tui(
     let mut agent_task: Option<tokio::task::JoinHandle<Result<String, proto::Error>>> = None;
     let mut progress_rx: Option<mpsc::Receiver<ProgressEvent>> = None;
     let mut auth_task: Option<tokio::task::JoinHandle<Result<String, String>>> = None;
-    let mut model_task: Option<tokio::task::JoinHandle<model_catalog::CatalogLoadResult>> = None;
-    let mut model_task_opts: Option<String> = None;
+    let mut model_task: Option<tokio::task::JoinHandle<model_catalog::MultiCatalogLoadResult>> =
+        None;
+    let mut model_task_opts: Option<ModelTaskMode> = None;
+    let mut pending_code_display: Option<crate::auth::PendingOAuthCodeDisplay> = None;
+    let mut auth_provider_name: Option<String> = None;
+    let mut prev_provider: Option<(ProviderPreset, String)> = None;
 
     // Spinner tick interval (100ms)
     let mut spinner_interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -332,6 +482,12 @@ pub async fn run_tui(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         use crossterm::event::KeyCode;
                         if key.code == KeyCode::Enter {
+                            // Step 1: palette가 활성화되어 있으면 먼저 command resolve
+                            if app.is_palette_active() {
+                                app.take_palette_command();
+                            }
+
+                            // Step 2: 정상 command 처리 경로로 fall-through
                             if app.state == AppState::Idle && !app.input.is_empty() {
                                 let message = app.take_input();
                                 if let Some(models_cmd) = parse_models_command(&message) {
@@ -346,15 +502,25 @@ pub async fn run_tui(
 
                                     match models_cmd {
                                         ModelsCommand::Browse => {
+                                            let pname = config.agent.provider.name().to_string();
                                             app.open_model_browser(
-                                                model_catalog::OPENCODE_PROVIDER.to_string(),
+                                                pname,
                                                 Vec::new(),
                                                 String::new(),
                                                 "Loading models...".to_string(),
                                             );
-                                            model_task_opts = Some(String::new());
+                                            model_task_opts = Some(ModelTaskMode::Browse(String::new()));
+                                            let providers = collect_authenticated_providers(&config);
                                             model_task = Some(tokio::spawn(async move {
-                                                model_catalog::load_opencode_catalog(false).await
+                                                model_catalog::load_catalog_multi(&providers).await
+                                            }));
+                                        }
+                                        ModelsCommand::List => {
+                                            app.push_assistant("Fetching model list…".to_string());
+                                            model_task_opts = Some(ModelTaskMode::List);
+                                            let providers = collect_authenticated_providers(&config);
+                                            model_task = Some(tokio::spawn(async move {
+                                                model_catalog::load_catalog_multi(&providers).await
                                             }));
                                         }
                                         ModelsCommand::Invalid(message) => {
@@ -366,9 +532,11 @@ pub async fn run_tui(
                                 }
 
                                 if app.handle_slash_command(&message) {
+                                    debug!(command = %message, "Slash command dispatched");
                                     app.scroll_to_bottom();
                                     continue;
                                 }
+                                debug!(message_len = %message.len(), "Agent task spawned");
                                 app.push_user(message.clone());
                                 app.state = AppState::Thinking { round: 0 };
                                 app.scroll_to_bottom();
@@ -401,6 +569,37 @@ pub async fn run_tui(
                             app.handle_key(key);
                         }
 
+                        if let Some((new_model, provider_name)) = app.take_pending_model_change() {
+                            runtime.set_model(new_model.clone());
+                            if provider_name != runtime.active_provider_name() {
+                                // Try switching first; if provider not registered, build & register on-demand
+                                if runtime.switch_provider(&provider_name).is_err() {
+                                    if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
+                                        if let Some(cred) = config.resolve_credential_for(&provider_name) {
+                                            let new_llm: Arc<dyn agent::LlmProvider> =
+                                                if preset == ProviderPreset::Anthropic {
+                                                    if let Some(ref url) = cred.base_url {
+                                                        Arc::new(agent::AnthropicProvider::with_base_url(&cred.api_key, url))
+                                                    } else {
+                                                        Arc::new(agent::AnthropicProvider::new(&cred.api_key))
+                                                    }
+                                                } else if let Some(ref url) = cred.base_url {
+                                                    Arc::new(agent::OpenAiProvider::with_base_url(&cred.api_key, url, &new_model))
+                                                } else {
+                                                    Arc::new(agent::OpenAiProvider::new(&cred.api_key, &new_model))
+                                                };
+                                            runtime.register_provider(&provider_name, new_llm);
+                                            let _ = runtime.switch_provider(&provider_name);
+                                        } else {
+                                            tracing::warn!(provider = %provider_name, "No credential found for provider");
+                                        }
+                                    } else {
+                                        tracing::warn!(provider = %provider_name, "Unknown provider preset");
+                                    }
+                                }
+                            }
+                        }
+
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
                                 app.push_error(
@@ -409,9 +608,10 @@ pub async fn run_tui(
                                 );
                             } else if let Some(query) = app.model_browser_query() {
                                 app.mark_model_refreshing();
-                                model_task_opts = Some(query);
+                                model_task_opts = Some(ModelTaskMode::Browse(query));
+                                let providers = collect_authenticated_providers(&config);
                                 model_task = Some(tokio::spawn(async move {
-                                    model_catalog::load_opencode_catalog(true).await
+                                    model_catalog::load_catalog_multi(&providers).await
                                 }));
                             }
                         }
@@ -425,8 +625,11 @@ pub async fn run_tui(
                                     &config.agent.oauth_client_id,
                                 )
                             {
-                                if intent.provider == "openai" {
-                                    app.reopen_openai_method_with_error(
+                                if intent.provider == "openai"
+                                    || intent.provider == "anthropic"
+                                {
+                                    app.reopen_method_selector_with_error(
+                                        &intent.provider,
                                         "No OAuth client ID configured. Choose API key mode or set openpista_OAUTH_CLIENT_ID.".to_string(),
                                     );
                                 } else {
@@ -436,6 +639,112 @@ pub async fn run_tui(
                                 }
                                 app.scroll_to_bottom();
                                 continue;
+                            }
+
+                            // Code-display OAuth phase 1: open browser, prompt for code
+                            if intent.auth_method == AuthMethodChoice::OAuth
+                                && intent.api_key.is_none()
+                            {
+                                let ep = std::str::FromStr::from_str(&intent.provider)
+                                    .ok()
+                                    .and_then(|p: ProviderPreset| p.oauth_endpoints())
+                                    .or_else(|| {
+                                        crate::config::extension_oauth_endpoints(&intent.provider)
+                                    });
+
+                                if let Some(ref ep) = ep
+                                    && ep.default_callback_port.is_none()
+                                    && !ep.redirect_path.is_empty()
+                                {
+                                    let client_id = ep
+                                        .effective_client_id(&config.agent.oauth_client_id)
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    let pending = crate::auth::start_code_display_flow(
+                                        &intent.provider,
+                                        ep,
+                                        &client_id,
+                                    );
+                                    pending_code_display = Some(pending);
+                                    app.state = super::app::AppState::LoginBrowsing {
+                                        query: intent.provider.clone(),
+                                        cursor: 0,
+                                        scroll: 0,
+                                        step: crate::auth_picker::LoginBrowseStep::InputApiKey,
+                                        selected_provider: Some(intent.provider),
+                                        selected_method: Some(AuthMethodChoice::OAuth),
+                                        input_buffer: String::new(),
+                                        masked_buffer: String::new(),
+                                        last_error: None,
+                                        endpoint: None,
+                                    };
+                                    app.push_assistant(
+                                        "Browser opened. Paste the authorization code from your browser.".to_string(),
+                                    );
+                                    app.scroll_to_bottom();
+                                    continue;
+                                }
+                            }
+
+                            // Code-display OAuth phase 2: exchange code for token
+                            if intent.auth_method == AuthMethodChoice::OAuth
+                                && intent.api_key.is_some()
+                                && pending_code_display.is_some()
+                            {
+                                let pending = pending_code_display.take().unwrap();
+                                let code = intent.api_key.clone().unwrap();
+                                let provider_name = intent.provider.clone();
+                                let cred_path = credentials_path();
+                                auth_provider_name = Some(provider_name.clone());
+                                app.state = super::app::AppState::AuthValidating {
+                                    provider: provider_name.clone(),
+                                };
+                                if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
+                                    prev_provider = Some((config.agent.provider, app.provider_name.clone()));
+                                    config.agent.provider = preset;
+                                    app.provider_name = preset.name().to_string();
+                                }
+                                auth_task = Some(tokio::spawn(async move {
+                                    let oauth_cred =
+                                        crate::auth::complete_code_display_flow(&pending, &code)
+                                            .await
+                                            .map_err(|e| e.to_string())?;
+                                    let credential = if provider_name == "anthropic" {
+                                        let api_key = crate::auth::create_anthropic_api_key(
+                                            &oauth_cred.access_token,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            format!("Failed to create Anthropic API key: {e}")
+                                        })?;
+                                        crate::auth::ProviderCredential {
+                                            access_token: api_key,
+                                            refresh_token: None,
+                                            expires_at: None,
+                                            endpoint: None,
+                                        }
+                                    } else {
+                                        oauth_cred
+                                    };
+                                    let p = provider_name.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        persist_credential(p, credential, cred_path)
+                                    })
+                                    .await
+                                    .map_err(|e| format!("Join failed: {e}"))??;
+                                    Ok(format!(
+                                        "Authenticated as '{provider_name}'. API key saved."
+                                    ))
+                                }));
+                                app.scroll_to_bottom();
+                                continue;
+                            }
+
+                            auth_provider_name = Some(intent.provider.clone());
+                            if let Ok(preset) = intent.provider.parse::<ProviderPreset>() {
+                                prev_provider = Some((config.agent.provider, app.provider_name.clone()));
+                                config.agent.provider = preset;
+                                app.provider_name = preset.name().to_string();
                             }
                             let config_for_task = config.clone();
                             auth_task = Some(tokio::spawn(async move {
@@ -447,6 +756,133 @@ pub async fn run_tui(
                                 )
                                 .await
                             }));
+                        }
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        let frame_area: ratatui::layout::Rect = terminal.size().unwrap_or_default().into();
+                        let pos = Position::new(mouse.column, mouse.row);
+
+                        // ── Sidebar mouse handling ───────────────────────
+                        if let Some(sb_area) = app.compute_sidebar_area(frame_area) {
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if sb_area.contains(pos) {
+                                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
+                                        let entry_height = 3u16;
+                                        let idx = (inner_y / entry_height) as usize;
+                                        if idx < app.session_list.len() {
+                                            app.sidebar_hover = Some(idx);
+                                        }
+                                    }
+                                }
+                                MouseEventKind::Moved => {
+                                    if sb_area.contains(pos) {
+                                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
+                                        let entry_height = 3u16;
+                                        let idx = (inner_y / entry_height) as usize;
+                                        if idx < app.session_list.len() {
+                                            app.sidebar_hover = Some(idx);
+                                        } else {
+                                            app.sidebar_hover = None;
+                                        }
+                                    } else {
+                                        app.sidebar_hover = None;
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if sb_area.contains(pos) {
+                                        app.sidebar_scroll = app.sidebar_scroll.saturating_add(1);
+                                    }
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    if sb_area.contains(pos) {
+                                        app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // ── Chat area mouse handling ──────────────────────
+                        if let Some(chat_area) = app.chat_area {
+                            let inner = ratatui::layout::Rect {
+                                x: chat_area.x + 1,
+                                y: chat_area.y + 1,
+                                width: chat_area.width.saturating_sub(2),
+                                height: chat_area.height.saturating_sub(2),
+                            };
+
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if inner.contains(pos) {
+                                        let rel_col = mouse.column - inner.x;
+                                        let rel_row = mouse.row - inner.y;
+                                        app.text_selection.anchor = Some((rel_row, rel_col));
+                                        app.text_selection.endpoint = Some((rel_row, rel_col));
+                                        app.text_selection.dragging = true;
+                                    } else {
+                                        app.text_selection.clear();
+                                    }
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    if app.text_selection.dragging {
+                                        let rel_col = mouse
+                                            .column
+                                            .saturating_sub(inner.x)
+                                            .min(inner.width.saturating_sub(1));
+                                        let rel_row = mouse
+                                            .row
+                                            .saturating_sub(inner.y)
+                                            .min(inner.height.saturating_sub(1));
+                                        app.text_selection.endpoint = Some((rel_row, rel_col));
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    if app.text_selection.dragging {
+                                        let rel_col = mouse
+                                            .column
+                                            .saturating_sub(inner.x)
+                                            .min(inner.width.saturating_sub(1));
+                                        let rel_row = mouse
+                                            .row
+                                            .saturating_sub(inner.y)
+                                            .min(inner.height.saturating_sub(1));
+                                        app.text_selection.endpoint = Some((rel_row, rel_col));
+                                        app.text_selection.dragging = false;
+
+                                        // Auto-copy when a non-empty selection is released.
+                                        if app.text_selection.is_active()
+                                            && let Some((start, end)) =
+                                                app.text_selection.ordered_range()
+                                        {
+                                            let grid = app.chat_text_grid.clone();
+                                            let scroll = app.chat_scroll_clamped;
+                                            if let Some(text) =
+                                                crate::tui::selection::extract_selected_text(
+                                                    &grid, start, end, scroll,
+                                                )
+                                            {
+                                                crate::tui::selection::copy_to_clipboard(&text);
+                                            }
+                                        }
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if chat_area.contains(pos) {
+                                        app.history_scroll =
+                                            app.history_scroll.saturating_add(3);
+                                        app.text_selection.clear();
+                                    }
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    if chat_area.contains(pos) {
+                                        app.history_scroll =
+                                            app.history_scroll.saturating_sub(3);
+                                        app.text_selection.clear();
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {
@@ -478,7 +914,10 @@ pub async fn run_tui(
                 }
             } => {
                 match result {
-                    Ok(inner) => app.apply_completion(inner),
+                    Ok(inner) => {
+                        debug!(success = %inner.is_ok(), "Agent task completed");
+                        app.apply_completion(inner);
+                    }
                     Err(join_err) => app.apply_completion(Err(proto::Error::Llm(
                         proto::LlmError::InvalidResponse(format!("Task panicked: {join_err}"))
                     ))),
@@ -496,12 +935,61 @@ pub async fn run_tui(
             } => {
                 match result {
                     Ok(Ok(message)) => {
+                        if let Some(ref provider_str) = auth_provider_name
+                            && let Ok(preset) = provider_str.parse::<ProviderPreset>()
+                        {
+                            let new_model = preset.default_model().to_string();
+                            runtime.set_model(new_model.clone());
+                            let api_key = config.resolve_api_key();
+                            let new_llm: Arc<dyn agent::LlmProvider> =
+                                if preset == ProviderPreset::Anthropic {
+                                    if let Some(base_url) = config.agent.effective_base_url() {
+                                        Arc::new(agent::AnthropicProvider::with_base_url(&api_key, base_url))
+                                    } else {
+                                        Arc::new(agent::AnthropicProvider::new(&api_key))
+                                    }
+                                } else {
+                                    let burl = config.agent.effective_base_url().map(String::from);
+                                    if let Some(url) = burl {
+                                        Arc::new(agent::OpenAiProvider::with_base_url(&api_key, url, &new_model))
+                                    } else {
+                                        Arc::new(agent::OpenAiProvider::new(&api_key, &new_model))
+                                    }
+                                };
+                            runtime.register_provider(provider_str, new_llm);
+                            let _ = runtime.switch_provider(provider_str);
+                        }
+                        debug!(provider = ?auth_provider_name, "Auth task completed successfully");
+                        // Pre-cache model catalog for the newly authenticated provider
+                        if model_task.is_none() {
+                            let providers = collect_authenticated_providers(&config);
+                            debug!("Pre-caching model catalog after auth for {} provider(s)", providers.len());
+                            model_task = Some(tokio::spawn(async move {
+                                model_catalog::load_catalog_multi(&providers).await
+                            }));
+                        }
+                        prev_provider = None;
+                        auth_provider_name = None;
                         app.push_assistant(message);
                     }
                     Ok(Err(err)) => {
+                        debug!(provider = ?auth_provider_name, error = %err, "Auth task failed");
+                        if let Some((old_preset, old_name)) = prev_provider.take() {
+                            config.agent.provider = old_preset;
+                            app.provider_name = old_name;
+                        }
+                        auth_provider_name = None;
                         app.push_error(format!("Authentication failed: {err}"));
                     }
-                    Err(join_err) => app.push_error(format!("Auth task failed: {join_err}")),
+                    Err(join_err) => {
+                        debug!(provider = ?auth_provider_name, error = %join_err, "Auth task panicked");
+                        if let Some((old_preset, old_name)) = prev_provider.take() {
+                            config.agent.provider = old_preset;
+                            app.provider_name = old_name;
+                        }
+                        auth_provider_name = None;
+                        app.push_error(format!("Auth task failed: {join_err}"));
+                    }
                 }
                 app.state = AppState::Idle;
                 app.scroll_to_bottom();
@@ -516,15 +1004,33 @@ pub async fn run_tui(
             } => {
                 match result {
                     Ok(catalog) => {
-                        let query = model_task_opts.take().unwrap_or_default();
-                        app.open_model_browser(
-                            catalog.provider,
-                            catalog.entries,
-                            query,
-                            catalog.sync_status,
-                        );
+                        debug!(entries = %catalog.entries.len(), "Model catalog loaded");
+                        let provider_label = if catalog.sync_statuses.len() == 1 {
+                            catalog.sync_statuses[0].split(':').next().unwrap_or("unknown").to_string()
+                        } else {
+                            "multi".to_string()
+                        };
+                        let sync_status_combined = catalog.sync_statuses.join(" | ");
+                        match model_task_opts.take() {
+                            Some(ModelTaskMode::Browse(query)) => {
+                                app.open_model_browser(
+                                    provider_label,
+                                    catalog.entries,
+                                    query,
+                                    sync_status_combined,
+                                );
+                            }
+                            Some(ModelTaskMode::List) => {
+                                let text = format_model_list(&catalog.entries, &catalog.sync_statuses);
+                                app.push_assistant(text);
+                            }
+                            None => {
+                                // background pre-cache only — no browser opened
+                            }
+                        }
                     }
                     Err(join_err) => {
+                        debug!(error = %join_err, "Model task failed");
                         app.push_error(format!("Model task failed: {join_err}"));
                     }
                 }
@@ -558,23 +1064,27 @@ mod tests {
 
     #[test]
     fn parse_models_command_supports_browse_variants() {
-        assert_eq!(parse_models_command("/models"), Some(ModelsCommand::Browse));
+        assert_eq!(parse_models_command("/model"), Some(ModelsCommand::Browse));
         assert_eq!(
-            parse_models_command("/models all"),
+            parse_models_command("/model list"),
+            Some(ModelsCommand::List)
+        );
+        assert_eq!(
+            parse_models_command("/model all"),
             Some(ModelsCommand::Invalid(
-                "Use /models, then press s to search and r to refresh.".to_string()
+                "Use /model to browse or /model list to print models.".to_string()
             ))
         );
         assert_eq!(
-            parse_models_command("/models refresh"),
+            parse_models_command("/model refresh"),
             Some(ModelsCommand::Invalid(
-                "Use /models, then press s to search and r to refresh.".to_string()
+                "Use /model to browse or /model list to print models.".to_string()
             ))
         );
         assert_eq!(
-            parse_models_command("/models search codex"),
+            parse_models_command("/model search codex"),
             Some(ModelsCommand::Invalid(
-                "Use /models, then press s to search and r to refresh.".to_string()
+                "Use /model to browse or /model list to print models.".to_string()
             ))
         );
     }
@@ -622,10 +1132,10 @@ mod tests {
         let result = persist_auth_with_path(
             Config::default(),
             AuthLoginIntent {
-                provider: "azure-openai".to_string(),
+                provider: "custom".to_string(),
                 auth_method: AuthMethodChoice::ApiKey,
                 endpoint: Some("https://example.azure.com".to_string()),
-                api_key: Some("tok-azure".to_string()),
+                api_key: Some("tok-custom".to_string()),
             },
             OAUTH_CALLBACK_PORT,
             OAUTH_TIMEOUT_SECS,
@@ -636,26 +1146,56 @@ mod tests {
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&cred_path).expect("read credentials");
         let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
-        let saved = creds.get("azure-openai").expect("credential saved");
-        assert_eq!(saved.access_token, "tok-azure");
+        let saved = creds.get("custom").expect("credential saved");
+        assert_eq!(saved.access_token, "tok-custom");
         assert_eq!(saved.endpoint.as_deref(), Some("https://example.azure.com"));
     }
 
     #[tokio::test]
-    async fn persist_auth_oauth_requires_client_id() {
-        let err = persist_auth(
+    async fn persist_auth_anthropic_api_key_saves_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
             Config::default(),
             AuthLoginIntent {
-                provider: "openai".to_string(),
+                provider: "anthropic".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("sk-ant-test123".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&cred_path).expect("read credentials");
+        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
+        let saved = creds.get("anthropic").expect("credential saved");
+        assert_eq!(saved.access_token, "sk-ant-test123");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_anthropic_oauth_fails_in_test_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "anthropic".to_string(),
                 auth_method: AuthMethodChoice::OAuth,
                 endpoint: None,
                 api_key: None,
             },
             OAUTH_CALLBACK_PORT,
             OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
         )
-        .await
-        .expect_err("missing oauth client id should fail");
-        assert!(err.contains("No OAuth client ID configured"));
+        .await;
+
+        assert!(result.is_err());
     }
 }
