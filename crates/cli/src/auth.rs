@@ -569,59 +569,6 @@ pub async fn complete_code_display_flow(
 ) -> anyhow::Result<ProviderCredential> {
     anyhow::bail!("complete_code_display_flow not available in tests")
 }
-
-/// Creates a permanent Anthropic API key from an OAuth access token.
-#[cfg(not(test))]
-pub async fn create_anthropic_api_key(access_token: &str) -> anyhow::Result<String> {
-    debug!("Creating Anthropic API key from OAuth token");
-    #[derive(serde::Deserialize)]
-    struct CreateApiKeyResponse {
-        raw_key: String,
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let response = client
-        .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
-        .bearer_auth(access_token)
-        .header("anthropic-version", "2023-06-01")
-        .json(&serde_json::json!({"name": "openpista"}))
-        .send()
-        .await
-        .context("create_api_key request failed")?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read create_api_key response body")?;
-
-    if !status.is_success() {
-        let preview: String = body.chars().take(512).collect();
-        anyhow::bail!("create_api_key returned HTTP {status}: {preview}");
-    }
-
-    let parsed: CreateApiKeyResponse = serde_json::from_str(&body).with_context(|| {
-        let preview = if body.len() > 512 {
-            &body[..512]
-        } else {
-            &body
-        };
-        format!("failed to parse create_api_key response: {preview}")
-    })?;
-
-    Ok(parsed.raw_key)
-}
-
-/// Test stub; always returns an error since the Anthropic API is unavailable in tests.
-#[cfg(test)]
-pub async fn create_anthropic_api_key(_access_token: &str) -> anyhow::Result<String> {
-    anyhow::bail!("create_anthropic_api_key not available in tests")
-}
-
 /// Strips URL fragments and whitespace from a pasted authorization code.
 fn sanitize_auth_code(raw: &str) -> String {
     let trimmed = raw.trim();
