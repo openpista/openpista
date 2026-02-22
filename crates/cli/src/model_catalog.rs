@@ -494,14 +494,10 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
     let mut req_builder = client.get(url).header("anthropic-version", "2023-06-01");
 
     if proto::is_anthropic_oauth_token(api_key) {
-        return Err(
-            "Anthropic OAuth tokens (sk-ant-oat*) cannot be used to list models. \
-             Use /login and select 'API Key' instead of OAuth, \
-             or set the openpista_API_KEY environment variable."
-                .to_string(),
-        );
+        req_builder = req_builder.bearer_auth(api_key);
+    } else {
+        req_builder = req_builder.header("x-api-key", api_key);
     }
-    req_builder = req_builder.header("x-api-key", api_key);
 
     let response = req_builder
         .send()
@@ -928,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_is_rejected_by_shared_helper() {
+    fn oauth_token_detected_by_shared_helper() {
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
         assert!(!proto::is_anthropic_oauth_token(""));
