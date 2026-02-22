@@ -305,21 +305,20 @@ async fn build_and_store_credential_with_path(
                 };
 
                 let credential = if provider_name == "anthropic" {
-                    match crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
-                        .await
-                    {
-                        Ok(permanent_key) => crate::auth::ProviderCredential {
-                            access_token: permanent_key,
-                            refresh_token: None,
-                            expires_at: None,
-                            endpoint: None,
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to create Anthropic API key, using OAuth token directly: {e}"
-                            );
-                            oauth_credential
-                        }
+                    let permanent_key =
+                        crate::auth::create_anthropic_api_key(&oauth_credential.access_token)
+                            .await
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to convert OAuth token to API key: {e}. \
+                                     Use /login and select 'API Key' instead of OAuth."
+                                )
+                            })?;
+                    crate::auth::ProviderCredential {
+                        access_token: permanent_key,
+                        refresh_token: None,
+                        expires_at: None,
+                        endpoint: None,
                     }
                 } else {
                     oauth_credential
@@ -732,23 +731,22 @@ pub async fn run_tui(
                                             .await
                                             .map_err(|e| e.to_string())?;
                                     let credential = if provider_name == "anthropic" {
-                                        match crate::auth::create_anthropic_api_key(
-                                            &oauth_cred.access_token,
-                                        )
-                                        .await
-                                        {
-                                            Ok(api_key) => crate::auth::ProviderCredential {
-                                                access_token: api_key,
-                                                refresh_token: None,
-                                                expires_at: None,
-                                                endpoint: None,
-                                            },
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to create Anthropic API key, using OAuth token directly: {e}"
-                                                );
-                                                oauth_cred
-                                            }
+                                        let permanent_key =
+                                            crate::auth::create_anthropic_api_key(
+                                                &oauth_cred.access_token,
+                                            )
+                                            .await
+                                            .map_err(|e| {
+                                                format!(
+                                                    "Failed to convert OAuth token to API key: {e}. \
+                                                     Use /login and select 'API Key' instead of OAuth."
+                                                )
+                                            })?;
+                                        crate::auth::ProviderCredential {
+                                            access_token: permanent_key,
+                                            refresh_token: None,
+                                            expires_at: None,
+                                            endpoint: None,
                                         }
                                     } else {
                                         oauth_cred

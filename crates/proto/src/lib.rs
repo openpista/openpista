@@ -18,3 +18,13 @@ pub use event::{
 pub use message::{AgentMessage, ChannelId, Role, SessionId};
 /// Re-export of tool call definition and result types.
 pub use tool::{ToolCall, ToolDefinition, ToolResult};
+
+/// Returns `true` when the key looks like an Anthropic OAuth access token
+/// (`sk-ant-oat*`) rather than a permanent API key (`sk-ant-api*`).
+///
+/// Anthropic's Messages API does not accept OAuth tokens — only permanent
+/// API keys sent via the `x-api-key` header. This helper is used across
+/// crates to reject OAuth tokens early with a clear error message.
+pub fn is_anthropic_oauth_token(key: &str) -> bool {
+    key.starts_with("sk-ant-oat")
+}
