@@ -803,6 +803,55 @@ impl Config {
     }
 }
 
+// ─── TuiState ───────────────────────────────────────────────
+
+/// Lightweight state persisted across TUI sessions (last model, provider).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuiState {
+    /// Last model id selected by the user.
+    #[serde(default)]
+    pub last_model: String,
+    /// Last provider name used.
+    #[serde(default)]
+    pub last_provider: String,
+}
+
+#[allow(dead_code)]
+impl TuiState {
+    /// Default file path: `~/.openpista/state.toml`.
+    pub fn path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".openpista").join("state.toml")
+    }
+
+    /// Load from the default path, returning `Default` on any error.
+    pub fn load() -> Self {
+        Self::load_from(&Self::path())
+    }
+
+    /// Load from a specific path.
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist to the default path.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        self.save_to(&Self::path())
+    }
+
+    /// Persist to a specific path.
+    pub fn save_to(&self, path: &Path) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, content)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,5 +1207,19 @@ api_key = "tg-key"
         assert_eq!(entry.auth_mode, LoginAuthMode::OAuth);
         assert_eq!(entry.category, ProviderCategory::Runtime);
         assert!(entry.supports_runtime);
+    }
+
+    #[test]
+    fn tui_state_save_load_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("state.toml");
+        let state = TuiState {
+            last_model: "gpt-4o".to_string(),
+            last_provider: "openai".to_string(),
+        };
+        state.save_to(&path).expect("save");
+        let loaded = TuiState::load_from(&path);
+        assert_eq!(loaded.last_model, "gpt-4o");
+        assert_eq!(loaded.last_provider, "openai");
     }
 }

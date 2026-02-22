@@ -58,6 +58,22 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/exit",
         description: "Exit TUI",
     },
+    SlashCommand {
+        name: "/session",
+        description: "List sessions",
+    },
+    SlashCommand {
+        name: "/session new",
+        description: "Start a new session",
+    },
+    SlashCommand {
+        name: "/session load <id>",
+        description: "Load a session by ID",
+    },
+    SlashCommand {
+        name: "/session delete <id>",
+        description: "Delete a session by ID",
+    },
 ];
 
 // ─── Data types ──────────────────────────────────────────────
@@ -410,7 +426,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }

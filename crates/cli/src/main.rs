@@ -56,6 +56,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     debug: bool,
 
+    /// Resume an existing session by its ID (shortcut for `tui -s <id>`)
+    #[arg(short = 's', long)]
+    session: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -148,7 +152,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Determine effective command (default to Tui if none given)
-    let command = cli.command.unwrap_or(Commands::Tui { session: None });
+    let command = cli.command.unwrap_or(Commands::Tui {
+        session: cli.session.clone(),
+    });
     let is_tui = matches!(command, Commands::Tui { .. });
 
     // Initialize tracing — suppress console output in TUI mode to avoid corrupting the display.
@@ -226,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     match command {
-        Commands::Tui { session } => cmd_tui(config, session).await,
+        Commands::Tui { session } => cmd_tui(config, session.or(cli.session)).await,
         Commands::Start => cmd_start(config).await,
         Commands::Run { exec } => cmd_run(config, exec).await,
         Commands::Model { command } => cmd_models(config, command).await,
@@ -266,7 +272,12 @@ async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> 
         Some(id) => SessionId::from(id),
         None => SessionId::new(),
     };
-    let model_name = config.agent.effective_model().to_string();
+    let tui_state = config::TuiState::load();
+    let model_name = if config.agent.model.is_empty() && !tui_state.last_model.is_empty() {
+        tui_state.last_model.clone()
+    } else {
+        config.agent.effective_model().to_string()
+    };
 
     tui::run_tui(
         runtime,
@@ -848,7 +859,7 @@ fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     println!("  \x1b[1;37mModel\x1b[0m     \x1b[32m{}\x1b[0m", model);
     println!();
     println!(
-        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista tui -s {}\x1b[0m",
+        "  \x1b[1;37mContinue\x1b[0m  \x1b[1;32mopenpista -s {}\x1b[0m",
         session_str
     );
     println!();
