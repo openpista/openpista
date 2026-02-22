@@ -42,7 +42,8 @@ toml = "0.8"
 
 # 로깅
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-appender = "0.2"
 
 # 에러
 thiserror = "2"
@@ -54,10 +55,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 
 # 채널
-teloxide = { version = "0.12", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # 스케줄러

@@ -1,10 +1,13 @@
 //! Agent runtime, memory layer, and LLM adapter interfaces.
 
+pub mod anthropic;
 pub mod llm;
 pub mod memory;
 pub mod runtime;
 pub mod tool_registry;
 
+/// Anthropic Messages API provider.
+pub use anthropic::AnthropicProvider;
 /// Chat request/response models and provider interfaces.
 pub use llm::{ChatRequest, ChatResponse, LlmProvider, OpenAiProvider};
 /// SQLite-backed conversation memory implementation.

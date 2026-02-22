@@ -17,6 +17,7 @@ tls_cert = ""  # 비어있으면 rcgen 으로 자동생성
 #   together   → Together.ai             (기본 model: meta-llama/Llama-3.3-70B-Instruct-Turbo, base_url 자동 설정)
 #   ollama     → 로컬 Ollama             (기본 model: llama3.2, base_url 자동 설정, api_key 불필요)
 #   openrouter → OpenRouter              (기본 model: openai/gpt-4o, base_url 자동 설정)
+#   opencode   → OpenCode Zen            (기본 model: gpt-5-codex, base_url 자동 설정)
 #   custom     → base_url / model 직접 지정
 #
 provider = "openai"
@@ -28,13 +29,17 @@ provider = "openai"
 #   model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"   # together
 #   model = "llama3.2"                                   # ollama
 #   model = "anthropic/claude-sonnet-4-5"                # openrouter
+#   model = "gpt-5-codex"                                # opencode
 model = ""
 
 # API 키 — 환경 변수가 우선 적용됩니다:
-#   OPENPISTACRAB_API_KEY   → 모든 provider에 적용 (최우선)
+#   openpista_API_KEY   → 모든 provider에 적용 (최우선)
 #   OPENAI_API_KEY          → openai / custom (폴백)
 #   TOGETHER_API_KEY        → together
 #   OPENROUTER_API_KEY      → openrouter
+#   OPENCODE_API_KEY        → opencode
+#   GITHUB_COPILOT_TOKEN    → github-copilot (login picker extension slot)
+#   VERCEL_AI_GATEWAY_API_KEY → vercel-ai-gateway (login picker extension slot)
 #   (ollama 는 API 키 불필요)
 api_key = ""
 
@@ -46,6 +51,11 @@ max_tool_rounds = 10
 #   base_url = "http://localhost:11434/v1"   # Ollama 포트 변경 시
 #   base_url = "https://my-proxy.example.com/v1"
 # base_url = ""
+
+# OAuth 2.0 client ID (PKCE 공개 클라이언트, 비밀이 아님)
+# `openpista auth login` 에서 browser-based OAuth 로그인 시 필요
+# 환경 변수 openpista_OAUTH_CLIENT_ID 로도 설정 가능
+# oauth_client_id = ""
 
 # ─────────────────────────────────────────────
 # 채널 설정
@@ -62,13 +72,13 @@ enabled = true
 [channels.mobile]
 enabled = false
 port = 4434         # QUIC 리슨 포트 (gateway 와 다른 포트 사용)
-api_token = ""      # 또는 환경 변수 OPENPISTACRAB_MOBILE_TOKEN
+api_token = ""      # 또는 환경 변수 openpista_MOBILE_TOKEN
 
 # ─────────────────────────────────────────────
 # 데이터베이스 / 스킬 경로
 # ─────────────────────────────────────────────
 [database]
-url = "~/.openpistacrab/memory.db"
+url = "~/.openpista/memory.db"
 
 [skills]
-workspace = "~/.openpistacrab/workspace"
+workspace = "~/.openpista/workspace"

@@ -56,7 +56,7 @@ impl ChannelAdapter for CliAdapter {
         info!("CLI adapter started (session: {})", self.session_id);
 
         stdout
-            .write_all(b"openpistacrab> ")
+            .write_all(b"openpista> ")
             .await
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
         stdout
@@ -67,7 +67,7 @@ impl ChannelAdapter for CliAdapter {
         while let Ok(Some(line)) = reader.next_line().await {
             let Some(line) = normalize_input_line(&line) else {
                 stdout
-                    .write_all(b"openpistacrab> ")
+                    .write_all(b"openpista> ")
                     .await
                     .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
                 stdout
@@ -124,7 +124,7 @@ fn is_quit_command(line: &str) -> bool {
 /// Formats outbound text with prompt suffix for CLI UX.
 fn format_prompted_response(resp: &AgentResponse) -> String {
     let prefix = if resp.is_error { "Error: " } else { "" };
-    format!("\n{}{}\n\nopenpistacrab> ", prefix, resp.content)
+    format!("\n{}{}\n\nopenpista> ", prefix, resp.content)
 }
 
 #[cfg(test)]
@@ -162,7 +162,7 @@ mod tests {
         let ok = AgentResponse::new(ChannelId::from("cli:local"), SessionId::from("s1"), "done");
         let out = format_prompted_response(&ok);
         assert!(out.contains("\ndone\n"));
-        assert!(out.ends_with("openpistacrab> "));
+        assert!(out.ends_with("openpista> "));
 
         let err = AgentResponse::error(ChannelId::from("cli:local"), SessionId::from("s1"), "boom");
         let out = format_prompted_response(&err);

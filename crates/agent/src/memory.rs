@@ -156,7 +156,45 @@ impl SqliteMemory {
             .collect())
     }
 
-    /// Update session timestamp
+    /// Lists all sessions with preview text (first user message) and last-updated timestamp.
+    pub async fn list_sessions_with_preview(
+        &self,
+    ) -> Result<Vec<(SessionId, String, chrono::DateTime<chrono::Utc>, String)>, DatabaseError>
+    {
+        let rows = sqlx::query(
+            r#"SELECT s.id, s.channel_id, s.updated_at,
+                      COALESCE(
+                        (SELECT content FROM messages
+                         WHERE session_id = s.id AND role = 'user'
+                         ORDER BY created_at ASC LIMIT 1),
+                        ''
+                      ) AS preview
+               FROM sessions s
+               ORDER BY s.updated_at DESC"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let updated_str: String = row.get("updated_at");
+                let updated = chrono::DateTime::parse_from_rfc3339(&updated_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let preview: String = row.get("preview");
+                (
+                    SessionId::from(row.get::<String, _>("id")),
+                    row.get::<String, _>("channel_id"),
+                    updated,
+                    preview,
+                )
+            })
+            .collect())
+    }
+
+    /// Updates the `updated_at` timestamp of a session to the current time.
     pub async fn touch_session(&self, session_id: &SessionId) -> Result<(), DatabaseError> {
         sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
             .bind(chrono::Utc::now().to_rfc3339())
@@ -266,5 +304,60 @@ mod tests {
             .touch_session(&session_id)
             .await
             .expect("touch session should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_preview_returns_first_user_message() {
+        let (memory, _tmp, _path) = open_temp_memory().await;
+        let session_id = SessionId::from("session-preview");
+        memory
+            .ensure_session(&session_id, "cli:local")
+            .await
+            .expect("ensure session");
+
+        // Add a user message that should appear as preview
+        let user_msg = AgentMessage::new(session_id.clone(), Role::User, "Hello world");
+        memory.save_message(&user_msg).await.expect("save user msg");
+
+        // Add an assistant response (should NOT appear as preview)
+        let assistant_msg = AgentMessage::new(session_id.clone(), Role::Assistant, "Hi there");
+        memory
+            .save_message(&assistant_msg)
+            .await
+            .expect("save assistant msg");
+
+        let sessions = memory
+            .list_sessions_with_preview()
+            .await
+            .expect("list with preview");
+        assert!(!sessions.is_empty());
+
+        let (id, channel, _updated, preview) = sessions
+            .iter()
+            .find(|(id, _, _, _)| id.as_str() == "session-preview")
+            .expect("session should be found");
+        assert_eq!(id.as_str(), "session-preview");
+        assert_eq!(channel, "cli:local");
+        assert_eq!(preview, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_with_preview_empty_when_no_user_messages() {
+        let (memory, _tmp, _path) = open_temp_memory().await;
+        let session_id = SessionId::from("session-no-msgs");
+        memory
+            .ensure_session(&session_id, "cli:local")
+            .await
+            .expect("ensure session");
+
+        let sessions = memory
+            .list_sessions_with_preview()
+            .await
+            .expect("list with preview");
+        let (_, _, _, preview) = sessions
+            .iter()
+            .find(|(id, _, _, _)| id.as_str() == "session-no-msgs")
+            .expect("session should be found");
+        assert_eq!(preview, "");
     }
 }

@@ -58,7 +58,7 @@
 - [x] 발견된 모든 스킬로부터 문맥 연결(concatenation)
 - [x] 하위 프로세스 실행: `run.sh` → bash, `main.py` → python/python3
 - [x] 도구 에러로 표출되는 0이 아닌 종료 코드(Non-zero exit codes)
-- [x] `OPENPISTACRAB_WORKSPACE` 환경 변수 재정의(override)
+- [x] `openpista_WORKSPACE` 환경 변수 재정의(override)
 
 ### Docker 샌드박스 (Docker Sandbox)
 
@@ -75,23 +75,26 @@
 
 ### WASM 스킬 샌드박스 (WASM Skill Sandbox)
 
-- [ ] 임베디드 WASM 런타임으로서의 `wasmtime` 통합
-- [ ] WASI 호스트 인터페이스: 제한된 파일 시스템(읽기 전용 작업 공간) + stdout/stderr
-- [ ] `SKILL.md`의 스킬 실행 모드 플래그 (`mode: wasm` vs `mode: subprocess`)
-- [ ] 호스트↔게스트 ABI: WASM 메모리를 통한 JSON 인코딩된 `ToolCall` 인자(args) 수신, `ToolResult` 반환
-- [ ] WASM fuel/epoch 수준에서 30초 실행 타임아웃 적용
-- [ ] 메모리 제한: WASM 스킬 인스턴스 당 64 MB
-- [ ] `skills/README.md`에 포함된 `cargo build --target wasm32-wasip1` 빌드 가이드
-- [ ] 저장소에 포함된 WASM 스킬 예제 (`skills/hello-wasm/`)
+- [x] 임베디드 WASM 런타임으로서의 `wasmtime` 통합
+- [x] WASI 호스트 인터페이스: 제한된 파일 시스템(읽기 전용 작업 공간) + stdout/stderr
+- [x] `SKILL.md`의 스킬 실행 모드 플래그 (`mode: wasm` vs `mode: subprocess`)
+- [x] 호스트↔게스트 ABI: WASM 메모리를 통한 JSON 인코딩된 `ToolCall` 인자(args) 수신, `ToolResult` 반환
+- [x] WASM fuel/epoch 수준에서 30초 실행 타임아웃 적용
+- [x] 메모리 제한: WASM 스킬 인스턴스 당 64 MB
+- [x] `skills/README.md`에 포함된 `cargo build --target wasm32-wasip1` 빌드 가이드
+- [x] 저장소에 포함된 WASM 스킬 예제 (`skills/hello-wasm/`)
 
 ### CLI 및 설정 (CLI & Configuration)
 
-- [x] `openpistacrab start` — 전체 데몬 (QUIC + 활성화된 모든 채널)
-- [x] `openpistacrab run -e "..."` — 단발성(single-shot) 에이전트 명령
-- [x] `openpistacrab repl` — 세션 지속성을 갖춘 대화형 REPL
+- [x] `openpista start` — 전체 데몬 (QUIC + 활성화된 모든 채널)
+- [x] `openpista run -e "..."` — 단발성(single-shot) 에이전트 명령
+- [x] `openpista repl` — 세션 지속성을 갖춘 대화형 REPL
+- [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
+- [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
+- [x] 중앙 집중식의 랜딩 페이지 스타일 TUI (전용 Home 및 Chat 화면 포함)
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
-- [ ] 시작 시 PID 파일 작성, 종료 시 제거
+- [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
 
 ### 품질 및 CI (Quality & CI)
