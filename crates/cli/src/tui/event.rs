@@ -259,6 +259,31 @@ async fn run_oauth_login(
     anyhow::bail!("OAuth login is not available in tests")
 }
 
+/// Applies provider-specific post-OAuth token exchange.
+///
+/// GitHub Copilot requires exchanging the GitHub OAuth token for a
+/// Copilot-specific session token.  For all other providers the credential
+/// is returned unchanged.
+async fn maybe_exchange_copilot_token(
+    provider_name: &str,
+    credential: crate::auth::ProviderCredential,
+) -> Result<crate::auth::ProviderCredential, String> {
+    if provider_name == "github-copilot" {
+        #[cfg(not(test))]
+        {
+            return crate::auth::exchange_github_copilot_token(&credential.access_token)
+                .await
+                .map_err(|e| format!("Copilot token exchange failed: {e}"));
+        }
+        #[cfg(test)]
+        {
+            Ok(credential)
+        }
+    } else {
+        Ok(credential)
+    }
+}
+
 /// Builds and persists a provider credential using the default credentials path.
 pub(crate) async fn build_and_store_credential(
     config: &Config,
@@ -355,7 +380,8 @@ async fn build_and_store_credential_with_path(
                     .map_err(|e| e.to_string())?
                 };
 
-                let credential = oauth_credential;
+                let credential =
+                    maybe_exchange_copilot_token(&provider_name, oauth_credential).await?;
 
                 (
                     credential,
@@ -1527,5 +1553,33 @@ mod tests {
         let config = Config::default();
         let providers = collect_authenticated_providers(&config);
         assert!(providers.is_empty() || providers.iter().all(|(_, _, k)| !k.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn maybe_exchange_copilot_token_passthrough_for_copilot() {
+        let cred = crate::auth::ProviderCredential {
+            access_token: "gh_token_123".into(),
+            refresh_token: None,
+            expires_at: None,
+            endpoint: None,
+            id_token: None,
+        };
+        let result = maybe_exchange_copilot_token("github-copilot", cred).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().access_token, "gh_token_123");
+    }
+
+    #[tokio::test]
+    async fn maybe_exchange_copilot_token_passthrough_for_other_provider() {
+        let cred = crate::auth::ProviderCredential {
+            access_token: "some_token".into(),
+            refresh_token: None,
+            expires_at: None,
+            endpoint: None,
+            id_token: None,
+        };
+        let result = maybe_exchange_copilot_token("openai", cred).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().access_token, "some_token");
     }
 }

@@ -283,6 +283,32 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
             source: ModelSource::Docs,
             available: true,
         }],
+        "github-copilot" => vec![
+            ModelCatalogEntry {
+                id: "gpt-4o".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o-mini".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "claude-3.5-sonnet".to_string(),
+                provider: p,
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+        ],
         _ => vec![],
     }
 }
@@ -1311,8 +1337,78 @@ mod tests {
     }
 
     #[test]
+    fn seed_models_github_copilot_count_and_provider() {
+        let entries = seed_models_for_provider("github-copilot");
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|e| e.provider == "github-copilot"));
+    }
+
+    #[test]
+    fn seed_models_github_copilot_contains_expected_model_ids() {
+        let entries = seed_models_for_provider("github-copilot");
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-4o"), "should contain gpt-4o");
+        assert!(ids.contains(&"gpt-4o-mini"), "should contain gpt-4o-mini");
+        assert!(
+            ids.contains(&"claude-3.5-sonnet"),
+            "should contain claude-3.5-sonnet"
+        );
+    }
+
+    #[test]
+    fn seed_models_github_copilot_recommended_flags() {
+        let entries = seed_models_for_provider("github-copilot");
+        let gpt4o = entries.iter().find(|e| e.id == "gpt-4o").unwrap();
+        assert!(gpt4o.recommended_for_coding, "gpt-4o should be recommended");
+        let mini = entries.iter().find(|e| e.id == "gpt-4o-mini").unwrap();
+        assert!(
+            !mini.recommended_for_coding,
+            "gpt-4o-mini should not be recommended"
+        );
+        let claude = entries
+            .iter()
+            .find(|e| e.id == "claude-3.5-sonnet")
+            .unwrap();
+        assert!(
+            claude.recommended_for_coding,
+            "claude-3.5-sonnet should be recommended"
+        );
+    }
+
+    #[test]
+    fn seed_models_github_copilot_all_stable_and_docs() {
+        let entries = seed_models_for_provider("github-copilot");
+        for entry in &entries {
+            assert_eq!(
+                entry.status,
+                ModelStatus::Stable,
+                "seed model {} should be Stable",
+                entry.id
+            );
+            assert_eq!(
+                entry.source,
+                ModelSource::Docs,
+                "seed model {} should have Docs source",
+                entry.id
+            );
+            assert!(
+                entry.available,
+                "seed model {} should be available",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
     fn seed_models_all_have_docs_source() {
-        for provider in &["anthropic", "openai", "together", "openrouter", "ollama"] {
+        for provider in &[
+            "anthropic",
+            "openai",
+            "together",
+            "openrouter",
+            "ollama",
+            "github-copilot",
+        ] {
             let entries = seed_models_for_provider(provider);
             for entry in &entries {
                 assert_eq!(

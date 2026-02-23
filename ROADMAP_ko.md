@@ -225,34 +225,28 @@
 - [x] `openpista model [MODEL_OR_COMMAND]` — 모델 카탈로그 (목록 / 테스트)
 - [x] `openpista -s SESSION_ID` — 세션 재개 단축 명령
 - [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
-- [x] TUI 슬래시 명령어: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`
-- [x] Home, Chat, 세션 브라우저, 모델 브라우저 전용 화면이 있는 중앙 집중식 TUI
+- [x] 멀티 프로바이더 OAuth PKCE: OpenAI, Anthropic, OpenRouter, GitHub Copilot
+- [x] GitHub Copilot PKCE OAuth — 구독 기반 인증 (GitHub OAuth → Copilot 세션 토큰 교환)
+- [x] 프로바이더 로그인 선택기 (검색, OAuth/API 키 방식 선택, 자격증명 상태 표시)
+- [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
+- [x] 중앙 집중식의 랜딩 페이지 스타일 TUI (전용 Home 및 Chat 화면 포함)
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
 - [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
 - [x] Elm 아키텍처(TEA) 반응형 TUI — 단방향 데이터 흐름 (`Action → update() → State → view()`)
 
-### 세션 관리 (Session Management)
+### 멀티 프로바이더 인증 (Multi-Provider Authentication)
 
-- [x] 세션 목록 사이드바 — `Tab`으로 토글, `j`/`k`(또는 화살표)로 탐색, `Enter`로 로드, `d`/`Delete`로 삭제 요청, `Esc`로 포커스 해제
-- [x] `/session` 브라우저 — 검색 필터링, 키보드 탐색, 새 세션 생성, 확인 대화상자를 통한 삭제가 포함된 전체 화면 세션 탐색
-- [x] `/session new`, `/session load <id>`, `/session delete <id>` 슬래시 명령어
-- [x] `openpista tui -s SESSION_ID` — 명령줄에서 세션 재개
-- [x] `ConfirmDelete` 대화상자 — `y`/`Enter`로 확인, `n`/`Esc`로 취소
-
-### 모델 카탈로그 (Model Catalog)
-
-- [x] `/model` 브라우저 — 검색(`s` 또는 `/`), 원격 동기화(`r`), 키보드 탐색이 포함된 전체 화면 모델 탐색
-- [x] `/model list` — 채팅에 사용 가능한 모델 목록 출력
-- [x] `openpista model [MODEL_OR_COMMAND]` — CLI에서 모델 카탈로그 접근
-
-### TUI 개선 사항 (TUI Enhancements)
-
-- [x] 채팅 영역에서 마우스 드래그로 텍스트 선택; `Ctrl+C` / `Cmd+C`로 복사
-- [x] 마우스 지원: 채팅과 사이드바에서 클릭, 드래그, 스크롤
-- [x] 슬래시 명령어에 대한 `Tab` 자동완성 및 화살표 탐색이 있는 명령 팔레트
-- [x] `AppState` 변형: Idle, Thinking, ExecutingTool, AuthPrompting, AuthValidating, LoginBrowsing, ModelBrowsing, SessionBrowsing, ConfirmDelete
+- [x] OpenAI OAuth 2.0 PKCE 브라우저 로그인 (ChatGPT Plus/Pro 구독)
+- [x] Anthropic OAuth 2.0 PKCE 코드 표시 흐름 (Claude Max 구독)
+- [x] GitHub Copilot PKCE OAuth: GitHub OAuth → `copilot_internal/v2/token` 세션 토큰 교환
+- [x] OpenAI `id_token` → API 키 교환 (구독 과금 Responses API)
+- [x] 만료 5분 전 자동 토큰 갱신
+- [x] `~/.openpista/credentials.toml`에 프로바이더별 토큰 영속 저장
+- [x] 확장 프로바이더 슬롯: GitHub Copilot, Google, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+- [x] `openpista auth status` — 모든 저장된 프로바이더 자격증명 및 만료 표시
+- [x] `openpista auth logout` — 프로바이더별 자격증명 제거
 
 ### 품질 및 CI (Quality & CI)
 

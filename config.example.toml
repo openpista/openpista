@@ -31,7 +31,7 @@ model = ""
 #   TOGETHER_API_KEY        → together
 #   OPENROUTER_API_KEY      → openrouter
 #   OPENCODE_API_KEY        → opencode
-#   GITHUB_COPILOT_TOKEN    → github-copilot (login picker extension slot)
+#   GITHUB_COPILOT_TOKEN    → github-copilot (OAuth PKCE browser login; token exchanged for Copilot session)
 #   VERCEL_AI_GATEWAY_API_KEY → vercel-ai-gateway (login picker extension slot)
 #   (ollama 는 API 키 불필요)
 api_key = ""

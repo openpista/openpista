@@ -204,34 +204,28 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `openpista model [MODEL_OR_COMMAND]` — model catalog (list / test)
 - [x] `openpista -s SESSION_ID` — resume session shortcut
 - [x] `openpista auth login` — browser OAuth PKCE login with persisted credentials
-- [x] TUI slash commands: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`
-- [x] Centralized TUI with dedicated Home, Chat, Session Browser, and Model Browser screens
+- [x] Multi-provider OAuth PKCE: OpenAI, Anthropic, OpenRouter, GitHub Copilot
+- [x] GitHub Copilot PKCE OAuth — subscription-based auth via GitHub OAuth → Copilot session token exchange
+- [x] Provider login picker with search, OAuth/API-key method chooser, and credential status dots
+- [x] Internal TUI slash commands (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
+- [x] Centralized, Landing Page-style TUI with dedicated Home and Chat screens
 - [x] TOML config file with documented examples (`config.toml`)
 - [x] Environment variable override for all secrets
 - [x] PID file written on start, removed on exit
 - [x] `SIGTERM` + `Ctrl-C` graceful shutdown
 - [x] Elm Architecture (TEA) reactive TUI — unidirectional data flow (`Action → update() → State → view()`)
 
-### Session Management
+### Multi-Provider Authentication
 
-- [x] Sidebar with session list — toggle with `Tab`, keyboard nav (`j`/`k`, arrows), `Enter` to load, `d`/`Delete` to request deletion, `Esc` to unfocus
-- [x] `/session` browser — full-screen session browsing with search filtering, keyboard navigation, create new, delete with confirmation dialog
-- [x] `/session new`, `/session load <id>`, `/session delete <id>` slash commands
-- [x] `openpista tui -s SESSION_ID` — resume a session from the command line
-- [x] `ConfirmDelete` dialog — `y`/`Enter` to confirm, `n`/`Esc` to cancel
-
-### Model Catalog
-
-- [x] `/model` browser — full-screen model browsing with search (`s` or `/`), remote sync (`r`), keyboard navigation
-- [x] `/model list` — print available models to chat
-- [x] `openpista model [MODEL_OR_COMMAND]` — model catalog from CLI
-
-### TUI Enhancements
-
-- [x] Text selection via mouse drag in chat area; `Ctrl+C` / `Cmd+C` to copy
-- [x] Mouse support: click, drag, scroll in chat and sidebar
-- [x] Command palette with `Tab` auto-complete for slash commands and arrow navigation
-- [x] `AppState` variants: Idle, Thinking, ExecutingTool, AuthPrompting, AuthValidating, LoginBrowsing, ModelBrowsing, SessionBrowsing, ConfirmDelete
+- [x] OAuth 2.0 PKCE browser login for OpenAI (ChatGPT Plus/Pro subscription)
+- [x] OAuth 2.0 PKCE code-display flow for Anthropic (Claude Max subscription)
+- [x] GitHub Copilot PKCE OAuth: GitHub OAuth → `copilot_internal/v2/token` session token exchange
+- [x] OpenAI `id_token` → API key exchange for subscription-billing Responses API
+- [x] Automatic token refresh with 5-minute pre-expiry window
+- [x] Credential store in `~/.openpista/credentials.toml` with per-provider tokens
+- [x] Extension provider slots: GitHub Copilot, Google, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+- [x] `openpista auth status` — show all stored provider credentials and expiry
+- [x] `openpista auth logout` — per-provider credential removal
 
 ### Quality & CI
 

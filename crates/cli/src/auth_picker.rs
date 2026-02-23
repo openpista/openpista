@@ -89,7 +89,7 @@ fn grouped_provider_entries(query: &str) -> Vec<ProviderRegistryEntry> {
 
 /// Determines which login browser step to show after selecting a provider.
 pub fn provider_step_for_entry(entry: &ProviderRegistryEntry) -> LoginBrowseStep {
-    if entry.name == "openai" || entry.name == "anthropic" {
+    if entry.name == "openai" || entry.name == "anthropic" || entry.name == "github-copilot" {
         LoginBrowseStep::SelectMethod
     } else {
         match entry.auth_mode {
@@ -111,7 +111,7 @@ pub fn api_key_method_for_provider(
     provider: &str,
     preferred: Option<AuthMethodChoice>,
 ) -> AuthMethodChoice {
-    if provider == "openai" || provider == "anthropic" {
+    if provider == "openai" || provider == "anthropic" || provider == "github-copilot" {
         preferred.unwrap_or(AuthMethodChoice::OAuth)
     } else {
         preferred.unwrap_or(AuthMethodChoice::ApiKey)

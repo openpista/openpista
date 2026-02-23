@@ -497,6 +497,128 @@ pub async fn refresh_and_exchange(
     Ok(cred)
 }
 
+// ── GitHub Copilot token exchange ─────────────────────────────────────────────
+
+/// Exchanges an authorization code for tokens at GitHub's OAuth endpoint.
+///
+/// GitHub's `/login/oauth/access_token` requires `Accept: application/json` to
+/// return JSON (otherwise it returns form-encoded data).
+#[cfg(not(test))]
+async fn exchange_code_github(
+    token_url: &str,
+    client_id: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> anyhow::Result<ProviderCredential> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("client_id", client_id),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", code_verifier),
+    ];
+
+    let response = client
+        .post(token_url)
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+        .context("GitHub token exchange request failed")?;
+    debug!(status = %response.status().as_u16(), "GitHub token exchange response");
+
+    let token: TokenResponse = response
+        .error_for_status()
+        .context("GitHub token endpoint returned an error status")?
+        .json()
+        .await
+        .context("failed to parse GitHub token response")?;
+
+    let expires_at = token
+        .expires_in
+        .map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
+
+    debug!(
+        has_refresh = %token.refresh_token.is_some(),
+        expires_in = ?token.expires_in,
+        "GitHub token exchange completed"
+    );
+
+    Ok(ProviderCredential {
+        access_token: token.access_token,
+        endpoint: None,
+        refresh_token: token.refresh_token,
+        expires_at,
+        id_token: token.id_token,
+    })
+}
+
+/// Exchanges a GitHub OAuth access token for a Copilot session token.
+///
+/// After obtaining a GitHub OAuth token via PKCE, this function exchanges it
+/// for a short-lived Copilot API session token at GitHub's internal endpoint.
+/// The session token is used for OpenAI-compatible chat completions at
+/// `https://api.githubcopilot.com`.
+#[cfg(not(test))]
+pub async fn exchange_github_copilot_token(
+    github_access_token: &str,
+) -> anyhow::Result<ProviderCredential> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("token {github_access_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "openpista")
+        .send()
+        .await
+        .context("Copilot token exchange request failed")?;
+    let status = response.status();
+    debug!(status = %status.as_u16(), "Copilot token exchange response");
+
+    let body = response
+        .text()
+        .await
+        .context("failed to read Copilot token response body")?;
+
+    if !status.is_success() {
+        let safe_msg = sanitize_error_body(&body);
+        anyhow::bail!("Copilot token exchange failed: HTTP {status}: {safe_msg}");
+    }
+
+    #[derive(Deserialize)]
+    struct CopilotTokenResponse {
+        token: String,
+        expires_at: Option<i64>,
+    }
+
+    let result: CopilotTokenResponse =
+        serde_json::from_str(&body).context("failed to parse Copilot token response")?;
+
+    let expires_at = result.expires_at.map(|ts| {
+        chrono::DateTime::from_timestamp(ts, 0)
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(30))
+    });
+
+    debug!("Copilot token exchange succeeded");
+
+    Ok(ProviderCredential {
+        access_token: result.token,
+        endpoint: None,
+        refresh_token: None,
+        expires_at,
+        id_token: None,
+    })
+}
 // ── Public login flow ─────────────────────────────────────────────────────────
 
 /// Runs the full OAuth 2.0 PKCE browser-based login flow.
@@ -575,14 +697,25 @@ pub async fn login(
         .get("code")
         .context("no authorization code in callback")?;
 
-    let mut cred = exchange_code(
-        endpoints.token_url,
-        client_id,
-        code,
-        &redirect_uri,
-        &code_verifier,
-    )
-    .await?;
+    let mut cred = if provider_name == "github-copilot" {
+        exchange_code_github(
+            endpoints.token_url,
+            client_id,
+            code,
+            &redirect_uri,
+            &code_verifier,
+        )
+        .await?
+    } else {
+        exchange_code(
+            endpoints.token_url,
+            client_id,
+            code,
+            &redirect_uri,
+            &code_verifier,
+        )
+        .await?
+    };
 
     // OpenAI requires an additional token-exchange step: the `id_token` must be
     // exchanged for an actual API key before the credential can be used.
