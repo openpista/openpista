@@ -167,7 +167,7 @@ pub enum Action {
     SlashCommand(String),
 
     // ── WhatsApp setup ────────────────────────────────────────
-    /// Open the WhatsApp pairing screen (checks prereqs, starts bridge, waits for QR).
+    /// Open the WhatsApp pairing screen (starts bridge, waits for QR).
     OpenWhatsAppSetup,
     /// Cancel the WhatsApp pairing and return to idle.
     WhatsAppSetupCancel,
@@ -182,14 +182,8 @@ pub enum Action {
     WhatsAppQrReceived(String),
     /// The WhatsApp bridge connected successfully.
     WhatsAppConnected { phone: String, name: String },
-    /// Complete the wizard and persist the configuration.
-    WhatsAppSetupComplete,
-    /// Forward a raw key event to handle_key for character input/deletion.
+    /// Forward a raw key event to the WhatsApp setup state machine.
     WhatsAppSetupKey(crossterm::event::KeyEvent),
-    /// Advance to the next wizard step.
-    WhatsAppSetupNext,
-    /// Go back to the previous wizard step.
-    WhatsAppSetupBack,
     // ── QR code display ─────────────────────────────────────
     /// Open the QR code overlay showing the Web UI URL.
     OpenQrCode { url: String, qr_lines: Vec<String> },

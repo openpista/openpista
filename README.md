@@ -223,9 +223,8 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number = ""
-access_token = ""
-webhook_port = 8443
+session_dir = "~/.openpista/whatsapp-session"
+# bridge_path = "whatsapp-bridge/index.js"
 
 [channels.web]
 enabled = false
@@ -247,8 +246,8 @@ Environment variables override config file values. They are intended for CI pipe
 | `openpista_WEB_TOKEN` | Web adapter auth token |
 | `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
 | `openpista_WORKSPACE` | Custom skills workspace path |
-| `WHATSAPP_ACCESS_TOKEN` | WhatsApp access token |
-| `WHATSAPP_PHONE_NUMBER` | WhatsApp phone number |
+| `WHATSAPP_SESSION_DIR` | WhatsApp Web session directory |
+| `WHATSAPP_BRIDGE_PATH` | WhatsApp bridge script path |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 ---
@@ -323,14 +322,11 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 Enable WhatsApp in `config.toml` (see [WHATSAPP.md](./WHATSAPP.md) for full setup guide):
-
-
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number = "15551234567"
-# access_token = "EAA..."
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
+# session_dir = "~/.openpista/whatsapp-session"
+WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
 ```
 
 Enable the Web UI adapter:
@@ -349,32 +345,6 @@ The daemon:
  Starts all enabled channel adapters
  Writes a PID file to `~/.openpista/openpista.pid`
  Handles `SIGTERM` / `Ctrl-C` for graceful shutdown
-
-### Web server commands
-
-Use dedicated web lifecycle commands when you only want the web adapter:
-
-```bash
-# 1) Configure [channels.web] and install static assets to static_dir
-#    On first setup, a secure web token is generated automatically.
-openpista web setup --enable --port 3210
-
-# Optional token controls
-openpista web setup --regenerate-token          # force issue a new token
-openpista web setup --yes                       # auto-confirm regenerate prompt
-openpista web setup --token "manual-token"      # set token explicitly
-
-# 2) Start web-only daemon
-openpista web start
-
-# 3) Inspect config + runtime status (pid/health)
-openpista web status
-```
-
-`openpista web setup` copies files from `crates/channels/static` into your configured
-`channels.web.static_dir` (default `~/.openpista/web`) and persists the web section to config.
-If a token already exists, setup asks whether to regenerate it (interactive terminals only).
-In non-interactive runs, the existing token is kept unless `--regenerate-token` is passed.
 ### Skills
 
 Place a `SKILL.md` in your workspace to extend the agent's capabilities:

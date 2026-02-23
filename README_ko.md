@@ -221,9 +221,8 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number = ""
-access_token = ""
-webhook_port = 8443
+session_dir = "~/.openpista/whatsapp-session"
+# bridge_path = "whatsapp-bridge/index.js"
 
 [channels.web]
 enabled = false
@@ -245,8 +244,8 @@ static_dir = "~/.openpista/web"
 | `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
 | `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
 | `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
-| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 액세스 토큰 |
-| `WHATSAPP_PHONE_NUMBER` | 왓츠앱 전화번호 |
+| `WHATSAPP_SESSION_DIR` | 왓츠앱 Web 세션 디렉토리 |
+| `WHATSAPP_BRIDGE_PATH` | 왓츠앱 브릿지 스크립트 경로 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 ---
@@ -321,14 +320,11 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 왓츠앱을 `config.toml`에서 활성화하세요 (자세한 설정 방법은 [WHATSAPP.md](./WHATSAPP.md) 참조):
-
-
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number = "15551234567"
-# access_token = "EAA..."
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
+# session_dir = "~/.openpista/whatsapp-session"
+WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
 ```
 
 웹 UI 어댑터를 활성화하세요:
@@ -348,32 +344,6 @@ openpista_WEB_TOKEN=my-secret-token openpista_WEB_PORT=3210 openpista start
  활성화된 모든 채널 어댑터 시작
  `~/.openpista/openpista.pid`에 PID 파일 저장
  정상 종료를 위한 `SIGTERM` / `Ctrl-C` 처리
-
-### 웹 서버 전용 명령어
-
-웹 어댑터만 다루고 싶다면 전용 라이프사이클 명령어를 사용하세요:
-
-```bash
-# 1) [channels.web] 설정 저장 + 정적 파일(static) 설치
-#    최초 setup 시 안전한 web token을 자동 발급합니다.
-openpista web setup --enable --port 3210
-
-# 토큰 관련 옵션
-openpista web setup --regenerate-token          # 새 토큰 강제 재발급
-openpista web setup --yes                       # 재발급 확인 프롬프트 자동 승인
-openpista web setup --token "manual-token"      # 토큰 직접 지정
-
-# 2) 웹 전용 데몬 시작
-openpista web start
-
-# 3) 설정 + 런타임 상태(pid/health) 확인
-openpista web status
-```
-
-`openpista web setup`은 `crates/channels/static` 파일을 `channels.web.static_dir`
-(기본값 `~/.openpista/web`)로 복사하고 web 섹션 설정을 저장합니다.
-기존 토큰이 있으면(대화형 터미널 기준) 재발급 여부를 물어봅니다.
-비대화형 환경에서는 `--regenerate-token`을 주지 않으면 기존 토큰을 유지합니다.
 ### Skills
 
 워크스페이스에 `SKILL.md`를 배치하여 에이전트 기능을 확장하세요:

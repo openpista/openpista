@@ -246,16 +246,10 @@ pub enum AppState {
         /// Text input buffer for the current step.
         input_buffer: String,
     },
-    /// WhatsApp configuration wizard.
+    /// WhatsApp pairing flow (QR code from Baileys bridge).
     WhatsAppSetup {
-        /// Current wizard step.
+        /// Current pairing step.
         step: WhatsAppSetupStep,
-        /// Input buffer for the current field.
-        input_buffer: String,
-        /// Collected phone_number.
-        phone_number: String,
-        /// Collected access_token.
-        access_token: String,
     },
     /// QR code overlay showing the Web UI URL.
     QrCodeDisplay {
@@ -265,15 +259,25 @@ pub enum AppState {
         qr_lines: Vec<String>,
     },
 }
-/// Steps in the WhatsApp configuration wizard.
+/// Steps in the WhatsApp pairing flow.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WhatsAppSetupStep {
-    /// Enter the WhatsApp phone number.
-    PhoneNumber,
-    /// Enter the access token.
-    AccessToken,
-    /// Review and confirm all values.
-    Confirm,
+    /// Waiting for the bridge to produce a QR code.
+    WaitingForQr,
+    /// Displaying a QR code for the user to scan.
+    DisplayQr {
+        /// QR code data string from the bridge.
+        qr_data: String,
+        /// Pre-rendered QR lines (Unicode half-blocks).
+        qr_lines: Vec<String>,
+    },
+    /// Successfully connected.
+    Connected {
+        /// Phone number of the paired device.
+        phone: String,
+        /// Display name of the paired device.
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1212,21 +1216,12 @@ impl TuiApp {
             return;
         }
 
-        // ── WhatsApp setup wizard ────────────────────
-        if let AppState::WhatsAppSetup {
-            step, input_buffer, ..
-        } = &mut self.state
-        {
-            match key.code {
-                KeyCode::Char(c) => {
-                    input_buffer.push(c);
-                }
-                KeyCode::Backspace => {
-                    input_buffer.pop();
-                }
-                _ => {} // Enter/Esc handled by map_key_event
+        // ── WhatsApp pairing ────────────────────────────────────────
+        if matches!(self.state, AppState::WhatsAppSetup { .. }) {
+            if key.code == KeyCode::Esc {
+                self.state = AppState::Idle;
+                self.push_assistant("WhatsApp pairing cancelled.".to_string());
             }
-            let _ = step; // suppress unused warning
             return;
         }
 
@@ -2338,113 +2333,42 @@ impl TuiApp {
                 Command::None
             }
 
-            // ── WhatsApp setup wizard ──────────────────────
+            // ── WhatsApp pairing ────────────────────────
             Action::OpenWhatsAppSetup => {
                 self.input.clear();
                 self.cursor_pos = 0;
                 self.state = AppState::WhatsAppSetup {
-                    step: WhatsAppSetupStep::PhoneNumber,
-                    input_buffer: String::new(),
-                    phone_number: String::new(),
-                    access_token: String::new(),
+                    step: WhatsAppSetupStep::WaitingForQr,
                 };
                 self.screen = Screen::Chat;
                 Command::None
             }
-            Action::WhatsAppSetupNext => {
-                if let AppState::WhatsAppSetup {
-                    step,
-                    input_buffer,
-                    phone_number,
-                    access_token,
-                } = &mut self.state
-                {
-                    let val = input_buffer.trim().to_string();
-                    match step {
-                        WhatsAppSetupStep::PhoneNumber => {
-                            if val.is_empty() {
-                                return Command::None;
-                            }
-                            *phone_number = val;
-                            *input_buffer = String::new();
-                            *step = WhatsAppSetupStep::AccessToken;
-                        }
-                        WhatsAppSetupStep::AccessToken => {
-                            if val.is_empty() {
-                                return Command::None;
-                            }
-                            *access_token = val;
-                            *input_buffer = String::new();
-                            *step = WhatsAppSetupStep::Confirm;
-                        }
-                        WhatsAppSetupStep::Confirm => {
-                            // Handled by WhatsAppSetupComplete
-                        }
-                    }
-                }
-                Command::None
-            }
-            Action::WhatsAppSetupBack => {
-                let is_first_step = matches!(
-                    &self.state,
-                    AppState::WhatsAppSetup {
-                        step: WhatsAppSetupStep::PhoneNumber,
-                        ..
-                    }
-                );
-                if is_first_step {
-                    self.state = AppState::Idle;
-                    self.push_assistant("WhatsApp setup cancelled.".to_string());
-                } else if let AppState::WhatsAppSetup {
-                    step, input_buffer, ..
-                } = &mut self.state
-                {
-                    *input_buffer = String::new();
-                    match step {
-                        WhatsAppSetupStep::PhoneNumber => unreachable!(),
-                        WhatsAppSetupStep::AccessToken => {
-                            *step = WhatsAppSetupStep::PhoneNumber;
-                        }
-                        WhatsAppSetupStep::Confirm => {
-                            *step = WhatsAppSetupStep::AccessToken;
-                        }
-                    }
-                }
-                Command::None
-            }
             Action::WhatsAppSetupCancel => {
                 self.state = AppState::Idle;
-                self.push_assistant("WhatsApp setup cancelled.".to_string());
+                self.push_assistant("WhatsApp pairing cancelled.".to_string());
                 Command::None
             }
-            Action::WhatsAppSetupComplete => {
-                if let AppState::WhatsAppSetup {
-                    phone_number,
-                    access_token,
-                    ..
-                } = &self.state
-                {
-                    let wa_config = crate::config::WhatsAppConfig {
-                        enabled: true,
-                        phone_number: Some(phone_number.clone()),
-                        access_token: Some(access_token.clone()),
-                        webhook_port: 8443,
-                    };
-                    self.state = AppState::Idle;
-                    let phone = wa_config.phone_number.as_deref().unwrap_or_default();
-                    let wa_me_url = format!("https://wa.me/{phone}");
-                    let mut msg =
-                        "WhatsApp configuration saved! Restart openpista to apply changes."
-                            .to_string();
-                    if let Some(qr) = super::event::render_qr_text(&wa_me_url) {
-                        msg.push_str("\n\n");
-                        msg.push_str(&format!("  QR Code ({wa_me_url})\n\n"));
-                        msg.push_str(&qr);
-                        msg.push_str("\n\n  Scan with your phone to start a conversation.");
+            Action::WhatsAppQrReceived(qr_data) => {
+                if let AppState::WhatsAppSetup { step } = &mut self.state {
+                    match generate_qr_lines(&qr_data) {
+                        Ok(qr_lines) => {
+                            *step = WhatsAppSetupStep::DisplayQr { qr_data, qr_lines };
+                        }
+                        Err(e) => {
+                            self.push_error(format!("Failed to render QR code: {e}"));
+                        }
                     }
-                    self.push_assistant(msg);
-                    return Command::SaveWhatsAppConfig(wa_config);
                 }
+                Command::None
+            }
+            Action::WhatsAppConnected { phone, name } => {
+                if let AppState::WhatsAppSetup { step } = &mut self.state {
+                    *step = WhatsAppSetupStep::Connected {
+                        phone: phone.clone(),
+                        name: name.clone(),
+                    };
+                }
+                self.push_assistant(format!("WhatsApp connected! Phone: {phone}, Name: {name}"));
                 Command::None
             }
             Action::OpenQrCode { url, qr_lines } => {
@@ -2455,24 +2379,10 @@ impl TuiApp {
                 self.state = AppState::Idle;
                 Command::None
             }
-            Action::WhatsAppSetupKey(key) => {
-                self.handle_key(key);
-                Command::None
-            }
             Action::WhatsAppPrereqsChecked { .. } => Command::None,
             Action::WhatsAppBridgeInstalled(_) => Command::None,
-            Action::WhatsAppQrReceived(url) => {
-                match generate_qr_lines(&url) {
-                    Ok(qr_lines) => {
-                        self.state = AppState::QrCodeDisplay { url, qr_lines };
-                    }
-                    Err(_) => {}
-                }
-                Command::None
-            }
-            Action::WhatsAppConnected { phone, name: _ } => {
-                self.state = AppState::Idle;
-                self.push_assistant(format!("WhatsApp connected: {phone}"));
+            Action::WhatsAppSetupKey(key) => {
+                self.handle_key(key);
                 Command::None
             }
         }
@@ -2543,28 +2453,7 @@ impl TuiApp {
         if matches!(self.state, AppState::WhatsAppSetup { .. }) {
             return match (key.modifiers, key.code) {
                 (_, KeyCode::Esc) => vec![Action::WhatsAppSetupCancel],
-                (_, KeyCode::Enter) => {
-                    if let AppState::WhatsAppSetup { step, .. } = &self.state {
-                        match step {
-                            WhatsAppSetupStep::Confirm => vec![Action::WhatsAppSetupComplete],
-                            _ => vec![Action::WhatsAppSetupNext],
-                        }
-                    } else {
-                        vec![]
-                    }
-                }
-                (_, KeyCode::Backspace) => {
-                    if let AppState::WhatsAppSetup { input_buffer, .. } = &self.state {
-                        if input_buffer.is_empty() {
-                            vec![Action::WhatsAppSetupBack]
-                        } else {
-                            vec![Action::WhatsAppSetupKey(key)]
-                        }
-                    } else {
-                        vec![]
-                    }
-                }
-                _ => vec![Action::WhatsAppSetupKey(key)],
+                _ => vec![], // No text input in QR pairing flow
             };
         }
 
@@ -3680,135 +3569,84 @@ impl TuiApp {
     }
 
     fn render_whatsapp_setup(&self, frame: &mut Frame<'_>, area: Rect) {
-        let AppState::WhatsAppSetup {
-            step,
-            input_buffer,
-            phone_number,
-            access_token,
-        } = &self.state
-        else {
+        let AppState::WhatsAppSetup { step } = &self.state else {
             return;
         };
-        let chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(3),
-        ])
-        .split(area);
-        let step_num = match step {
-            WhatsAppSetupStep::PhoneNumber => 1,
-            WhatsAppSetupStep::AccessToken => 2,
-            WhatsAppSetupStep::Confirm => 3,
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+        let (phase, phase_style) = match step {
+            WhatsAppSetupStep::WaitingForQr => ("Waiting for QR…", THEME.fg_dim),
+            WhatsAppSetupStep::DisplayQr { .. } => ("Scan QR code", THEME.accent),
+            WhatsAppSetupStep::Connected { .. } => ("Connected ✓", THEME.success),
         };
         let title = Line::from(vec![
             Span::styled(
-                " WhatsApp Setup ",
+                " WhatsApp Pairing ",
                 Style::default()
                     .fg(THEME.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("(step {step_num}/3)"),
-                Style::default().fg(THEME.fg_dim),
-            ),
+            Span::styled(format!("({phase})"), Style::default().fg(phase_style)),
         ]);
         frame.render_widget(Paragraph::new(title), chunks[0]);
-        let content_lines = match step {
-            WhatsAppSetupStep::Confirm => {
-                let mask = |s: &str| {
-                    if s.len() <= 4 {
-                        "****".to_string()
-                    } else {
-                        format!("{}\u{2026}{}", &s[..2], &s[s.len() - 2..])
-                    }
-                };
-                vec![
+        let content_lines: Vec<Line<'_>> = match step {
+            WhatsAppSetupStep::WaitingForQr => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Starting WhatsApp bridge…",
+                    Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    " A QR code will appear here shortly.",
+                    Style::default().fg(THEME.fg_dim),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Esc: cancel",
+                    Style::default().fg(THEME.error),
+                )),
+            ],
+            WhatsAppSetupStep::DisplayQr { qr_lines, .. } => {
+                let mut lines: Vec<Line<'_>> = vec![
+                    Line::from(""),
                     Line::from(Span::styled(
-                        " Review your WhatsApp configuration:",
+                        " Open WhatsApp on your phone → Linked Devices → Link a Device",
                         Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
                     )),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("   Phone Number:    ", Style::default().fg(THEME.fg_dim)),
-                        Span::styled(phone_number.as_str(), Style::default().fg(THEME.fg)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("   Access Token:    ", Style::default().fg(THEME.fg_dim)),
-                        Span::styled(mask(access_token), Style::default().fg(THEME.fg)),
-                    ]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled(
-                            " Enter",
-                            Style::default()
-                                .fg(THEME.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(": confirm  ", Style::default().fg(THEME.fg_muted)),
-                        Span::styled(
-                            "Backspace",
-                            Style::default()
-                                .fg(THEME.warning)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(": go back  ", Style::default().fg(THEME.fg_muted)),
-                        Span::styled(
-                            "Esc",
-                            Style::default()
-                                .fg(THEME.error)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(": cancel", Style::default().fg(THEME.fg_muted)),
-                    ]),
-                ]
+                ];
+                for ql in qr_lines {
+                    lines.push(Line::from(Span::raw(format!("  {ql}"))));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Esc: cancel",
+                    Style::default().fg(THEME.error),
+                )));
+                lines
             }
-            _ => {
-                let (prompt, hint) = match step {
-                    WhatsAppSetupStep::PhoneNumber => (
-                        "Enter your WhatsApp phone number:",
-                        "E.g. 15551234567 (country code + number, no spaces)",
-                    ),
-                    WhatsAppSetupStep::AccessToken => (
-                        "Enter your access token:",
-                        "See WHATSAPP.md for token setup guide",
-                    ),
-                    WhatsAppSetupStep::Confirm => unreachable!(),
-                };
-                vec![
-                    Line::from(Span::styled(
-                        format!(" {prompt}"),
-                        Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(Span::styled(
-                        format!(" {hint}"),
-                        Style::default().fg(THEME.fg_dim),
-                    )),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled(
-                            " Enter",
-                            Style::default()
-                                .fg(THEME.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(": next  ", Style::default().fg(THEME.fg_muted)),
-                        Span::styled(
-                            "Backspace",
-                            Style::default()
-                                .fg(THEME.warning)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" (empty): back  ", Style::default().fg(THEME.fg_muted)),
-                        Span::styled(
-                            "Esc",
-                            Style::default()
-                                .fg(THEME.error)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(": cancel", Style::default().fg(THEME.fg_muted)),
-                    ]),
-                ]
-            }
+            WhatsAppSetupStep::Connected { phone, name } => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " ✓ WhatsApp paired successfully!",
+                    Style::default()
+                        .fg(THEME.success)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("   Phone:  ", Style::default().fg(THEME.fg_dim)),
+                    Span::styled(phone.as_str(), Style::default().fg(THEME.fg)),
+                ]),
+                Line::from(vec![
+                    Span::styled("   Name:   ", Style::default().fg(THEME.fg_dim)),
+                    Span::styled(name.as_str(), Style::default().fg(THEME.fg)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Esc: close",
+                    Style::default().fg(THEME.fg_muted),
+                )),
+            ],
         };
         let content = Paragraph::new(content_lines)
             .block(
@@ -3816,31 +3654,12 @@ impl TuiApp {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(THEME.border))
                     .title(Span::styled(
-                        " WhatsApp Configuration ",
+                        " WhatsApp Pairing ",
                         Style::default().fg(THEME.accent),
                     )),
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(content, chunks[1]);
-        if *step != WhatsAppSetupStep::Confirm {
-            let display_text = if matches!(step, WhatsAppSetupStep::AccessToken) {
-                "\u{2022}".repeat(input_buffer.len())
-            } else {
-                input_buffer.clone()
-            };
-            let input_widget = Paragraph::new(display_text.as_str()).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(THEME.accent))
-                    .title(Span::styled(" Input ", Style::default().fg(THEME.fg_dim))),
-            );
-            frame.render_widget(input_widget, chunks[2]);
-            let cursor_x = chunks[2].x + 1 + UnicodeWidthStr::width(input_buffer.as_str()) as u16;
-            let cursor_y = chunks[2].y + 1;
-            if cursor_x < chunks[2].x + chunks[2].width - 1 {
-                frame.set_cursor_position((cursor_x, cursor_y));
-            }
-        }
     }
 }
 

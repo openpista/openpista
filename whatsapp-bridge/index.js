@@ -75,12 +75,9 @@ async function start() {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     logger,
-    browser: ["openpista", "Chrome", "120.0.0"],
     printQRInTerminal: false, // We handle QR ourselves
     generateHighQualityLinkPreview: false,
     syncFullHistory: false,
-    markOnlineOnConnect: false,
-    defaultQueryTimeoutMs: 60_000,
   });
 
   // ── QR code event ───────────────────────────────────────
