@@ -12,25 +12,18 @@ use bollard::query_parameters::{
     WaitContainerOptions,
 };
 use futures_util::TryStreamExt;
-use proto::{ChannelEvent, ChannelId, SessionId, ToolResult, WorkerReport};
+use proto::ToolResult;
 use rand::RngCore;
-use rustls::DigitallySignedStruct;
-use rustls::SignatureScheme;
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use serde::Deserialize;
 use skills::{SkillExecutionMode, SkillLoader};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::time::timeout;
-use tracing::{debug, warn};
-use webpki_roots::TLS_SERVER_ROOTS;
+use tracing::warn;
 
 use crate::Tool;
 use crate::wasm_runtime::{WasmRunRequest, run_wasm_skill};
@@ -39,8 +32,6 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_TOKEN_TTL_SECS: u64 = 300;
 const MAX_TOKEN_TTL_SECS: u64 = 900;
-const DEFAULT_REPORT_TIMEOUT_SECS: u64 = 10;
-const MAX_REPORT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MEMORY_MB: i64 = 512;
 const DEFAULT_CPU_MILLIS: i64 = 1000;
 const MAX_OUTPUT_CHARS: usize = 10_000;
@@ -76,12 +67,6 @@ struct ContainerArgs {
     inject_task_token: Option<bool>,
     token_ttl_secs: Option<u64>,
     token_env_name: Option<String>,
-    report_via_quic: Option<bool>,
-    report_timeout_secs: Option<u64>,
-    orchestrator_quic_addr: Option<String>,
-    orchestrator_channel_id: Option<String>,
-    orchestrator_session_id: Option<String>,
-    orchestrator_quic_insecure_skip_verify: Option<bool>,
     allow_subprocess_fallback: Option<bool>,
 }
 
@@ -131,7 +116,7 @@ impl Tool for ContainerTool {
     /// Provide the JSON Schema describing valid parameters for the container tool.
     ///
     /// The schema enumerates all accepted top-level properties (image, command, skill-related
-    /// fields, resource limits, credential and reporting options, etc.), sets no required fields,
+    /// fields, resource limits, credential options, etc.), sets no required fields,
     /// and disallows additional properties.
     ///
     /// # Examples
@@ -210,30 +195,6 @@ impl Tool for ContainerTool {
                     "type": "string",
                     "description": "Environment variable name exposed by injected credential file (default: openpista_TASK_TOKEN)"
                 },
-                "report_via_quic": {
-                    "type": "boolean",
-                    "description": "When true, submit worker execution report back to orchestrator over QUIC"
-                },
-                "report_timeout_secs": {
-                    "type": "integer",
-                    "description": "Timeout in seconds when submitting worker report over QUIC (default: 10, max: 30)"
-                },
-                "orchestrator_quic_addr": {
-                    "type": "string",
-                    "description": "Orchestrator QUIC listen address in host:port format"
-                },
-                "orchestrator_channel_id": {
-                    "type": "string",
-                    "description": "Orchestrator channel_id that owns this worker task"
-                },
-                "orchestrator_session_id": {
-                    "type": "string",
-                    "description": "Orchestrator session_id that should receive the worker report"
-                },
-                "orchestrator_quic_insecure_skip_verify": {
-                    "type": "boolean",
-                    "description": "Skip QUIC TLS certificate verification for orchestrator report upload (default: false; for local testing only)"
-                },
                 "allow_subprocess_fallback": {
                     "type": "boolean",
                     "description": "Fallback to local subprocess when Docker is unavailable (default: false)"
@@ -249,7 +210,7 @@ impl Tool for ContainerTool {
     /// The function:
     /// - Deserializes `args` into `ContainerArgs`.
     /// - Resolves the runtime mode; if the skill metadata indicates WASM mode, it requires `workspace_dir` and `skill_name` and runs the skill via the WASM runtime, returning the skill's output.
-    /// - Otherwise, validates and resolves the container image and command, runs the workload in Docker (or falls back to a local subprocess if allowed), optionally reports the worker result via QUIC, and returns the combined stdout/stderr and exit code.
+    /// - Otherwise, validates and resolves the container image and command, runs the workload in Docker (or falls back to a local subprocess if allowed), and returns the combined stdout/stderr and exit code.
     ///
     /// Parameters:
     /// - `call_id`: identifier used for container naming, reporting and correlating the execution.
@@ -355,12 +316,6 @@ impl Tool for ContainerTool {
         );
 
         let container_name = build_container_name(call_id);
-        let image_for_report = parsed
-            .image
-            .as_deref()
-            .and_then(non_empty)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "local-subprocess".to_string());
 
         let docker_result = Docker::connect_with_local_defaults()
             .map_err(|e| format!("Failed to connect to Docker daemon: {e}"));
@@ -374,28 +329,11 @@ impl Tool for ContainerTool {
         .await;
 
         match execution_result {
-            Ok(execution) => {
-                if let Err(err) = maybe_report_worker_result(
-                    call_id,
-                    &parsed,
-                    &container_name,
-                    &image_for_report,
-                    &execution,
-                    timeout_duration,
-                )
-                .await
-                {
-                    warn!(
-                        "worker report upload failed for call_id={call_id} container={container_name}: {err}"
-                    );
-                }
-
-                ToolResult::success(
-                    call_id,
-                    self.name(),
-                    format_output(&execution.stdout, &execution.stderr, execution.exit_code),
-                )
-            }
+            Ok(execution) => ToolResult::success(
+                call_id,
+                self.name(),
+                format_output(&execution.stdout, &execution.stderr, execution.exit_code),
+            ),
             Err(e) => ToolResult::error(call_id, self.name(), e),
         }
     }
@@ -437,12 +375,6 @@ impl Tool for ContainerTool {
 ///     inject_task_token: None,
 ///     token_ttl_secs: None,
 ///     token_env_name: None,
-///     report_via_quic: None,
-///     report_timeout_secs: None,
-///     orchestrator_quic_addr: None,
-///     orchestrator_channel_id: None,
-///     orchestrator_session_id: None,
-///     orchestrator_quic_insecure_skip_verify: None,
 ///     allow_subprocess_fallback: None,
 /// };
 ///
@@ -821,12 +753,6 @@ async fn run_with_docker_or_subprocess(
 ///         inject_task_token: None,
 ///         token_ttl_secs: None,
 ///         token_env_name: None,
-///         report_via_quic: None,
-///         report_timeout_secs: None,
-///         orchestrator_quic_addr: None,
-///         orchestrator_channel_id: None,
-///         orchestrator_session_id: None,
-///         orchestrator_quic_insecure_skip_verify: None,
 ///         allow_subprocess_fallback: None,
 ///     };
 ///     let res = run_as_subprocess(&args, Duration::from_secs(5)).await.unwrap();
@@ -895,299 +821,6 @@ async fn run_as_subprocess(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: i64::from(output.status.code().unwrap_or(-1)),
     })
-}
-
-/// Sends the worker's execution result to an orchestrator over QUIC when reporting is enabled.
-///
-/// This function no-ops when `args.report_via_quic` is false or unset. When reporting is enabled,
-/// it validates required orchestrator fields from `args`, resolves the orchestrator address via DNS,
-/// builds a `WorkerReport` and `ChannelEvent` containing the call metadata and command output, and
-/// submits the event to the orchestrator over a QUIC connection within the provided timeout.
-///
-/// # Errors
-///
-/// Returns an `Err(String)` with a human-readable message if any required orchestrator argument is
-/// missing or empty, DNS resolution fails, report serialization fails, or the QUIC submission fails
-/// or times out.
-///
-/// # Examples
-///
-/// ```ignore
-/// use std::time::Duration;
-/// # async fn example() {
-/// // Construct `args` and `execution` with the necessary reporting fields set,
-/// // then call the helper. This example uses `no_run` to avoid requiring a running
-/// // orchestrator or full test harness.
-/// let args = unimplemented!(); // ContainerArgs with reporting enabled and orchestrator fields
-/// let execution = unimplemented!(); // ContainerExecution with stdout/stderr/exit_code
-/// let _ = crate::maybe_report_worker_result(
-///     "call-123",
-///     &args,
-///     "container-name",
-///     "registry.example/image:tag",
-///     &execution,
-///     Duration::from_secs(10),
-/// ).await;
-/// # }
-/// ```
-async fn maybe_report_worker_result(
-    call_id: &str,
-    args: &ContainerArgs,
-    container_name: &str,
-    image: &str,
-    execution: &ContainerExecution,
-    run_timeout: Duration,
-) -> Result<(), String> {
-    if !args.report_via_quic.unwrap_or(false) {
-        return Ok(());
-    }
-
-    let quic_addr = required_arg_string(
-        args.orchestrator_quic_addr.as_deref(),
-        "orchestrator_quic_addr",
-    )?;
-
-    // Extract actual hostname for SNI before resolution
-    let sni_hostname = quic_addr
-        .split(':')
-        .next()
-        .unwrap_or("localhost")
-        .to_string();
-
-    let channel_id = required_arg_string(
-        args.orchestrator_channel_id.as_deref(),
-        "orchestrator_channel_id",
-    )?;
-    let session_id = required_arg_string(
-        args.orchestrator_session_id.as_deref(),
-        "orchestrator_session_id",
-    )?;
-
-    // Resolve via DNS instead of raw parse()
-    let mut addrs = tokio::net::lookup_host(&quic_addr)
-        .await
-        .map_err(|e| format!("Failed to resolve orchestrator_quic_addr '{quic_addr}': {e}"))?;
-
-    let addr = addrs
-        .next()
-        .ok_or_else(|| format!("No DNS records found for '{quic_addr}'"))?;
-
-    let output = format_output(&execution.stdout, &execution.stderr, execution.exit_code);
-    let command = args.command.as_deref().and_then(non_empty).unwrap_or("");
-    let summary = build_worker_summary(call_id, execution.exit_code, command);
-    let report = WorkerReport::new(
-        call_id.to_string(),
-        container_name.to_string(),
-        image.to_string(),
-        command.to_string(),
-        proto::WorkerOutput {
-            exit_code: execution.exit_code,
-            stdout: execution.stdout.clone(),
-            stderr: execution.stderr.clone(),
-            output,
-        },
-    );
-
-    let mut event = ChannelEvent::new(
-        ChannelId::from(channel_id),
-        SessionId::from(session_id),
-        summary,
-    );
-    event.metadata = Some(
-        serde_json::to_value(&report)
-            .map_err(|e| format!("Failed to serialize worker report metadata: {e}"))?,
-    );
-
-    let report_timeout = Duration::from_secs(
-        args.report_timeout_secs
-            .unwrap_or(DEFAULT_REPORT_TIMEOUT_SECS)
-            .clamp(1, MAX_REPORT_TIMEOUT_SECS),
-    );
-
-    let insecure_skip_verify = args.orchestrator_quic_insecure_skip_verify.unwrap_or(false);
-    submit_worker_report_over_quic(
-        addr,
-        &sni_hostname,
-        event,
-        report_timeout.min(run_timeout),
-        insecure_skip_verify,
-    )
-    .await
-}
-
-fn required_arg_string(value: Option<&str>, field_name: &str) -> Result<String, String> {
-    let Some(raw) = value else {
-        return Err(format!(
-            "{field_name} is required when report_via_quic=true"
-        ));
-    };
-
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(format!(
-            "{field_name} must not be empty when report_via_quic=true"
-        ));
-    }
-
-    Ok(trimmed.to_string())
-}
-
-fn build_worker_summary(call_id: &str, exit_code: i64, command: &str) -> String {
-    let status = if exit_code == 0 { "success" } else { "error" };
-    format!(
-        "worker_report call_id={call_id} status={status} exit_code={exit_code} command={command}"
-    )
-}
-
-async fn submit_worker_report_over_quic(
-    addr: SocketAddr,
-    sni_hostname: &str,
-    event: ChannelEvent,
-    timeout_duration: Duration,
-    insecure_skip_verify: bool,
-) -> Result<(), String> {
-    let payload = serde_json::to_vec(&event)
-        .map_err(|e| format!("Failed to serialize worker report event: {e}"))?;
-
-    let endpoint = quinn::Endpoint::client(
-        "0.0.0.0:0"
-            .parse()
-            .map_err(|e| format!("Failed to bind QUIC client endpoint: {e}"))?,
-    )
-    .map_err(|e| format!("Failed to create QUIC client endpoint: {e}"))?;
-
-    let client_cfg = build_quic_client_config(insecure_skip_verify)?;
-    let mut endpoint = endpoint;
-    endpoint.set_default_client_config(client_cfg);
-
-    let connect = timeout(timeout_duration, async {
-        endpoint
-            .connect(addr, sni_hostname)
-            .map_err(|e| format!("Failed to prepare QUIC connect: {e}"))?
-            .await
-            .map_err(|e| format!("Failed to connect to orchestrator QUIC {addr}: {e}"))
-    })
-    .await
-    .map_err(|_| format!("Timed out connecting to orchestrator QUIC {addr}"))??;
-
-    let (mut send, mut recv) = timeout(timeout_duration, connect.open_bi())
-        .await
-        .map_err(|_| "Timed out opening QUIC stream for worker report".to_string())?
-        .map_err(|e| format!("Failed to open QUIC stream: {e}"))?;
-
-    timeout(timeout_duration, async {
-        send.write_all(&(payload.len() as u32).to_be_bytes())
-            .await
-            .map_err(|e| format!("Failed to write worker report size prefix: {e}"))?;
-        send.write_all(&payload)
-            .await
-            .map_err(|e| format!("Failed to write worker report payload: {e}"))?;
-        send.finish()
-            .map_err(|e| format!("Failed to finish worker report stream send: {e}"))
-    })
-    .await
-    .map_err(|_| "Timed out sending worker report payload".to_string())??;
-
-    let response = timeout(timeout_duration, async {
-        let mut len_buf = [0_u8; 4];
-        recv.read_exact(&mut len_buf)
-            .await
-            .map_err(|e| format!("Failed to read worker report ACK size: {e}"))?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_OUTPUT_CHARS {
-            return Err("Worker report ACK exceeded expected size".to_string());
-        }
-        let mut buf = vec![0_u8; len];
-        recv.read_exact(&mut buf)
-            .await
-            .map_err(|e| format!("Failed to read worker report ACK payload: {e}"))?;
-        String::from_utf8(buf).map_err(|e| format!("Invalid UTF-8 worker report ACK payload: {e}"))
-    })
-    .await
-    .map_err(|_| "Timed out waiting for worker report ACK".to_string())??;
-
-    connect.close(0_u32.into(), b"worker-report-sent");
-    endpoint.close(0_u32.into(), b"worker-report-endpoint-close");
-
-    debug!("worker report delivered over QUIC to {addr}: {response}");
-    Ok(())
-}
-
-#[derive(Debug)]
-struct InsecureServerCertVerifier;
-
-impl ServerCertVerifier for InsecureServerCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-        ]
-    }
-}
-
-fn build_insecure_quic_client_config() -> Result<quinn::ClientConfig, String> {
-    let mut tls = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
-    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|e| format!("Failed to build QUIC client TLS config: {e}"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
-}
-
-fn build_quic_client_config(insecure_skip_verify: bool) -> Result<quinn::ClientConfig, String> {
-    if insecure_skip_verify {
-        return build_insecure_quic_client_config();
-    }
-
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
-
-    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|e| format!("Failed to build QUIC client TLS config: {e}"))?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_client)))
 }
 
 fn maybe_mint_task_credential(args: &ContainerArgs) -> Result<Option<TaskCredential>, String> {
@@ -1468,136 +1101,6 @@ mod tests {
         std::fs::write(path, content).expect("write file");
     }
 
-    #[test]
-    fn required_arg_string_returns_value_or_err() {
-        assert_eq!(required_arg_string(Some("val"), "field").unwrap(), "val");
-        assert!(required_arg_string(Some(""), "field").is_err());
-        assert!(required_arg_string(None, "field").is_err());
-    }
-
-    #[tokio::test]
-    async fn submit_worker_report_over_quic_fails_invalid_addr() {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let addr = "127.0.0.1:0".parse().unwrap();
-        let report = proto::WorkerReport::new(
-            "call_1",
-            "worker_1",
-            "image",
-            "cmd",
-            proto::WorkerOutput {
-                exit_code: 0,
-                stdout: "".into(),
-                stderr: "".into(),
-                output: "".into(),
-            },
-        );
-        let mut event = proto::ChannelEvent::new(
-            proto::ChannelId::new("cli", "test"),
-            proto::SessionId::from("ses"),
-            "summary",
-        );
-        event.metadata = Some(serde_json::to_value(&report).unwrap());
-        let result = submit_worker_report_over_quic(
-            addr,
-            "localhost",
-            event,
-            std::time::Duration::from_secs(1),
-            false,
-        )
-        .await;
-        // Since no server is listening, it should fail.
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn submit_worker_report_over_quic_success() {
-        use std::sync::Arc;
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
-        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-
-        let mut server_crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert_der],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der),
-            )
-            .unwrap();
-        server_crypto.alpn_protocols = vec![b"openpista-quic-v1".to_vec()];
-        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-            quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
-        ));
-
-        let server_endpoint =
-            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let server_addr = server_endpoint.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            if let Some(incoming) = server_endpoint.accept().await
-                && let Ok(conn) = incoming.await
-                && let Ok((mut send, mut recv)) = conn.accept_bi().await
-            {
-                let mut len_buf = [0u8; 4];
-                let _ = recv.read_exact(&mut len_buf).await;
-                let len = u32::from_be_bytes(len_buf) as usize;
-                let mut body = vec![0u8; len];
-                let _ = recv.read_exact(&mut body).await;
-                let resp = serde_json::json!({
-                    "channel_id": "cli:test",
-                    "session_id": "ses",
-                    "content": "ok",
-                    "is_error": false
-                })
-                .to_string();
-                let resp_bytes = resp.as_bytes();
-                let resp_len = (resp_bytes.len() as u32).to_be_bytes();
-                let _ = send.write_all(&resp_len).await;
-                let _ = send.write_all(resp_bytes).await;
-                let _ = send.finish();
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
-        });
-
-        let report = proto::WorkerReport::new(
-            "call_1",
-            "worker_1",
-            "image",
-            "cmd",
-            proto::WorkerOutput {
-                exit_code: 0,
-                stdout: "".into(),
-                stderr: "".into(),
-                output: "".into(),
-            },
-        );
-        let mut event = proto::ChannelEvent::new(
-            proto::ChannelId::new("cli", "test"),
-            proto::SessionId::from("ses"),
-            "summary",
-        );
-        event.metadata = Some(serde_json::to_value(&report).unwrap());
-
-        let result = submit_worker_report_over_quic(
-            server_addr,
-            "localhost",
-            event,
-            std::time::Duration::from_secs(5),
-            true,
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "Expected QUIC report success, got {:?}",
-            result
-        );
-    }
-
     /// Create a minimal ContainerArgs preset for tests with the given shell command and a default image of `alpine:3`.
     ///
     /// The returned struct has `command` set to the provided value, `image` set to `"alpine:3"`, and all other optional fields left as `None`.
@@ -1627,12 +1130,6 @@ mod tests {
             inject_task_token: None,
             token_ttl_secs: None,
             token_env_name: None,
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         }
     }
@@ -1856,12 +1353,6 @@ mod tests {
             inject_task_token: None,
             token_ttl_secs: None,
             token_env_name: None,
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -1894,12 +1385,6 @@ mod tests {
             inject_task_token: None,
             token_ttl_secs: None,
             token_env_name: None,
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -2032,12 +1517,6 @@ mod tests {
             inject_task_token: Some(false),
             token_ttl_secs: None,
             token_env_name: None,
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -2064,12 +1543,6 @@ mod tests {
             inject_task_token: Some(true),
             token_ttl_secs: Some(120),
             token_env_name: Some("9BAD".to_string()),
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
             allow_subprocess_fallback: None,
         };
 
@@ -2160,175 +1633,6 @@ mod tests {
         });
         cleanup_task_credential(&mut credential);
         assert!(credential.is_none());
-    }
-
-    #[test]
-    fn build_worker_summary_success_and_error() {
-        let ok = build_worker_summary("c1", 0, "echo hi");
-        assert!(ok.contains("status=success"));
-        assert!(ok.contains("call_id=c1"));
-        assert!(ok.contains("exit_code=0"));
-
-        let fail = build_worker_summary("c2", 1, "false");
-        assert!(fail.contains("status=error"));
-        assert!(fail.contains("exit_code=1"));
-    }
-
-    /// Verifies that worker reporting is skipped when QUIC reporting is not enabled on the args.
-    ///
-    /// The test constructs ContainerArgs without `report_via_quic` and ensures
-    /// `maybe_report_worker_result` completes successfully without attempting to send a report.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Build args with reporting disabled (None)
-    /// let args = ContainerArgs { report_via_quic: None, ..Default::default() };
-    /// let exec = ContainerExecution { stdout: "ok".into(), stderr: "".into(), exit_code: 0 };
-    /// let res = maybe_report_worker_result("call-1", &args, "ctr", "alpine", &exec, Duration::from_secs(10)).await;
-    /// assert!(res.is_ok());
-    /// ```
-    #[tokio::test]
-    async fn maybe_report_worker_result_skips_when_disabled() {
-        let args = ContainerArgs {
-            image: Some("alpine".into()),
-            skill_image: None,
-            command: Some("echo".into()),
-            skill_name: None,
-            skill_args: None,
-            timeout_secs: None,
-            working_dir: None,
-            env: None,
-            allow_network: None,
-            workspace_dir: None,
-            memory_mb: None,
-            cpu_millis: None,
-            pull: None,
-            inject_task_token: None,
-            token_ttl_secs: None,
-            token_env_name: None,
-            report_via_quic: None,
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: None,
-            orchestrator_session_id: None,
-            orchestrator_quic_insecure_skip_verify: None,
-            allow_subprocess_fallback: None,
-        };
-        let execution = ContainerExecution {
-            stdout: "ok".into(),
-            stderr: "".into(),
-            exit_code: 0,
-        };
-        let result = maybe_report_worker_result(
-            "call-1",
-            &args,
-            "ctr",
-            "alpine",
-            &execution,
-            Duration::from_secs(10),
-        )
-        .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn maybe_report_worker_result_fails_missing_addr() {
-        let args = ContainerArgs {
-            image: Some("alpine".into()),
-            skill_image: None,
-            command: Some("echo".into()),
-            skill_name: None,
-            skill_args: None,
-            timeout_secs: None,
-            working_dir: None,
-            env: None,
-            allow_network: None,
-            workspace_dir: None,
-            memory_mb: None,
-            cpu_millis: None,
-            pull: None,
-            inject_task_token: None,
-            token_ttl_secs: None,
-            token_env_name: None,
-            report_via_quic: Some(true),
-            report_timeout_secs: None,
-            orchestrator_quic_addr: None,
-            orchestrator_channel_id: Some("ch".into()),
-            orchestrator_session_id: Some("ses".into()),
-            orchestrator_quic_insecure_skip_verify: None,
-            allow_subprocess_fallback: None,
-        };
-        let execution = ContainerExecution {
-            stdout: "".into(),
-            stderr: "".into(),
-            exit_code: 0,
-        };
-        let result = maybe_report_worker_result(
-            "call-1",
-            &args,
-            "ctr",
-            "alpine",
-            &execution,
-            Duration::from_secs(10),
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("orchestrator_quic_addr"));
-    }
-
-    #[tokio::test]
-    async fn maybe_report_worker_result_fails_bad_addr() {
-        let args = ContainerArgs {
-            image: Some("alpine".into()),
-            skill_image: None,
-            command: Some("echo".into()),
-            skill_name: None,
-            skill_args: None,
-            timeout_secs: None,
-            working_dir: None,
-            env: None,
-            allow_network: None,
-            workspace_dir: None,
-            memory_mb: None,
-            cpu_millis: None,
-            pull: None,
-            inject_task_token: None,
-            token_ttl_secs: None,
-            token_env_name: None,
-            report_via_quic: Some(true),
-            report_timeout_secs: Some(1),
-            orchestrator_quic_addr: Some("not-a-socket-addr".into()),
-            orchestrator_channel_id: Some("ch".into()),
-            orchestrator_session_id: Some("ses".into()),
-            orchestrator_quic_insecure_skip_verify: None,
-            allow_subprocess_fallback: None,
-        };
-        let execution = ContainerExecution {
-            stdout: "".into(),
-            stderr: "err".into(),
-            exit_code: 1,
-        };
-        let result = maybe_report_worker_result(
-            "call-2",
-            &args,
-            "ctr",
-            "alpine",
-            &execution,
-            Duration::from_secs(10),
-        )
-        .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("orchestrator_quic_addr"));
-    }
-
-    #[test]
-    fn build_insecure_quic_client_config_returns_ok() {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-        let cfg = build_insecure_quic_client_config();
-        assert!(cfg.is_ok());
     }
 
     #[test]

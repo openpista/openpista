@@ -16,14 +16,23 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Configurable max tool rounds to prevent infinite loops (default: 10)
 - [x] Skill context injection into the system prompt on every request
 
+### Agent Providers
+
+- [x] `OpenAiProvider` — standard OpenAI chat completions via `async-openai`
+- [x] `ResponsesApiProvider` — OpenAI Responses API (`/v1/responses`) with SSE streaming; ChatGPT Pro subscriber support (`chatgpt-account-id` from JWT); tool name collision detection
+- [x] `AnthropicProvider` — Anthropic Messages API; system message extraction; consecutive tool-result merging; tool name sanitization (dots to underscores); OAuth Bearer with `anthropic-beta: oauth-2025-04-20`
+- [x] Six provider presets: `openai`, `claude` / `anthropic`, `together`, `ollama`, `openrouter`, `custom`
+- [x] OAuth PKCE support for OpenAI, Anthropic, and OpenRouter
+- [x] Credential slots for extension providers: GitHub Copilot, Google Gemini, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+
 ### OS Tools
 
 - [x] `system.run` — BashTool with configurable timeout (default: 30s)
 - [x] Output truncation at 10,000 characters with a clear prompt indicator
 - [x] stdout + stderr capture with exit code in results
 - [x] Working directory override support
-- [x] `screen.capture`
-- [x] `browser.*`
+- [x] `screen.capture` — display screenshot via the `screenshots` crate, base64 output
+- [x] `browser.navigate`, `browser.click`, `browser.type`, `browser.screenshot` — Chromium CDP via `chromiumoxide`
 
 ### Gateway
 
@@ -57,7 +66,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
 - [x] Response routing: CLI responses → stdout, Telegram responses → bot API
 - [x] Error responses clearly surfaced to the user
- [ ] `WebAdapter` — Rust→WASM browser client + WebSocket transport (see Web Channel Adapter section)
+ [ ] `WebAdapter` — Rust→WASM browser client with WebSocket transport (see Web Channel Adapter section)
 
 
 ### WhatsApp Channel Adapter
@@ -191,19 +200,42 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 - [x] `openpista start` — full daemon (all enabled channels)
 - [x] `openpista run -e "..."` — single-shot agent command
-- [x] `openpista repl` — interactive REPL with session persistence
+- [x] `openpista tui [-s SESSION_ID]` — TUI with optional session resume
+- [x] `openpista model [MODEL_OR_COMMAND]` — model catalog (list / test)
+- [x] `openpista -s SESSION_ID` — resume session shortcut
 - [x] `openpista auth login` — browser OAuth PKCE login with persisted credentials
-- [x] Internal TUI slash commands (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
-- [x] Centralized landing-page-style TUI with dedicated Home and Chat screens
+- [x] TUI slash commands: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`
+- [x] Centralized TUI with dedicated Home, Chat, Session Browser, and Model Browser screens
 - [x] TOML config file with documented examples (`config.toml`)
 - [x] Environment variable override for all secrets
 - [x] PID file written on start, removed on exit
 - [x] `SIGTERM` + `Ctrl-C` graceful shutdown
 - [x] Elm Architecture (TEA) reactive TUI — unidirectional data flow (`Action → update() → State → view()`)
 
+### Session Management
+
+- [x] Sidebar with session list — toggle with `Tab`, keyboard nav (`j`/`k`, arrows), `Enter` to load, `d`/`Delete` to request deletion, `Esc` to unfocus
+- [x] `/session` browser — full-screen session browsing with search filtering, keyboard navigation, create new, delete with confirmation dialog
+- [x] `/session new`, `/session load <id>`, `/session delete <id>` slash commands
+- [x] `openpista tui -s SESSION_ID` — resume a session from the command line
+- [x] `ConfirmDelete` dialog — `y`/`Enter` to confirm, `n`/`Esc` to cancel
+
+### Model Catalog
+
+- [x] `/model` browser — full-screen model browsing with search (`s` or `/`), remote sync (`r`), keyboard navigation
+- [x] `/model list` — print available models to chat
+- [x] `openpista model [MODEL_OR_COMMAND]` — model catalog from CLI
+
+### TUI Enhancements
+
+- [x] Text selection via mouse drag in chat area; `Ctrl+C` / `Cmd+C` to copy
+- [x] Mouse support: click, drag, scroll in chat and sidebar
+- [x] Command palette with `Tab` auto-complete for slash commands and arrow navigation
+- [x] `AppState` variants: Idle, Thinking, ExecutingTool, AuthPrompting, AuthValidating, LoginBrowsing, ModelBrowsing, SessionBrowsing, ConfirmDelete
+
 ### Quality & CI
 
-- [x] Unit + integration tests: `cargo test --workspace` (target: 90+ tests)
+- [x] 726 unit + integration tests across all crates (`cargo test --workspace`)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
 - [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`
@@ -217,10 +249,11 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [ ] `LICENSE-MIT` and `LICENSE-APACHE`
 - [ ] `config.example.toml` with all options documented
 - [ ] GitHub Release with pre-built binaries:
-  - [ ] `x86_64-apple-darwin` (macOS Intel)
   - [ ] `aarch64-apple-darwin` (macOS Apple Silicon)
   - [ ] `x86_64-unknown-linux-gnu` (Linux x86_64)
   - [ ] `aarch64-unknown-linux-gnu` (Linux ARM64)
+  - [ ] `x86_64-unknown-linux-musl` (Linux x86_64 static)
+  - [ ] `aarch64-unknown-linux-musl` (Linux ARM64 static)
 - [ ] `crates.io` publish for library crates (optional)
 
 ---

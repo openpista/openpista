@@ -1,15 +1,12 @@
-//! Gateway components for routing channel events and QUIC transport.
+//! Gateway components for routing channel events.
 
 pub mod router;
 pub mod scheduler;
 pub mod server;
-pub mod session;
 
 /// Event router for channel/session mappings.
 pub use router::ChannelRouter;
 /// Cron scheduler wrapper for generating channel events.
 pub use scheduler::CronScheduler;
-/// QUIC server and in-process test gateway utilities.
-pub use server::{AgentHandler, InProcessGateway, QuicServer};
-/// QUIC session manager.
-pub use session::AgentSession;
+/// Agent handler type and in-process gateway utilities.
+pub use server::{AgentHandler, InProcessGateway};

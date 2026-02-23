@@ -16,14 +16,23 @@
 - [x] 무한 루프 방지를 위한 구성 가능한 최대 도구 라운드 (기본값: 10)
 - [x] 모든 요청 시 시스템 프롬프트에 스킬 문맥(context) 주입
 
+### 에이전트 프로바이더 (Agent Providers)
+
+- [x] `OpenAiProvider` — `async-openai`를 통한 표준 OpenAI 채팅 완성(chat completions) API
+- [x] `ResponsesApiProvider` — SSE 스트리밍을 지원하는 OpenAI Responses API (`/v1/responses`); JWT에서 추출한 `chatgpt-account-id`를 통한 ChatGPT Pro 구독자 지원; 도구 이름 충돌 감지
+- [x] `AnthropicProvider` — Anthropic Messages API; 시스템 메시지 추출; 연속 tool-result 병합; 도구 이름 정규화 (점을 밑줄로 변환); `anthropic-beta: oauth-2025-04-20`을 사용한 OAuth Bearer 인증
+- [x] 6가지 프로바이더 프리셋: `openai`, `claude` / `anthropic`, `together`, `ollama`, `openrouter`, `custom`
+- [x] OpenAI, Anthropic, OpenRouter에 대한 OAuth PKCE 지원
+- [x] 확장 프로바이더 자격증명 슬롯: GitHub Copilot, Google Gemini, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+
 ### OS 도구 (OS Tools)
 
 - [x] `system.run` — 구성 가능한 타임아웃(기본값: 30초)을 가진 BashTool
 - [x] 명확한 프롬프트 표시와 함께 10,000자로 출력 제한(truncation)
 - [x] 결과에 종료 코드(exit code)와 함께 stdout + stderr 캡처
 - [x] 작업 디렉토리 재정의(override) 지원
-- [x] `screen.capture` 
-- [x] `browser.*`
+- [x] `screen.capture` — `screenshots` 크레이트를 통한 디스플레이 스크린샷, base64 출력
+- [x] `browser.navigate`, `browser.click`, `browser.type`, `browser.screenshot` — `chromiumoxide`를 통한 Chromium CDP
 
 ### 게이트웨이 (Gateway)
 
@@ -41,6 +50,26 @@
 > WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
 > ```
 
+> **아키텍처 노트 — QUIC이 사용되는 곳**
+>
+> openpista에서 QUIC은 두 가지 역할을 수행합니다:
+>
+> | 역할 | 컴포넌트 | 설명 |
+> |------|----------|------|
+> | 게이트웨이 전송 | `QuicServer` / `AgentSession` | 외부 클라이언트(또는 워커 컨테이너)가 게이트웨이 QUIC 엔드포인트(포트 4433)에 연결합니다. 각 연결은 양방향 스트림을 통해 길이 접두사(length-prefixed) JSON을 교환하는 `AgentSession`을 생성합니다. |
+> | 모바일 채널 | `MobileAdapter` | QUIC을 네이티브로 사용하는 유일한 채널 어댑터입니다. 모바일 앱은 토큰 기반 인증과 0-RTT를 통해 QUIC으로 직접 연결합니다. |
+> | 웹 채널 | `WebAdapter` | 브라우저 기반 채널 어댑터. Rust→WASM 클라이언트 번들과 H5 채팅 UI를 HTTP로 서빙하고, WebSocket으로 실시간 에이전트 통신을 수행합니다. 네이티브 앱 필요 없이 모든 폰 브라우저에서 작동합니다. |
+>
+> 다른 채널 어댑터(CLI, Telegram, WhatsApp, Web)는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, HTTP 웹훅, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 게이트웨이로 브릿지합니다 — QUIC을 직접 사용하지 않습니다.
+>
+> ```
+> CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
+> TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
+> WhatsAppAdapter ── HTTP webhook → mpsc ──→ Gateway
+> WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
+> MobileAdapter ──── QUIC ────────→ mpsc ──→ Gateway ← 워커로부터도 QUIC 수신
+> ```
+
 ### 메모리 및 지속성 (Memory & Persistence)
 
 - [x] `sqlx`를 통한 SQLite 대화 메모리
@@ -55,6 +84,7 @@
 - [x] 플러그형 채널 구현을 위한 `ChannelAdapter` 트레잇
 - [x] `CliAdapter` — `/quit` 종료 명령이 포함된 stdin/stdout
 - [x] `TelegramAdapter` — 채팅별 안정적인 세션을 가진 `teloxide` 디스패처
+- [x] `MobileAdapter` — QUIC 양방향 스트림, 토큰 기반 인증, `rcgen`을 통한 자체 서명 TLS
 - [x] 응답 라우팅: CLI 응답 → stdout, 텔레그램 응답 → 봇 API
 - [x] 사용자에게 명확히 표시되는 오류 응답
  [ ] `WebAdapter` — Rust→WASM 브라우저 클라이언트 + WebSocket 전송 (웹 채널 어댑터 섹션 참조)
@@ -187,26 +217,50 @@
 - [x] `skills/README.md`에 포함된 `cargo build --target wasm32-wasip1` 빌드 가이드
 - [x] 저장소에 포함된 WASM 스킬 예제 (`skills/hello-wasm/`)
 
-### CLI 및 설정 (CLI & Configuration)
+### CLI, 설정 및 TUI (CLI, Configuration & TUI)
 
 - [x] `openpista start` — 전체 데몬 (활성화된 모든 채널)
 - [x] `openpista run -e "..."` — 단발성(single-shot) 에이전트 명령
-- [x] `openpista repl` — 세션 지속성을 갖춘 대화형 REPL
+- [x] `openpista tui [-s SESSION_ID]` — 선택적 세션 재개를 포함한 TUI 실행
+- [x] `openpista model [MODEL_OR_COMMAND]` — 모델 카탈로그 (목록 / 테스트)
+- [x] `openpista -s SESSION_ID` — 세션 재개 단축 명령
 - [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
-- [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
-- [x] 중앙 집중식의 랜딩 페이지 스타일 TUI (전용 Home 및 Chat 화면 포함)
+- [x] TUI 슬래시 명령어: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`
+- [x] Home, Chat, 세션 브라우저, 모델 브라우저 전용 화면이 있는 중앙 집중식 TUI
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
 - [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
 - [x] Elm 아키텍처(TEA) 반응형 TUI — 단방향 데이터 흐름 (`Action → update() → State → view()`)
 
+### 세션 관리 (Session Management)
+
+- [x] 세션 목록 사이드바 — `Tab`으로 토글, `j`/`k`(또는 화살표)로 탐색, `Enter`로 로드, `d`/`Delete`로 삭제 요청, `Esc`로 포커스 해제
+- [x] `/session` 브라우저 — 검색 필터링, 키보드 탐색, 새 세션 생성, 확인 대화상자를 통한 삭제가 포함된 전체 화면 세션 탐색
+- [x] `/session new`, `/session load <id>`, `/session delete <id>` 슬래시 명령어
+- [x] `openpista tui -s SESSION_ID` — 명령줄에서 세션 재개
+- [x] `ConfirmDelete` 대화상자 — `y`/`Enter`로 확인, `n`/`Esc`로 취소
+
+### 모델 카탈로그 (Model Catalog)
+
+- [x] `/model` 브라우저 — 검색(`s` 또는 `/`), 원격 동기화(`r`), 키보드 탐색이 포함된 전체 화면 모델 탐색
+- [x] `/model list` — 채팅에 사용 가능한 모델 목록 출력
+- [x] `openpista model [MODEL_OR_COMMAND]` — CLI에서 모델 카탈로그 접근
+
+### TUI 개선 사항 (TUI Enhancements)
+
+- [x] 채팅 영역에서 마우스 드래그로 텍스트 선택; `Ctrl+C` / `Cmd+C`로 복사
+- [x] 마우스 지원: 채팅과 사이드바에서 클릭, 드래그, 스크롤
+- [x] 슬래시 명령어에 대한 `Tab` 자동완성 및 화살표 탐색이 있는 명령 팔레트
+- [x] `AppState` 변형: Idle, Thinking, ExecutingTool, AuthPrompting, AuthValidating, LoginBrowsing, ModelBrowsing, SessionBrowsing, ConfirmDelete
+
 ### 품질 및 CI (Quality & CI)
 
-- [x] 유닛 + 통합 테스트: `cargo test --workspace` (목표: 90+ 테스트)
+- [x] 모든 크레이트에 걸친 726개의 유닛 + 통합 테스트 (`cargo test --workspace`)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
 - [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우
+- [x] Linux 크로스 빌드 매트릭스 (`x86_64/aarch64` × `gnu/musl`)
 - [x] Codecov 커버리지 리포팅
 
 ### 문서화 및 릴리스 아티팩트 (Documentation & Release Artifacts)
@@ -217,30 +271,26 @@
 - [ ] `LICENSE-MIT` 및 `LICENSE-APACHE`
 - [ ] 모든 옵션이 문서화된 `config.example.toml`
 - [ ] 미리 빌드된 바이너리가 포함된 GitHub 릴리스(Release):
-  - [ ] `x86_64-apple-darwin` (macOS Intel)
   - [ ] `aarch64-apple-darwin` (macOS Apple Silicon)
   - [ ] `x86_64-unknown-linux-gnu` (Linux x86_64)
   - [ ] `aarch64-unknown-linux-gnu` (Linux ARM64)
+  - [ ] `x86_64-unknown-linux-musl` (Linux x86_64 정적 링크)
+  - [ ] `aarch64-unknown-linux-musl` (Linux ARM64 정적 링크)
 - [ ] 라이브러리 크레이트에 대한 `crates.io` 퍼블리시 (선택사항)
 
 ---
 
-## v0.2.0 — 화면 및 브라우저 (Screen & Browser)
+## v0.2.0 — 플랫폼 통합 및 관측성 (Platform Integrations & Observability)
 
-OS 시각적 제어까지 도구의 표면을 확장합니다.
+채널 표면을 확장하고 프로덕션 관측성(observability)을 추가합니다.
 
-- `screen.capture` — `screenshots` 크레이트를 통한 base64/파일 스크린샷
-- `screen.ocr` — 화면 영역에서 텍스트 추출
-- `browser.navigate` — `chromiumoxide`를 거친 Chromium CDP
-- `browser.click`, `browser.type`, `browser.screenshot`
-- `system.notify` — `notify-rust`를 통한 데스크톱 알림
-- Discord 어댑터
-- Slack 어댑터
-- Prometheus 메트릭 내보내기 (`metrics-exporter-prometheus`)
+### 신규 OS 도구 (New OS Tools)
 
----
+- [ ] `screen.ocr` — 화면 캡처 영역에서 OCR 텍스트 추출 (Tesseract 또는 `leptonica` 바인딩)
+- [ ] `system.notify` — `notify-rust`를 통한 데스크톱 알림 (macOS, Linux)
+- [ ] `system.clipboard` — 시스템 클립보드 읽기/쓰기
 
-## v0.3.0 — 음성 및 다중 에이전트 (Voice & Multi-Agent)
+### MCP 통합 (MCP Integration)
 
 - [ ] MCP (Model Context Protocol) 클라이언트 — MCP 호환 도구 서버와 openpista 연결
 - [ ] MCP 도구 검색 및 `ToolRegistry`에 동적 등록
@@ -284,7 +334,9 @@ OS 시각적 제어까지 도구의 표면을 확장합니다.
 
 ## v1.0.0 — 프로덕션 준비 완료 (Production Ready)
 
-- 모든 크레이트에 대한 안정적인 공개 API
-- 완전한 엔드-투-엔드(end-to-end) 보안 검토
-- 장기 지원(Long-term support) 보장
-- 패키징: `brew`, `apt`, `winget`, Docker 이미지
+- [ ] 모든 크레이트에 대한 안정적인 공개 API (semver 1.0 보장)
+- [ ] 완전한 엔드-투-엔드 보안 감사 (제3자 수행)
+- [ ] 장기 지원(LTS) 릴리스 약속
+- [ ] 패키징: `brew` 포뮬러, `apt` 저장소, 공식 Docker 이미지
+- [ ] docs.rs에 포괄적인 API 문서화
+- [ ] 성능 벤치마크 및 최적화 패스

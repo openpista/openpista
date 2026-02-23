@@ -7,7 +7,7 @@ pub enum Error {
     #[error("Config error: {0}")]
     Config(#[from] ConfigError),
 
-    /// QUIC gateway transport/runtime error.
+    /// Gateway transport/runtime error.
     #[error("Gateway error: {0}")]
     Gateway(#[from] GatewayError),
 
@@ -54,7 +54,7 @@ pub enum ConfigError {
     Toml(String),
 }
 
-/// QUIC gateway errors
+/// Gateway errors
 #[derive(Debug, Error)]
 pub enum GatewayError {
     /// Network/connection-level failure.
@@ -68,10 +68,6 @@ pub enum GatewayError {
     /// Session lookup failure.
     #[error("Session not found: {0}")]
     SessionNotFound(String),
-
-    /// Endpoint creation/runtime failure.
-    #[error("Endpoint error: {0}")]
-    Endpoint(String),
 }
 
 /// LLM provider errors

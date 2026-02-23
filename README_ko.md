@@ -16,7 +16,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ---
 
-## openpista이란?
+## openpista란?
 
 openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, 웹 브라우저)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
@@ -35,10 +35,8 @@ openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 [ 에이전트 런타임 ]     ReAct 루프 · OpenAI / Anthropic / Responses API · SQLite 메모리
         │  tool_call
         ▼
-[ OS 도구 ]            system.run (bash) · screen* · input control*
-[ Skills ]             SKILL.md → 시스템 프롬프트 + 서브프로세스
-
-* v0.2.0에서 지원 예정
+[ OS 도구 ]            system.run · browser.* · screen.capture · container.run
+[ Skills ]             SKILL.md → 시스템 프롬프트 + 서브프로세스 / WASM
 ```
 
 ---
@@ -48,13 +46,38 @@ openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 | 기능 | 상태 |
 |---|---|
 | Bash 도구 (`system.run`) | ✅ v0.1.0 |
+| 브라우저 도구 (`browser.*`) | ✅ v0.1.0 |
+| 화면 캡처 (`screen.capture`) | ✅ v0.1.0 |
+| Docker 샌드박스 (`container.run`) | ✅ v0.1.0 |
+| WASM 스킬 샌드박스 | ✅ v0.1.0 |
 | 텔레그램 채널 | ✅ v0.1.0 |
 | 크론 스케줄러 | ✅ v0.1.0 |
 | SQLite 대화 메모리 | ✅ v0.1.0 |
+| 세션 관리 (사이드바 + 브라우저) | ✅ v0.1.0 |
 | Skills (SKILL.md 로더) | ✅ v0.1.0 |
-| 화면 캡처 | 🔜 v0.2.0 |
-| 화면 & 입력 제어 (OpenClaw 방식) | 🔜 v0.2.0 |
+| 멀티 프로바이더 OAuth (PKCE) | ✅ v0.1.0 |
+| 모델 카탈로그 브라우저 | ✅ v0.1.0 |
+| OpenAI Responses API (SSE) | ✅ v0.1.0 |
+| Anthropic Claude 프로바이더 | ✅ v0.1.0 |
+| 웹 어댑터 (Rust→WASM + WebSocket) | 🔜 v0.1.0 |
 | Discord / Slack 어댑터 | 🔜 v0.2.0 |
+
+---
+
+## 프로바이더
+
+기본 제공 프로바이더 프리셋 6가지:
+
+| 프로바이더 | 기본 모델 | 인증 방식 |
+|---|---|---|
+| `openai` (기본값) | gpt-4o | OAuth PKCE, API 키 |
+| `claude` / `anthropic` | claude-sonnet-4-6 | OAuth PKCE, Bearer |
+| `together` | meta-llama/Llama-3.3-70B-Instruct-Turbo | API 키 |
+| `ollama` | llama3.2 | 없음 (로컬) |
+| `openrouter` | openai/gpt-4o | OAuth PKCE, API 키 |
+| `custom` | 직접 설정 | 직접 설정 |
+
+OpenAI 프리셋은 표준 ChatCompletions API와 ChatGPT Pro 구독자용 Responses API(`/v1/responses`) 모두를 지원합니다. Anthropic 프리셋은 `anthropic-beta: oauth-2025-04-20` 헤더를 사용한 OAuth Bearer 인증을 사용하며, 도구 이름 정규화를 자동으로 처리합니다.
 
 ---
 
@@ -116,67 +139,28 @@ sudo cp target/release/openpista /usr/local/bin/
 
 ---
 
-## 설정
+## 빠른 시작 (Quick Start)
 
-예제 설정 파일을 복사하여 수정하세요:
+openpista를 빌드한 후, LLM 프로바이더에 인증하고 TUI를 실행하세요:
 
 ```bash
-cp config.example.toml config.toml
+# 1. 로그인 (브라우저 OAuth PKCE — 권장)
+openpista auth login
+# 2. TUI 실행
+openpista
 ```
 
-```toml
-[gateway]
-port = 4433          # QUIC 수신 포트
-tls_cert = ""        # 비워두면 자체 서명 인증서 자동 생성
-
-[agent]
-provider = "openai"
-model = "gpt-4o"
-api_key = ""         # 또는 openpista_API_KEY 환경변수 사용
-max_tool_rounds = 10
-
-[channels.telegram]
-enabled = false
-token = ""           # 또는 TELEGRAM_BOT_TOKEN 환경변수 사용
-
-[channels.cli]
-enabled = true
-
-[database]
-url = "~/.openpista/memory.db"
-
-[skills]
-workspace = "~/.openpista/workspace"
-```
-
-### 환경 변수
-
-| 변수 | 설명 |
-|---|---|
-| `openpista_API_KEY` | OpenAI 호환 API 키 (설정 파일 덮어씀) |
-| `OPENAI_API_KEY` | 대체 API 키 |
-| `OPENCODE_API_KEY` | OpenCode Zen API 키 |
-| `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (텔레그램 채널 활성화) |
-| `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
+이것으로 끝입니다. OAuth 토큰은 `~/.openpista/credentials.json`에 저장되며, 만료 시 자동으로 갱신됩니다.
 
 ---
 
-## 사용법
+## 인증 (Authentication)
 
-### 단일 명령 실행
-
-```bash
-openpista_API_KEY=sk-... openpista run -e "홈 디렉토리의 파일을 나열해줘"
-```
-
-### 인증 로그인 Picker
+**OAuth PKCE 브라우저 로그인**이 권장되는 인증 방법입니다. OpenAI, Anthropic, OpenRouter에서 바로 사용 가능하며 — API 키가 필요 없습니다.
 
 ```bash
-# 검색 + 화살표 선택 기반 인터랙티브 로그인
+# 인터랙티브 프로바이더 선택창 (검색 + 화살표 선택)
 openpista auth login
-
-# 스크립트/CI용 비대화형 모드
-openpista auth login --non-interactive --provider opencode --api-key "$OPENCODE_API_KEY"
 ```
 
 TUI 명령:
@@ -186,7 +170,7 @@ TUI 명령:
 /connection
 ```
 
-### 모델 카탈로그 (OpenCode)
+OAuth를 지원하지 않는 프로바이더(Together, Ollama, Custom)는 API 키를 제공하세요:
 
 ```bash
 # API 키 로그인 (자격증명 저장소에 저장)
@@ -278,15 +262,16 @@ openpista model list
 TUI 명령:
 
 ```txt
-/models
+/model
+/model list
 ```
 
-`/models` 브라우저 내부 키:
+모델 브라우저 내부 키:
 
 ```txt
-s 또는 /: model id 검색
-r: 원격 카탈로그 강제 동기화
-Esc: (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
+s 또는 /: 모델 ID 검색
+r:        원격 카탈로그 강제 동기화
+Esc:      (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
 ```
 
 ### 세션 관리
@@ -305,9 +290,19 @@ TUI 명령:
 ### 데몬 모드 (텔레그램 + CLI + 웹 UI)
 
 ```bash
-openpista_API_KEY=sk-... \
-TELEGRAM_BOT_TOKEN=123456:ABC... \
 openpista start
+```
+
+텔레그램을 `config.toml` 또는 환경 변수로 활성화하세요:
+
+```bash
+# config.toml 방식 (권장)
+# [channels.telegram]
+# enabled = true
+# token = "123456:ABC..."
+
+# 또는 CI/Docker용 환경 변수
+TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 데몬은:
@@ -374,7 +369,7 @@ openpista/
    ```
    feat(tools): add screen capture tool
    fix(agent): handle empty LLM response gracefully
-   docs: update installation guide for Windows
+   docs: update installation guide
    ```
    [Conventional Commits](https://www.conventionalcommits.org/) 스타일을 따릅니다.
 

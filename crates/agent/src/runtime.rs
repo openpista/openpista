@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId, WorkerReport};
+use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -25,7 +25,6 @@ pub struct AgentRuntime {
     memory: Arc<SqliteMemory>,
     model: std::sync::RwLock<String>,
     max_tool_rounds: usize,
-    worker_report_quic_addr: Option<String>,
 }
 
 impl AgentRuntime {
@@ -48,7 +47,6 @@ impl AgentRuntime {
             memory,
             model: std::sync::RwLock::new(model.into()),
             max_tool_rounds,
-            worker_report_quic_addr: None,
         }
     }
 
@@ -98,19 +96,6 @@ impl AgentRuntime {
         let mut names: Vec<String> = providers.keys().cloned().collect();
         names.sort();
         names
-    }
-
-    /// Sets the orchestrator QUIC address injected into `container.run` calls.
-    pub fn with_worker_report_quic_addr(mut self, addr: Option<String>) -> Self {
-        self.worker_report_quic_addr = addr.and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-        self
     }
 
     /// Process a user message and return the agent's final text response
@@ -236,13 +221,7 @@ impl AgentRuntime {
 
                     // Execute each tool call
                     for tc in &tool_calls {
-                        let tool_args = prepare_tool_args(
-                            &self.worker_report_quic_addr,
-                            channel_id,
-                            session_id,
-                            &tc.name,
-                            tc.arguments.clone(),
-                        );
+                        let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
                         let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
 
@@ -406,13 +385,7 @@ impl AgentRuntime {
                             args: tc.arguments.clone(),
                         });
 
-                        let tool_args = prepare_tool_args(
-                            &self.worker_report_quic_addr,
-                            channel_id,
-                            session_id,
-                            &tc.name,
-                            tc.arguments.clone(),
-                        );
+                        let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
                         let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
 
@@ -445,37 +418,6 @@ impl AgentRuntime {
             }
         }
     }
-
-    /// Persists a worker report as a tool-result message in the target session.
-    pub async fn record_worker_report(
-        &self,
-        channel_id: &ChannelId,
-        session_id: &SessionId,
-        report: &WorkerReport,
-    ) -> Result<(), proto::Error> {
-        self.memory
-            .ensure_session(session_id, channel_id.as_str())
-            .await
-            .map_err(proto::Error::Database)?;
-
-        let tool_name = format!("container.worker.{}", report.worker_id);
-        let msg = AgentMessage::tool_result(
-            session_id.clone(),
-            report.call_id.clone(),
-            tool_name,
-            report.output.clone(),
-        );
-
-        self.memory
-            .save_message(&msg)
-            .await
-            .map_err(proto::Error::Database)?;
-        self.memory
-            .touch_session(session_id)
-            .await
-            .map_err(proto::Error::Database)?;
-        Ok(())
-    }
 }
 
 /// Builds the effective system prompt with optional skills context section.
@@ -490,13 +432,7 @@ fn build_system_prompt(skills_context: Option<&str>) -> String {
     prompt
 }
 
-fn prepare_tool_args(
-    worker_report_quic_addr: &Option<String>,
-    channel_id: &ChannelId,
-    session_id: &SessionId,
-    tool_name: &str,
-    args: Value,
-) -> Value {
+fn prepare_tool_args(tool_name: &str, args: Value) -> Value {
     if tool_name != "container.run" {
         return args;
     }
@@ -507,28 +443,6 @@ fn prepare_tool_args(
     };
 
     object.insert("allow_subprocess_fallback".to_string(), Value::Bool(false));
-    object.insert(
-        "orchestrator_quic_insecure_skip_verify".to_string(),
-        Value::Bool(false),
-    );
-
-    let Some(quic_addr) = worker_report_quic_addr.as_deref() else {
-        return Value::Object(object);
-    };
-
-    object.insert("report_via_quic".to_string(), Value::Bool(true));
-    object.insert(
-        "orchestrator_quic_addr".to_string(),
-        Value::String(quic_addr.to_string()),
-    );
-    object.insert(
-        "orchestrator_channel_id".to_string(),
-        Value::String(channel_id.as_str().to_string()),
-    );
-    object.insert(
-        "orchestrator_session_id".to_string(),
-        Value::String(session_id.as_str().to_string()),
-    );
 
     Value::Object(object)
 }
@@ -868,100 +782,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_tool_args_enforces_worker_report_metadata_for_container_tool() {
+    fn prepare_tool_args_enforces_safety_flags_for_container_tool() {
         let args = prepare_tool_args(
-            &Some("127.0.0.1:4433".to_string()),
-            &ChannelId::from("cli:local"),
-            &SessionId::from("session-x"),
             "container.run",
             serde_json::json!({
                 "image":"alpine:3",
                 "command":"echo hi",
-                "report_via_quic": false,
-                "orchestrator_quic_addr": "8.8.8.8:1111",
-                "orchestrator_channel_id": "attacker:channel",
-                "orchestrator_session_id": "attacker-session"
+                "allow_subprocess_fallback": true
             }),
         );
 
-        assert_eq!(args["report_via_quic"], true);
         assert_eq!(args["allow_subprocess_fallback"], false);
-        assert_eq!(args["orchestrator_quic_insecure_skip_verify"], false);
-        assert_eq!(args["orchestrator_quic_addr"], "127.0.0.1:4433");
-        assert_eq!(args["orchestrator_channel_id"], "cli:local");
-        assert_eq!(args["orchestrator_session_id"], "session-x");
     }
 
     #[test]
-    fn prepare_tool_args_enforces_local_safety_flags_without_quic_addr() {
-        let args = prepare_tool_args(
-            &None,
-            &ChannelId::from("cli:local"),
-            &SessionId::from("session-x"),
-            "container.run",
-            serde_json::json!({
-                "image":"alpine:3",
-                "command":"echo hi",
-                "allow_subprocess_fallback": true,
-                "orchestrator_quic_insecure_skip_verify": true
-            }),
-        );
-
-        assert_eq!(args["allow_subprocess_fallback"], false);
-        assert_eq!(args["orchestrator_quic_insecure_skip_verify"], false);
-        assert!(args["report_via_quic"].is_null());
-    }
-
-    #[tokio::test]
-    async fn record_worker_report_persists_tool_message() {
-        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
-        let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(
-            llm,
-            build_registry(),
-            memory.clone(),
-            "mock-provider",
-            "mock-model",
-            4,
-        );
-        let channel = ChannelId::from("cli:local");
-        let session = SessionId::from("session-worker-report");
-        let report = proto::WorkerReport::new(
-            "call-42",
-            "worker-1",
-            "alpine:3.20",
-            "echo hi",
-            proto::WorkerOutput {
-                exit_code: 0,
-                stdout: "hi
-"
-                .into(),
-                stderr: "".into(),
-                output: "stdout:
-hi
-
-exit_code: 0"
-                    .into(),
-            },
-        );
-
-        runtime
-            .record_worker_report(&channel, &session, &report)
-            .await
-            .expect("worker report should be recorded");
-
-        let history = memory.load_session(&session).await.expect("history");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].role, Role::Tool);
-        assert_eq!(history[0].tool_call_id.as_deref(), Some("call-42"));
-        assert!(
-            history[0]
-                .tool_name
-                .as_deref()
-                .unwrap_or_default()
-                .contains("worker-1")
-        );
-        assert_eq!(history[0].content, report.output);
+    fn prepare_tool_args_passes_through_non_container_tools() {
+        let input = serde_json::json!({"value":"hello"});
+        let args = prepare_tool_args("echo", input.clone());
+        assert_eq!(args, input);
     }
 
     #[test]
