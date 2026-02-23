@@ -179,6 +179,12 @@ pub enum Action {
     WhatsAppSetupComplete,
     /// Forward a raw key event to handle_key for character input/deletion.
     WhatsAppSetupKey(crossterm::event::KeyEvent),
+
+    // ── QR code display ─────────────────────────────────────
+    /// Open the QR code overlay showing the Web UI URL.
+    OpenQrCode { url: String, qr_lines: Vec<String> },
+    /// Close the QR code overlay and return to idle.
+    CloseQrCode,
 }
 
 // ─── Command ─────────────────────────────────────────────────────────────────

@@ -33,6 +33,7 @@ rand = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 futures-util = { workspace = true }
+qrcode = "0.14"
 
 
 [dev-dependencies]

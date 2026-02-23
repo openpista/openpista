@@ -91,6 +91,10 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/whatsapp status",
         description: "Show WhatsApp config status",
     },
+    SlashCommand {
+        name: "/qr",
+        description: "Show QR code for Web UI URL",
+    },
 ];
 
 // ─── Data types ──────────────────────────────────────────────
@@ -259,6 +263,13 @@ pub enum AppState {
         /// Collected webhook_port.
         webhook_port: String,
     },
+    /// QR code overlay showing the Web UI URL.
+    QrCodeDisplay {
+        /// The URL encoded in the QR code.
+        url: String,
+        /// Pre-rendered QR code lines (Unicode half-blocks).
+        qr_lines: Vec<String>,
+    },
 }
 
 /// Steps in the WhatsApp configuration wizard.
@@ -379,6 +390,35 @@ pub struct TuiApp {
     pub session_browser_new_requested: bool,
     /// Pending web config from completed wizard (consumed by event loop).
     pending_web_config: Option<crate::config::WebConfig>,
+}
+
+/// Generates QR code lines using Unicode half-block characters.
+/// Each output line represents two QR module rows.
+pub fn generate_qr_lines(url: &str) -> Result<Vec<String>, String> {
+    let code = qrcode::QrCode::new(url.as_bytes()).map_err(|e| format!("QR encode error: {e}"))?;
+    let modules = code.to_colors();
+    let width = code.width();
+    let mut lines = Vec::new();
+    let rows: Vec<&[qrcode::Color]> = modules.chunks(width).collect();
+    let mut y = 0;
+    while y < rows.len() {
+        let top = rows[y];
+        let bottom = rows.get(y + 1);
+        let mut line = String::new();
+        for x in 0..width {
+            let t = top[x] == qrcode::Color::Dark;
+            let b = bottom.is_some_and(|r| r[x] == qrcode::Color::Dark);
+            line.push(match (t, b) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
+        }
+        lines.push(line);
+        y += 2;
+    }
+    Ok(lines)
 }
 
 impl TuiApp {
@@ -528,7 +568,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/web - show web adapter status\n/web setup - configure web adapter\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/web - show web adapter status\n/web setup - configure web adapter\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -548,6 +588,9 @@ impl TuiApp {
             }
             "/whatsapp" => {
                 // "status" subcommand is handled in event.rs; bare /whatsapp opens wizard
+            }
+            "/qr" => {
+                // QR code generation is handled in event.rs (needs config access)
             }
             other => {
                 self.push_error(format!(
@@ -1103,6 +1146,16 @@ impl TuiApp {
     /// Handle a keyboard event.
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        if matches!(self.state, AppState::QrCodeDisplay { .. }) {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.state = AppState::Idle;
+                }
+                _ => {}
+            }
+            return;
+        }
 
         // ── ConfirmDelete state ──────────────────────────────
         if let AppState::ConfirmDelete { session_id, .. } = &self.state {
@@ -2410,12 +2463,27 @@ impl TuiApp {
                         webhook_port: webhook_port.parse().unwrap_or(8080),
                     };
                     self.state = AppState::Idle;
-                    self.push_assistant(
+                    let wa_me_url = format!("https://wa.me/{}", wa_config.phone_number_id);
+                    let mut msg =
                         "WhatsApp configuration saved! Restart openpista to apply changes."
-                            .to_string(),
-                    );
+                            .to_string();
+                    if let Some(qr) = super::event::render_qr_text(&wa_me_url) {
+                        msg.push_str("\n\n");
+                        msg.push_str(&format!("  QR Code ({wa_me_url})\n\n"));
+                        msg.push_str(&qr);
+                        msg.push_str("\n\n  Scan with your phone to start a conversation.");
+                    }
+                    self.push_assistant(msg);
                     return Command::SaveWhatsAppConfig(wa_config);
                 }
+                Command::None
+            }
+            Action::OpenQrCode { url, qr_lines } => {
+                self.state = AppState::QrCodeDisplay { url, qr_lines };
+                Command::None
+            }
+            Action::CloseQrCode => {
+                self.state = AppState::Idle;
                 Command::None
             }
             Action::WhatsAppSetupKey(key) => {
@@ -2430,6 +2498,13 @@ impl TuiApp {
     pub fn map_key_event(&self, key: crossterm::event::KeyEvent) -> Vec<super::action::Action> {
         use super::action::Action;
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        if matches!(self.state, AppState::QrCodeDisplay { .. }) {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => vec![Action::CloseQrCode],
+                _ => vec![],
+            };
+        }
 
         if let AppState::ConfirmDelete { .. } = &self.state {
             return match key.code {
@@ -2808,6 +2883,40 @@ impl TuiApp {
                     )
                     .wrap(Wrap { trim: false });
                     frame.render_widget(dialog, popup_area);
+                }
+
+                if let AppState::QrCodeDisplay { url, qr_lines } = &self.state {
+                    let qr_height = qr_lines.len() as u16 + 4;
+                    let qr_width = qr_lines.first().map_or(20, |l| l.len() as u16) + 4;
+                    let popup_width = qr_width.min(area.width.saturating_sub(4));
+                    let popup_height = qr_height.min(area.height.saturating_sub(2));
+                    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+                    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+                    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+                    frame.render_widget(Clear, popup_area);
+                    let mut lines_vec: Vec<Line<'_>> = qr_lines
+                        .iter()
+                        .map(|l| Line::from(Span::raw(format!(" {l} "))))
+                        .collect();
+                    lines_vec.push(Line::from(""));
+                    lines_vec.push(Line::from(Span::styled(
+                        format!(" {url} "),
+                        Style::default().fg(THEME.info),
+                    )));
+                    lines_vec.push(Line::from(Span::styled(
+                        " Esc/Enter: close ",
+                        Style::default().fg(THEME.fg_muted),
+                    )));
+                    let qr_widget = Paragraph::new(lines_vec)
+                        .block(
+                            Block::default()
+                                .title(" QR Code — Web UI ")
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(THEME.info)),
+                        )
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(qr_widget, popup_area);
                 }
             }
         }
