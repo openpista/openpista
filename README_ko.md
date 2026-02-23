@@ -321,6 +321,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 왓츠앱을 `config.toml`에서 활성화하세요 (자세한 설정 방법은 [WHATSAPP.md](./WHATSAPP.md) 참조):
+
+
 ```bash
 # [channels.whatsapp]
 # enabled = true

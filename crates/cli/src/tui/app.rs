@@ -3768,9 +3768,10 @@ impl TuiApp {
                         "Enter your WhatsApp phone number:",
                         "E.g. 15551234567 (country code + number, no spaces)",
                     ),
-                    WhatsAppSetupStep::AccessToken => {
-                        ("Enter your access token:", "Token for the WhatsApp gateway")
-                    }
+                    WhatsAppSetupStep::AccessToken => (
+                        "Enter your access token:",
+                        "See WHATSAPP.md for token setup guide",
+                    ),
                     WhatsAppSetupStep::Confirm => unreachable!(),
                 };
                 vec![

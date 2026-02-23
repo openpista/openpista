@@ -323,6 +323,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 Enable WhatsApp in `config.toml` (see [WHATSAPP.md](./WHATSAPP.md) for full setup guide):
+
+
 ```bash
 # [channels.whatsapp]
 # enabled = true
