@@ -29,6 +29,18 @@ use crate::config::{
 use crate::model_catalog;
 use tracing::{debug, info};
 
+/// Detects the local IP address by connecting a UDP socket to a public DNS server.
+fn detect_local_ip() -> String {
+    use std::net::UdpSocket;
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "localhost".to_string())
+}
+
 /// Local port used for the OAuth redirect callback server.
 const OAUTH_CALLBACK_PORT: u16 = 9009;
 
@@ -205,6 +217,50 @@ fn parse_whatsapp_command(raw: &str) -> Option<WhatsAppCommand> {
     }
 }
 
+/// Render a QR code as Unicode half-block text lines.
+/// Uses `▀`, `▄`, `█` and space to pack two module rows per text line.
+pub(crate) fn render_qr_text(url: &str) -> Option<String> {
+    use qrcode::QrCode;
+    let code = QrCode::new(url.as_bytes()).ok()?;
+    let modules = code.to_colors();
+    let width = code.width();
+    let height = modules.len() / width;
+
+    // Add 1-module quiet zone on each side
+    let mut lines: Vec<String> = Vec::new();
+
+    // Top quiet-zone row (all white)
+    lines.push(" ".repeat(width + 2));
+
+    // Process two rows at a time using half-block characters
+    let mut y = 0;
+    while y < height {
+        let mut row = String::new();
+        row.push(' '); // left quiet zone
+        for x in 0..width {
+            let top = modules[y * width + x];
+            let bottom = if y + 1 < height {
+                modules[(y + 1) * width + x]
+            } else {
+                qrcode::Color::Light // pad with white if odd height
+            };
+            match (top, bottom) {
+                (qrcode::Color::Dark, qrcode::Color::Dark) => row.push('\u{2588}'),
+                (qrcode::Color::Dark, qrcode::Color::Light) => row.push('\u{2580}'),
+                (qrcode::Color::Light, qrcode::Color::Dark) => row.push('\u{2584}'),
+                (qrcode::Color::Light, qrcode::Color::Light) => row.push(' '),
+            }
+        }
+        row.push(' '); // right quiet zone
+        lines.push(row);
+        y += 2;
+    }
+
+    // Bottom quiet-zone row
+    lines.push(" ".repeat(width + 2));
+
+    Some(lines.join("\n"))
+}
 fn format_whatsapp_status(config: &Config) -> String {
     let wa = &config.channels.whatsapp;
     let mask = |s: &str| -> String {
@@ -214,7 +270,6 @@ fn format_whatsapp_status(config: &Config) -> String {
             format!("{}****", &s[..4])
         }
     };
-
     let mut lines = vec!["WhatsApp Configuration Status".to_string(), "".to_string()];
     lines.push(format!(
         "  Enabled:         {}",
@@ -256,8 +311,18 @@ fn format_whatsapp_status(config: &Config) -> String {
     lines.push("".to_string());
     if wa.is_configured() {
         lines.push("  Status: Ready (all fields configured)".to_string());
+        // Append QR code for wa.me link
+        let wa_me_url = format!("https://wa.me/{}", wa.phone_number_id);
+        lines.push("".to_string());
+        lines.push(format!("  QR Code ({})", wa_me_url));
+        lines.push("".to_string());
+        if let Some(qr) = render_qr_text(&wa_me_url) {
+            lines.push(qr);
+        }
+        lines.push("".to_string());
+        lines.push("  Scan with your phone to start a conversation.".to_string());
     } else {
-        lines.push("  Status: Incomplete — run /whatsapp to configure".to_string());
+        lines.push("  Status: Incomplete \u{2014} run /whatsapp to configure".to_string());
     }
     lines.join("\n")
 }
@@ -792,6 +857,31 @@ pub async fn run_tui(
                                         SessionCommand::Invalid(msg) => {
                                             app.update(Action::PushError(msg));
                                         }
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
+                                if message.trim() == "/qr" {
+                                    if config.channels.web.enabled {
+                                        let ip = detect_local_ip();
+                                        let port = config.channels.web.port;
+                                        let url = format!("http://{ip}:{port}");
+                                        match crate::tui::app::generate_qr_lines(&url) {
+                                            Ok(qr_lines) => {
+                                                app.update(Action::OpenQrCode { url, qr_lines });
+                                            }
+                                            Err(e) => {
+                                                app.update(Action::PushError(format!(
+                                                    "Failed to generate QR code: {e}"
+                                                )));
+                                            }
+                                        }
+                                    } else {
+                                        app.update(Action::PushError(
+                                            "Web adapter is not enabled. Set [channels.web] enabled = true in config.toml"
+                                                .to_string(),
+                                        ));
                                     }
                                     app.update(Action::ScrollToBottom);
                                     continue;
@@ -1743,5 +1833,36 @@ mod tests {
         assert!(status.contains("my-v****")); // verify token masked
         assert!(status.contains("abc1****")); // app secret masked
         assert!(status.contains("Ready"));
+        // QR code should be present for configured WhatsApp
+        assert!(status.contains("QR Code"));
+        assert!(status.contains("https://wa.me/123456789"));
+        assert!(status.contains("Scan with your phone"));
+        // QR should contain block characters
+        assert!(
+            status.contains('\u{2588}')
+                || status.contains('\u{2580}')
+                || status.contains('\u{2584}')
+        );
+    }
+
+    #[test]
+    fn render_qr_text_produces_valid_output() {
+        let qr = render_qr_text("https://wa.me/123456789");
+        assert!(qr.is_some());
+        let text = qr.unwrap();
+        assert!(!text.is_empty());
+        // Should contain block characters used for QR rendering
+        assert!(
+            text.contains('\u{2588}') || text.contains('\u{2580}') || text.contains('\u{2584}')
+        );
+        // Should have multiple lines
+        assert!(text.lines().count() > 5);
+    }
+
+    #[test]
+    fn render_qr_text_empty_url_still_works() {
+        // Even an empty string should produce a valid QR code
+        let qr = render_qr_text("");
+        assert!(qr.is_some());
     }
 }
