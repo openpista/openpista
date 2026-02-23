@@ -10,10 +10,8 @@ mod test_support;
 mod tui;
 
 use clap::{Parser, Subcommand};
-use proto::{AgentResponse, ChannelEvent, ChannelId, SessionId, WORKER_REPORT_KIND, WorkerReport};
+use proto::{AgentResponse, ChannelEvent, ChannelId, SessionId};
 
-#[cfg(not(test))]
-use std::net::SocketAddr;
 #[cfg(not(test))]
 use std::sync::Arc;
 
@@ -27,11 +25,9 @@ use agent::{
     ToolRegistry,
 };
 #[cfg(not(test))]
-use channels::{ChannelAdapter, CliAdapter, MobileAdapter, TelegramAdapter};
+use channels::{ChannelAdapter, CliAdapter, TelegramAdapter};
 #[cfg(not(test))]
 use config::Config;
-#[cfg(not(test))]
-use gateway::QuicServer;
 #[cfg(not(test))]
 use skills::SkillLoader;
 #[cfg(not(test))]
@@ -47,7 +43,7 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::Subs
 /// Top-level command-line arguments for the openpista application.
 #[derive(Parser)]
 #[command(name = "openpista")]
-#[command(about = "QUIC-based OS Gateway AI Agent", version = "0.1.0")]
+#[command(about = "OS Gateway AI Agent", version = "0.1.0")]
 struct Cli {
     /// Path to config file
     #[arg(short, long)]
@@ -79,7 +75,7 @@ enum Commands {
         session: Option<String>,
     },
 
-    /// Start the daemon (gateway + all enabled channels)
+    /// Start the daemon (all enabled channels)
     Start,
 
     /// Run a single command and exit
@@ -280,7 +276,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(not(test))]
 /// Starts the full-screen TUI for interactive agent sessions.
 async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> {
-    let runtime = build_runtime(&config, None).await?;
+    let runtime = build_runtime(&config).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
     let channel_id = ChannelId::new("cli", "tui");
     let session_id = match session {
@@ -347,10 +343,7 @@ fn build_provider(
 
 #[cfg(not(test))]
 /// Creates a runtime with configured tools, memory, and LLM provider.
-async fn build_runtime(
-    config: &Config,
-    worker_report_quic_addr: Option<String>,
-) -> anyhow::Result<Arc<AgentRuntime>> {
+async fn build_runtime(config: &Config) -> anyhow::Result<Arc<AgentRuntime>> {
     // Tool registry
     let mut registry = ToolRegistry::new();
     registry.register(BashTool::new());
@@ -381,17 +374,14 @@ async fn build_runtime(
         &model,
     );
 
-    let runtime = Arc::new(
-        AgentRuntime::new(
-            llm,
-            registry,
-            memory,
-            config.agent.provider.name(),
-            &model,
-            config.agent.max_tool_rounds,
-        )
-        .with_worker_report_quic_addr(worker_report_quic_addr),
-    );
+    let runtime = Arc::new(AgentRuntime::new(
+        llm,
+        registry,
+        memory,
+        config.agent.provider.name(),
+        &model,
+        config.agent.max_tool_rounds,
+    ));
 
     // Register all authenticated providers so the runtime can switch between them.
     for preset in config::ProviderPreset::all() {
@@ -421,49 +411,12 @@ async fn build_runtime(
 async fn cmd_start(config: Config) -> anyhow::Result<()> {
     info!("Starting openpista daemon");
 
-    let report_host = config.gateway.report_host.as_deref().unwrap_or("127.0.0.1");
-    let report_addr = format!("{report_host}:{}", config.gateway.port);
-    let runtime = build_runtime(&config, Some(report_addr)).await?;
+    let runtime = build_runtime(&config).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
 
-    // In-process event gateway
+    // In-process event bus
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ChannelEvent>(128);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<AgentResponse>(128);
-
-    // Start QUIC server
-    let addr: SocketAddr = format!("0.0.0.0:{}", config.gateway.port).parse()?;
-    {
-        let event_tx_quic = event_tx.clone();
-        let runtime_quic = runtime.clone();
-
-        let handler: gateway::AgentHandler = Arc::new(move |event: ChannelEvent| {
-            let event_tx = event_tx_quic.clone();
-            let runtime = runtime_quic.clone();
-            Box::pin(async move {
-                if let Some(report) = parse_worker_report(&event) {
-                    let result = runtime
-                        .record_worker_report(&event.channel_id, &event.session_id, &report)
-                        .await;
-                    return Some(match result {
-                        Ok(()) => "worker-report-recorded".to_string(),
-                        Err(e) => format!("worker-report-error:{e}"),
-                    });
-                }
-                let _ = event_tx.send(event).await;
-                Some("queued".to_string())
-            })
-        });
-
-        match QuicServer::new_self_signed(addr, handler) {
-            Ok(server) => {
-                tokio::spawn(async move { server.run().await });
-                info!("QUIC gateway listening on {addr}");
-            }
-            Err(e) => {
-                warn!("Failed to start QUIC server: {e}. Continuing without QUIC.");
-            }
-        }
-    }
 
     // Channel adapters
     let mut telegram_resp_adapter: Option<TelegramAdapter> = None;
@@ -479,26 +432,6 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
             tokio::spawn(async move {
                 if let Err(e) = adapter.run(tx).await {
                     error!("Telegram adapter error: {e}");
-                }
-            });
-        }
-    }
-
-    // Mobile QUIC adapter (if enabled)
-    let mut mobile_resp_adapter: Option<MobileAdapter> = None;
-    if config.channels.mobile.enabled {
-        let token = config.channels.mobile.api_token.clone();
-        if token.is_empty() {
-            warn!("Mobile adapter enabled but no api_token configured");
-        } else {
-            let mobile_addr: SocketAddr =
-                format!("0.0.0.0:{}", config.channels.mobile.port).parse()?;
-            let adapter = MobileAdapter::new(mobile_addr, token);
-            mobile_resp_adapter = Some(adapter.response_handle());
-            let tx = event_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = adapter.run(tx).await {
-                    error!("Mobile adapter error: {e}");
                 }
             });
         }
@@ -522,17 +455,6 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(resp) = resp_rx.recv().await {
             let channel_id = resp.channel_id.clone();
-
-            if should_send_mobile_response(&channel_id) {
-                if let Some(adapter) = &mobile_resp_adapter {
-                    if let Err(e) = adapter.send_response(resp).await {
-                        error!("Failed to send mobile response: {e}");
-                    }
-                } else {
-                    warn!("Mobile response dropped because mobile channel is disabled");
-                }
-                continue;
-            }
 
             if should_send_cli_response(&channel_id) {
                 if let Some(adapter) = &cli_resp_adapter {
@@ -602,7 +524,7 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
 #[cfg(not(test))]
 /// Executes one command against the agent and exits.
 async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
-    let runtime = build_runtime(&config, None).await?;
+    let runtime = build_runtime(&config).await?;
     let skill_loader = SkillLoader::new(&config.skills.workspace);
     let skills_ctx = skill_loader.load_context().await;
 
@@ -714,7 +636,7 @@ async fn cmd_model_test(
     }
     config.agent.model = model_name.clone();
 
-    let runtime = build_runtime(&config, None).await?;
+    let runtime = build_runtime(&config).await?;
     let channel_id = ChannelId::new("cli", "model-test");
     let session_id = SessionId::new();
     println!(
@@ -774,7 +696,7 @@ async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<(
             test_config.agent.provider = preset;
         }
         test_config.agent.model = entry.id.clone();
-        let runtime = match build_runtime(&test_config, None).await {
+        let runtime = match build_runtime(&test_config).await {
             Ok(rt) => rt,
             Err(e) => {
                 println!("  [{}] {:<24} FAIL (setup): {e}", entry.provider, entry.id);
@@ -1041,11 +963,6 @@ fn print_goodbye_banner(session_id: &SessionId, model: &str) {
     println!();
 }
 
-/// Returns whether a response should be routed to the mobile adapter.
-fn should_send_mobile_response(channel_id: &ChannelId) -> bool {
-    channel_id.as_str().starts_with("mobile:")
-}
-
 /// Returns whether a response should be routed to Telegram.
 fn should_send_telegram_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("telegram:")
@@ -1054,17 +971,6 @@ fn should_send_telegram_response(channel_id: &ChannelId) -> bool {
 /// Returns whether a response should be routed to CLI.
 fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
-}
-
-/// Extracts a [`WorkerReport`] from event metadata, if present.
-fn parse_worker_report(event: &ChannelEvent) -> Option<WorkerReport> {
-    let metadata = event.metadata.clone()?;
-    let report: WorkerReport = serde_json::from_value(metadata).ok()?;
-    if report.kind == WORKER_REPORT_KIND {
-        Some(report)
-    } else {
-        None
-    }
 }
 
 /// Builds an outbound response from runtime result.
@@ -1092,17 +998,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_send_mobile_response_checks_prefix() {
-        assert!(should_send_mobile_response(&ChannelId::from(
-            "mobile:dev1:req1"
-        )));
-        assert!(!should_send_mobile_response(&ChannelId::from(
-            "telegram:123"
-        )));
-        assert!(!should_send_mobile_response(&ChannelId::from("cli:local")));
-    }
-
-    #[test]
     fn should_send_telegram_response_checks_prefix() {
         assert!(should_send_telegram_response(&ChannelId::from(
             "telegram:123"
@@ -1116,39 +1011,6 @@ mod tests {
     fn should_send_cli_response_checks_prefix() {
         assert!(should_send_cli_response(&ChannelId::from("cli:local")));
         assert!(!should_send_cli_response(&ChannelId::from("telegram:123")));
-    }
-
-    #[test]
-    fn parse_worker_report_reads_tagged_metadata() {
-        let report = WorkerReport::new(
-            "call-1",
-            "worker-a",
-            "alpine:3.20",
-            "echo hi",
-            proto::WorkerOutput {
-                exit_code: 0,
-                stdout: "hi
-"
-                .to_string(),
-                stderr: "".to_string(),
-                output: "stdout:
-hi
-
-exit_code: 0"
-                    .to_string(),
-            },
-        );
-        let mut event = ChannelEvent::new(
-            ChannelId::from("cli:local"),
-            SessionId::from("s1"),
-            "worker report",
-        );
-        event.metadata = Some(serde_json::to_value(report.clone()).expect("serialize report"));
-
-        let parsed = parse_worker_report(&event).expect("worker report should parse");
-        assert_eq!(parsed.kind, WORKER_REPORT_KIND);
-        assert_eq!(parsed.call_id, report.call_id);
-        assert_eq!(parsed.worker_id, report.worker_id);
     }
 
     #[test]

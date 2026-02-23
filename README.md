@@ -9,38 +9,36 @@
 
 Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
-**A QUIC-based OS Gateway AI Agent** — let your LLM control your machine through any messenger.
+**An OS Gateway AI Agent with browser access via Rust→WASM.** Let your LLM control your machine through any messenger.
 
 > Inspired by [OpenClaw](https://github.com/openpista/openclaw)'s WebSocket-based agent architecture,
-> rebuilt from scratch in Rust with QUIC transport for lower latency, zero head-of-line blocking,
-> and a single static binary with no runtime dependencies.
+> rebuilt from scratch in Rust with a Rust→WASM browser client for universal access —
+> a single static binary with no runtime dependencies.
 
 ---
 
 ## What is openpista?
 
-openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI,WhatApp) to your **operating system** via an AI agent loop.
+openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI, web browser) to your **operating system** via an AI agent loop.
 
-- Send a message in Telegram → the LLM decides what to do → bash runs it → reply comes back
-- Single static binary, ~10 MB, minimal memory footprint
-- QUIC transport (0-RTT) instead of WebSocket for lower latency
+- Send a message in Telegram: the LLM decides what to do, bash runs it, the reply comes back
+ Single static binary, ~10 MB, minimal memory footprint
 - Persistent conversation memory backed by SQLite
+- Full browser automation via Chromium CDP and desktop screen capture
 - Extensible **Skills** system: drop a `SKILL.md` in your workspace to add new agent capabilities
 
 ```
-[ Channel Adapters ]  Telegram · CLI
-        │  tokio::mpsc
+[ Channel Adapters ]  Telegram · CLI (TUI) · Web (WASM)
+        │  tokio::mpsc  ChannelEvent
         ▼
-[ QUIC OS Gateway ]   quinn · rustls · session · router · cron
-        │  QUIC stream
+[ OS Gateway ]        in-process router · cron scheduler
+        │
         ▼
-[ Agent Runtime ]     LLM loop · ToolRegistry · SQLite memory
+[ Agent Runtime ]     ReAct loop · OpenAI / Anthropic / Responses API · SQLite memory
         │  tool_call
         ▼
-[ OS Tools ]          system.run (bash) · screen* · input control*
-[ Skills ]            SKILL.md → system prompt + subprocess
-
-* coming in v0.2.0
+[ OS Tools ]          system.run · browser.* · screen.capture · container.run
+[ Skills ]            SKILL.md → system prompt + subprocess / WASM
 ```
 
 ---
@@ -50,15 +48,38 @@ openpista is a lightweight daemon written in Rust that bridges **messaging chann
 | Feature | Status |
 |---|---|
 | Bash tool (`system.run`) | ✅ v0.1.0 |
+| Browser tools (`browser.*`) | ✅ v0.1.0 |
+| Screen capture (`screen.capture`) | ✅ v0.1.0 |
+| Docker sandbox (`container.run`) | ✅ v0.1.0 |
+| WASM skill sandbox | ✅ v0.1.0 |
 | Telegram channel | ✅ v0.1.0 |
-| Interactive CLI / REPL | ✅ v0.1.0 |
-| QUIC gateway (self-signed TLS) | ✅ v0.1.0 |
 | Cron scheduler | ✅ v0.1.0 |
 | SQLite conversation memory | ✅ v0.1.0 |
+| Session management (sidebar + browser) | ✅ v0.1.0 |
 | Skills (SKILL.md loader) | ✅ v0.1.0 |
-| Screen capture | 🔜 v0.2.0 |
-| Screen & input control (OpenClaw-style) | 🔜 v0.2.0 |
+| Multi-provider OAuth (PKCE) | ✅ v0.1.0 |
+| Model catalog browser | ✅ v0.1.0 |
+| OpenAI Responses API (SSE) | ✅ v0.1.0 |
+| Anthropic Claude provider | ✅ v0.1.0 |
+| Web adapter (Rust→WASM + WebSocket) | 🔜 v0.1.0 |
 | Discord / Slack adapters | 🔜 v0.2.0 |
+
+---
+
+## Providers
+
+Six provider presets ship out of the box:
+
+| Provider | Default Model | Auth |
+|---|---|---|
+| `openai` (default) | gpt-4o | OAuth PKCE, API key |
+| `claude` / `anthropic` | claude-sonnet-4-6 | OAuth PKCE, Bearer |
+| `together` | meta-llama/Llama-3.3-70B-Instruct-Turbo | API key |
+| `ollama` | llama3.2 | None (local) |
+| `openrouter` | openai/gpt-4o | OAuth PKCE, API key |
+| `custom` | configurable | configurable |
+
+The OpenAI preset supports both the standard ChatCompletions API and the Responses API (`/v1/responses`) for ChatGPT Pro subscribers. The Anthropic preset uses OAuth Bearer auth with the `anthropic-beta: oauth-2025-04-20` header and handles tool name sanitization automatically.
 
 ---
 
@@ -118,113 +139,177 @@ cargo build --release
 sudo cp target/release/openpista /usr/local/bin/
 ```
 
+---
+
+## Quick Start
+
+After building openpista, authenticate with your LLM provider and launch the TUI:
+
+```bash
+# 1. Log in (opens browser for OAuth PKCE — recommended)
+openpista auth login
+# 2. Launch the TUI
+openpista
+```
+
+That's it. The OAuth token is persisted to `~/.openpista/credentials.json` and auto-refreshed on expiry.
 
 ---
 
-## Configuration
+## Authentication
 
-Copy the example config and edit it:
-
-```bash
-cp config.example.toml config.toml
-```
-
-```toml
-[gateway]
-port = 4433          # QUIC listen port
-tls_cert = ""        # Leave empty to auto-generate a self-signed cert
-
-[agent]
-provider = "openai"
-model = "gpt-4o"
-api_key = ""         # Or set openpista_API_KEY env var
-max_tool_rounds = 10
-
-[channels.telegram]
-enabled = false
-token = ""           # Or set TELEGRAM_BOT_TOKEN env var
-
-[channels.cli]
-enabled = true
-
-[database]
-url = "~/.openpista/memory.db"
-
-[skills]
-workspace = "~/.openpista/workspace"
-```
-
-### Environment Variables
-
-| Variable | Description |
-|---|---|
-| `openpista_API_KEY` | OpenAI-compatible API key (overrides config) |
-| `OPENAI_API_KEY` | Fallback API key |
-| `OPENCODE_API_KEY` | OpenCode Zen API key |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (enables Telegram channel) |
-| `openpista_WORKSPACE` | Custom skills workspace path |
-
----
-
-## Usage
-
-### Run a single command
-
-```bash
-openpista_API_KEY=sk-... openpista run -e "list files in my home directory"
-```
-
-### Auth Login Picker
+**OAuth PKCE browser login** is the recommended way to authenticate. It works with OpenAI, Anthropic, and OpenRouter out of the box — no API keys required.
 
 ```bash
 # Interactive provider picker (search + arrow selection)
 openpista auth login
-
-# Non-interactive mode (for scripts/CI)
-openpista auth login --non-interactive --provider opencode --api-key "$OPENCODE_API_KEY"
 ```
 
-TUI shortcuts:
+From the TUI:
 
 ```txt
 /login
 /connection
 ```
 
+For providers that don't support OAuth (Together, Ollama, Custom), supply an API key:
 
 ```bash
-# Recommended coding models
-openpista models list
+# API key login (stored in credential store)
+openpista auth login --non-interactive --provider together --api-key "$TOGETHER_API_KEY"
+# Provider with custom endpoint
+openpista auth login --non-interactive \
+  --provider azure-openai \
+  --endpoint "https://your-resource.openai.azure.com" \
+  --api-key "$AZURE_OPENAI_API_KEY"
 ```
 
-TUI shortcuts:
+### Credential Resolution Priority
 
-```txt
-/models
-```
+openpista resolves credentials in this order (highest priority first):
 
-Inside the `/models` browser:
+| Priority | Source | Description |
+|---|---|---|
+| 1 | Config file / `openpista_API_KEY` | Explicit `api_key` in `config.toml` or env override |
+| 2 | Credential store | Token saved by `openpista auth login` (`~/.openpista/credentials.json`) |
+| 3 | Provider env var | e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY` |
+| 4 | Legacy fallback | `OPENAI_API_KEY` (used when no other source matches) |
 
-```txt
-s or /: search by model id
-r: refresh catalog from remote
-Esc: exit search mode (first) or close browser
-```
+For most users, **`openpista auth login` (priority 2) is all you need.** Environment variables and config file keys are provided for CI pipelines, Docker containers, and non-interactive scripts.
 
-### Daemon mode (Telegram + CLI + QUIC gateway)
+---
+
+## Configuration
+
+Configuration is loaded from: `--config` path → `./config.toml` → `~/.openpista/config.toml` → defaults.
 
 ```bash
-openpista_API_KEY=sk-... \
-TELEGRAM_BOT_TOKEN=123456:ABC... \
+cp config.example.toml config.toml
+```
+```toml
+[agent]
+provider = "openai"
+model = "gpt-4o"
+max_tool_rounds = 10
+# api_key = ""       # Optional — prefer `openpista auth login` instead
+[channels.telegram]
+enabled = false
+token = ""
+[channels.cli]
+enabled = true
+url = "~/.openpista/memory.db"
+workspace = "~/.openpista/workspace"
+```
+
+### Environment Variable Overrides (CI / Scripts)
+
+Environment variables override config file values. They are intended for CI pipelines, Docker, and non-interactive environments — not as the primary setup method.
+| Variable | Description |
+|---|---|
+| `openpista_API_KEY` | API key override (takes top priority) |
+| `OPENAI_API_KEY` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `openpista_MODEL` | Model override |
+| `openpista_OAUTH_CLIENT_ID` | Custom OAuth PKCE client ID |
+| `openpista_WEB_TOKEN` | Web adapter auth token |
+| `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
+| `openpista_WORKSPACE` | Custom skills workspace path |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
+| `OPENCODE_API_KEY` | OpenCode Zen API key |
+---
+
+## Usage
+
+### TUI (default)
+
+```bash
+# Launch TUI
+openpista
+openpista -s SESSION_ID
+openpista tui -s SESSION_ID
+```
+
+### Run a single command
+
+```bash
+openpista run -e "list files in my home directory"
+```
+
+### Model catalog
+
+```bash
+openpista model list
+```
+
+From the TUI:
+
+```txt
+/model
+/model list
+```
+
+Inside the model browser:
+
+```txt
+s or /: search by model ID
+r:      refresh catalog from remote
+Esc:    exit search mode (first press) or close browser
+```
+
+### Session management
+
+From the TUI:
+
+```txt
+/session              - browse sessions
+/session new          - start a new session
+/session load ID      - load a session by ID
+/session delete ID    - delete a session by ID
+```
+
+Press `Tab` to toggle the sidebar, which shows recent sessions. Navigate with `j`/`k` or arrow keys, `Enter` to open, `d`/`Delete` to request deletion, `Esc` to unfocus.
+
+### Daemon mode (Telegram + CLI + Web UI)
+
+```bash
 openpista start
 ```
 
-The daemon:
-- Listens on QUIC port `4433` for remote agent connections
-- Starts all enabled channel adapters
-- Writes a PID file to `~/.openpista/openpista.pid`
-- Handles `SIGTERM` / `Ctrl-C` for graceful shutdown
+Enable Telegram in `config.toml` or via environment:
 
+```bash
+# config.toml approach (recommended)
+# [channels.telegram]
+# enabled = true
+# token = "123456:ABC..."
+
+# Or via env var for CI/Docker
+TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
+```
+The daemon:
+ Starts all enabled channel adapters
+ Writes a PID file to `~/.openpista/openpista.pid`
+ Handles `SIGTERM` / `Ctrl-C` for graceful shutdown
 ### Skills
 
 Place a `SKILL.md` in your workspace to extend the agent's capabilities:
@@ -247,12 +332,13 @@ Place a `SKILL.md` in your workspace to extend the agent's capabilities:
 openpista/
 ├── crates/
 │   ├── proto/      # Shared types, errors (AgentMessage, ToolCall, …)
-│   ├── gateway/    # QUIC server, session router, cron scheduler
-│   ├── agent/      # ReAct loop, LLM provider, SQLite memory
-│   ├── tools/      # Tool trait + BashTool (system.run)
-│   ├── channels/   # ChannelAdapter, CliAdapter, TelegramAdapter
-│   ├── skills/     # SKILL.md loader, subprocess runner
-│   └── cli/        # Binary entry point, clap, config, daemon
+│   ├── gateway/    # In-process gateway, cron scheduler
+│   ├── agent/      # ReAct loop, OpenAI / Anthropic / Responses API, SQLite memory
+│   ├── tools/      # Tool trait — BashTool, BrowserTool, ScreenTool, ContainerTool
+│   ├── channels/   # CliAdapter, TelegramAdapter, WebAdapter
+│   ├── skills/     # SKILL.md loader, subprocess + WASM runner
+│   ├── web/        # Rust→WASM browser client (wasm-bindgen, H5 chat UI)
+│   └── cli/        # Binary entry point, clap, config, TUI (ratatui + crossterm)
 ├── migrations/     # SQLite schema migrations
 ├── config.example.toml
 └── README.md
@@ -284,7 +370,7 @@ Contributions are welcome! Please follow these steps:
    ```
    feat(tools): add screen capture tool
    fix(agent): handle empty LLM response gracefully
-   docs: update installation guide for Windows
+   docs: update installation guide
    ```
    Follows [Conventional Commits](https://www.conventionalcommits.org/).
 
