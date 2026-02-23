@@ -87,32 +87,32 @@
 - [x] `MobileAdapter` — QUIC 양방향 스트림, 토큰 기반 인증, `rcgen`을 통한 자체 서명 TLS
 - [x] 응답 라우팅: CLI 응답 → stdout, 텔레그램 응답 → 봇 API
 - [x] 사용자에게 명확히 표시되는 오류 응답
- [ ] `WebAdapter` — Rust→WASM 브라우저 클라이언트 + WebSocket 전송 (웹 채널 어댑터 섹션 참조)
+- [x] `WebAdapter` — Rust→WASM 브라우저 클라이언트 + WebSocket 전송 (웹 채널 어댑터 섹션 참조)
 
 
 ### WhatsApp 채널 어댑터 (WhatsApp Channel Adapter)
 
 > WhatsApp은 Telegram과 동일한 HTTP→mpsc 브릿지 패턴을 따릅니다. 어댑터는 HTTP(`axum`)를 통해 웹훅 이벤트를 수신하고, `ChannelEvent`로 변환한 후 `tokio::mpsc`를 통해 전달합니다.
 
- [ ] `WhatsAppAdapter` — `reqwest`를 통한 WhatsApp Business Cloud API 통합
- [ ] 수신 메시지를 위한 웹훅 HTTP 서버 (`axum` 기반): GET 검증 챌린지 + POST 메시지 핸들러
- [ ] HMAC-SHA256 웹훅 페이로드 서명 검증 (`X-Hub-Signature-256` 헤더)
- [ ] Meta Graph API를 통한 텍스트 메시지 전송 (`POST /v21.0/{phone_number_id}/messages`)
- [ ] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
- [ ] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
- [ ] 환경 변수 재정의: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
- [ ] 수신 메시지 파싱: 텍스트, 이미지, 오디오, 비디오, 문서, 위치, 연락처
- [ ] 메시지 상태 웹훅 콜백 처리 (발송 → 수신 → 읽음)
- [ ] 미디어 메시지 다운로드 및 전달 (수신 미디어 → base64 또는 로컬 경로로 에이전트 컨텍스트에 전달)
- [ ] 인터랙티브 메시지 지원: 응답 버튼, 목록 메시지, 빠른 답장
- [ ] 아웃바운드 알림을 위한 메시지 템플릿 렌더링 (WhatsApp 24시간 정책에 필요한 HSM 템플릿)
- [ ] WhatsApp Business API 등급(tier)에 따른 처리율 제한 준수 (메시지 제한, 처리량)
- [ ] 일시적 API 장애(429, 500)에 대한 지수 백오프(exponential backoff) 재시도 로직
- [ ] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
- [ ] 응답 라우팅 통합: WhatsApp 응답 → Graph API `send_message`
- [ ] 다중 번호 지원: 여러 번호를 가진 비즈니스 계정을 위한 구성 가능한 전화번호 ID
- [ ] 유닛 테스트: 웹훅 검증, 메시지 파싱, 세션 ID 생성, 응답 포맷팅, 서명 검증
- [ ] 통합 테스트: 엔드-투-엔드 웹훅 → `ChannelEvent` → `AgentResponse` → WhatsApp 전송 흐름
+- [x] `WhatsAppAdapter` — `reqwest`를 통한 WhatsApp Business Cloud API 통합
+- [x] 수신 메시지를 위한 웹훅 HTTP 서버 (`axum` 기반): GET 검증 챌린지 + POST 메시지 핸들러
+- [x] HMAC-SHA256 웹훅 페이로드 서명 검증 (`X-Hub-Signature-256` 헤더)
+- [x] Meta Graph API를 통한 텍스트 메시지 전송 (`POST /v21.0/{phone_number_id}/messages`)
+- [x] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
+- [x] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
+- [x] 환경 변수 재정의: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
+- [x] 수신 메시지 파싱: 텍스트 (이미지, 오디오, 비디오, 문서, 위치, 연락처 — 향후 예정)
+- [x] 메시지 상태 웹훅 콜백 처리 (발송 → 수신 → 읽음)
+ - [ ] 미디어 메시지 다운로드 및 전달 (수신 미디어 → base64 또는 로컬 경로로 에이전트 컨텍스트에 전달)
+ - [ ] 인터랙티브 메시지 지원: 응답 버튼, 목록 메시지, 빠른 답장
+ - [ ] 아웃바운드 알림을 위한 메시지 템플릿 렌더링 (WhatsApp 24시간 정책에 필요한 HSM 템플릿)
+ - [ ] WhatsApp Business API 등급(tier)에 따른 처리율 제한 준수 (메시지 제한, 처리량)
+ - [ ] 일시적 API 장애(429, 500)에 대한 지수 백오프(exponential backoff) 재시도 로직
+- [x] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
+- [x] 응답 라우팅 통합: WhatsApp 응답 → Graph API `send_message`
+ - [ ] 다중 번호 지원: 여러 번호를 가진 비즈니스 계정을 위한 구성 가능한 전화번호 ID
+- [x] 유닛 테스트: 웹훅 검증, 메시지 파싱, 세션 ID 생성, 응답 포맷팅, 서명 검증
+ - [ ] 통합 테스트: 엔드-투-엔드 웹훅 → `ChannelEvent` → `AgentResponse` → WhatsApp 전송 흐름
 
 #### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
 
@@ -154,36 +154,36 @@
 
 #### 서버 (axum)
 
- [ ] `WebAdapter` — axum HTTP 서버: WebSocket 업그레이드 + WASM 번들용 정적 파일 서빙
- [ ] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `ChannelEvent` / `AgentResponse`
- [ ] WebSocket 핸드쉐이크 시 토큰 기반 인증 (`Sec-WebSocket-Protocol` 또는 쿼리 파람)
- [ ] `WebConfig` — `[channels.web]` 설정 섹션: `port`, `token`, `cors_origins`, `static_dir`
- [ ] 환경 변수 재정의: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
- [ ] 세션 매핑: 인증된 클라이언트별 안정적인 세션을 가진 `web:{client_id}` 채널 ID
- [ ] 자동 재연결 지원: 클라이언트 측 하트비트 ping/pong, 서버 측 타임아웃 감지
- [ ] 크로스 오리진 브라우저 접근을 위한 CORS 설정
- [ ] 리버스 프록시 또는 `axum-server` + `rustls`를 통한 WSS (TLS) 지원
- [ ] WASM 번들 및 H5 에셋을 위한 구성 가능한 정적 파일 디렉토리
+- [x] `WebAdapter` — axum HTTP 서버: WebSocket 업그레이드 + WASM 번들용 정적 파일 서빙
+- [x] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `ChannelEvent` / `AgentResponse`
+- [x] WebSocket 핸드쉐이크 시 토큰 기반 인증 (`Sec-WebSocket-Protocol` 또는 쿼리 파람)
+- [x] `WebConfig` — `[channels.web]` 설정 섹션: `port`, `token`, `cors_origins`, `static_dir`
+- [x] 환경 변수 재정의: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
+- [x] 세션 매핑: 인증된 클라이언트별 안정적인 세션을 가진 `web:{client_id}` 채널 ID
+ - [ ] 자동 재연결 지원: 클라이언트 측 하트비트 ping/pong, 서버 측 타임아웃 감지
+- [x] 크로스 오리진 브라우저 접근을 위한 CORS 설정
+ - [ ] 리버스 프록시 또는 `axum-server` + `rustls`를 통한 WSS (TLS) 지원
+- [x] WASM 번들 및 H5 에셋을 위한 구성 가능한 정적 파일 디렉토리
 
 #### 클라이언트 (Rust→WASM)
 
- [ ] `wasm-pack`을 통해 `wasm32-unknown-unknown`으로 컴파일되는 Rust 클라이언트 크레이트 (`crates/web/`)
- [ ] `wasm-bindgen` JS 인터롭: WebSocket API, DOM 조작, localStorage
- [ ] WebSocket 연결 관리자: 연결, 재연결, 하트비트, 버퍼링된 전송 큐
- [ ] 메시지 직렬화: `ChannelEvent` / `AgentResponse`를 위한 WASM 내 `serde_json`
- [ ] 세션 지속성: 페이지 새로고침 시 세션 ID와 인증 토큰 유지를 위한 `localStorage`
- [ ] H5 채팅 UI: 모바일 대응 채팅 인터페이스 (HTML/CSS/JS 또는 Yew/Leptos 프레임워크)
- [ ] 스트리밍 응답 표시: 에이전트 출력 생성 시 점진적 텍스트 렌더링
- [ ] 슬래시 명령어 지원: 웹 UI 입력에서 `/model`, `/session`, `/clear`, `/help`
- [ ] 미디어 첨부 지원: 이미지 업로드 → base64 인코딩 → 에이전트 컨텍스트
- [ ] PWA 매니페스트: 홈 화면 앱으로 설치 가능 (오프라인 셸 + 온라인 WebSocket)
- [ ] CI에서 `wasm-pack build --target web` 빌드 파이프라인
+- [x] `wasm-pack`을 통해 `wasm32-unknown-unknown`으로 컴파일되는 Rust 클라이언트 크레이트 (`crates/web/`)
+- [x] `wasm-bindgen` JS 인터롭: WebSocket API, DOM 조작, localStorage
+- [x] WebSocket 연결 관리자: 연결, 종료, 연결 상태 확인
+- [x] 메시지 직렬화: `ChannelEvent` / `AgentResponse`를 위한 WASM 내 `serde_json`
+- [x] 세션 지속성: 페이지 새로고침 시 세션 ID 유지를 위한 `localStorage`
+ - [ ] H5 채팅 UI: 모바일 대응 채팅 인터페이스 (HTML/CSS/JS 또는 Yew/Leptos 프레임워크)
+ - [ ] 스트리밍 응답 표시: 에이전트 출력 생성 시 점진적 텍스트 렌더링
+ - [ ] 슬래시 명령어 지원: 웹 UI 입력에서 `/model`, `/session`, `/clear`, `/help`
+ - [ ] 미디어 첨부 지원: 이미지 업로드 → base64 인코딩 → 에이전트 컨텍스트
+ - [ ] PWA 매니페스트: 홈 화면 앱으로 설치 가능 (오프라인 셸 + 온라인 WebSocket)
+ - [ ] CI에서 `wasm-pack build --target web` 빌드 파이프라인
 
 #### 품질 (Quality)
 
- [ ] 유닛 테스트: WebSocket 핸드쉐이크, 토큰 인증, 메시지 프레이밍, 재연결 로직
- [ ] 통합 테스트: 브라우저 → WebSocket → `ChannelEvent` → `AgentResponse` → 브라우저 렌더
- [ ] WASM 번들 크기 최적화: `wasm-opt`, 트리 셰이킹, gzip/brotli 서빙
+- [x] 유닛 테스트: WebSocket 메시지 파싱, 토큰 인증, 세션 ID, CORS 레이어
+ - [ ] 통합 테스트: 브라우저 → WebSocket → `ChannelEvent` → `AgentResponse` → 브라우저 렌더
+ - [ ] WASM 번들 크기 최적화: `wasm-opt`, 트리 셰이킹, gzip/brotli 서빙
 
 ### 스킬 시스템 (Skills System)
 
@@ -250,7 +250,7 @@
 
 ### 품질 및 CI (Quality & CI)
 
-- [x] 모든 크레이트에 걸친 726개의 유닛 + 통합 테스트 (`cargo test --workspace`)
+- [x] 모든 크레이트에 걸친 699개의 유닛 + 통합 테스트 (`cargo test --workspace`)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
 - [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우

@@ -61,6 +61,22 @@ token = ""  # 또는 환경 변수 TELEGRAM_BOT_TOKEN
 enabled = true
 
 
+
+[channels.whatsapp]
+enabled = false
+phone_number_id = ""  # WhatsApp Business phone number ID
+access_token = ""     # Graph API access token
+verify_token = ""     # Webhook verification token
+app_secret = ""       # App secret for HMAC-SHA256 verification
+webhook_port = 8080    # Webhook listener port
+
+[channels.web]
+enabled = false
+token = ""             # Auth token for WebSocket connections (or openpista_WEB_TOKEN)
+port = 3210             # HTTP/WS port (or openpista_WEB_PORT)
+cors_origins = ""      # Comma-separated allowed origins (empty = allow all)
+static_dir = "~/.openpista/web"  # Static file directory for web UI
+
 # ─────────────────────────────────────────────
 # 데이터베이스 / 스킬 경로
 # ─────────────────────────────────────────────

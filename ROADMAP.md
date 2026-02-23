@@ -66,32 +66,32 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
 - [x] Response routing: CLI responses → stdout, Telegram responses → bot API
 - [x] Error responses clearly surfaced to the user
- [ ] `WebAdapter` — Rust→WASM browser client with WebSocket transport (see Web Channel Adapter section)
+- [x] `WebAdapter` — Rust→WASM browser client with WebSocket transport (see Web Channel Adapter section)
 
 
 ### WhatsApp Channel Adapter
 
 > WhatsApp follows the same HTTP-to-mpsc bridge pattern as Telegram. The adapter receives webhook events over HTTP (via `axum`), converts them to `ChannelEvent`, and forwards through `tokio::mpsc`.
 
- [ ] `WhatsAppAdapter` — WhatsApp Business Cloud API integration via `reqwest`
- [ ] Webhook HTTP server (via `axum`) for incoming messages: GET verification challenge + POST message handler
- [ ] HMAC-SHA256 webhook payload signature verification (`X-Hub-Signature-256` header)
- [ ] Text message sending via Meta Graph API (`POST /v21.0/{phone_number_id}/messages`)
- [ ] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
- [ ] `WhatsAppConfig` — `[channels.whatsapp]` config section: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
- [ ] Environment variable overrides: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
- [ ] Incoming message parsing: text, image, audio, video, document, location, contacts
- [ ] Message status webhook callback handling (sent → delivered → read)
- [ ] Media message download and forwarding (incoming media → base64 or local path for agent context)
- [ ] Interactive message support: reply buttons, list messages, quick replies
- [ ] Message template rendering for outbound notifications (HSM templates required by WhatsApp 24h policy)
- [ ] Rate limiting compliance with WhatsApp Business API tiers (messaging limits, throughput)
- [ ] Retry logic with exponential backoff for transient API failures (429, 500)
- [ ] Error responses clearly surfaced to the user (consistent with other adapters)
- [ ] Response routing integration: WhatsApp responses → Graph API `send_message`
- [ ] Multi-number support: configurable phone number IDs for business accounts with multiple numbers
- [ ] Unit tests: webhook verification, message parsing, session ID generation, response formatting, signature validation
- [ ] Integration test: end-to-end webhook → `ChannelEvent` → `AgentResponse` → WhatsApp send flow
+- [x] `WhatsAppAdapter` — WhatsApp Business Cloud API integration via `reqwest`
+- [x] Webhook HTTP server (via `axum`) for incoming messages: GET verification challenge + POST message handler
+- [x] HMAC-SHA256 webhook payload signature verification (`X-Hub-Signature-256` header)
+- [x] Text message sending via Meta Graph API (`POST /v21.0/{phone_number_id}/messages`)
+- [x] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
+- [x] `WhatsAppConfig` — `[channels.whatsapp]` config section: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
+- [x] Environment variable overrides: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
+- [x] Incoming message parsing: text (image, audio, video, document, location, contacts — future)
+- [x] Message status webhook callback handling (sent → delivered → read)
+ - [ ] Media message download and forwarding (incoming media → base64 or local path for agent context)
+ - [ ] Interactive message support: reply buttons, list messages, quick replies
+ - [ ] Message template rendering for outbound notifications (HSM templates required by WhatsApp 24h policy)
+ - [ ] Rate limiting compliance with WhatsApp Business API tiers (messaging limits, throughput)
+ - [ ] Retry logic with exponential backoff for transient API failures (429, 500)
+- [x] Error responses clearly surfaced to the user (consistent with other adapters)
+- [x] Response routing integration: WhatsApp responses → Graph API `send_message`
+ - [ ] Multi-number support: configurable phone number IDs for business accounts with multiple numbers
+- [x] Unit tests: webhook verification, message parsing, session ID generation, response formatting, signature validation
+ - [ ] Integration test: end-to-end webhook → `ChannelEvent` → `AgentResponse` → WhatsApp send flow
 
 #### Reference Open-Source Projects
 
@@ -133,36 +133,36 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 #### Server (axum)
 
- [ ] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
- [ ] WebSocket message framing: JSON `ChannelEvent` / `AgentResponse` over WS text frames
- [ ] Token-based authentication on WebSocket handshake (`Sec-WebSocket-Protocol` or query param)
- [ ] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
- [ ] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
- [ ] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
- [ ] Auto-reconnect support: client-side heartbeat ping/pong, server-side timeout detection
- [ ] CORS configuration for cross-origin browser access
- [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
- [ ] Configurable static file directory for WASM bundle and H5 assets
+- [x] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
+- [x] WebSocket message framing: JSON `ChannelEvent` / `AgentResponse` over WS text frames
+- [x] Token-based authentication on WebSocket handshake (`Sec-WebSocket-Protocol` or query param)
+- [x] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
+- [x] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
+- [x] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
+ - [ ] Auto-reconnect support: client-side heartbeat ping/pong, server-side timeout detection
+- [x] CORS configuration for cross-origin browser access
+ - [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
+- [x] Configurable static file directory for WASM bundle and H5 assets
 
 #### Client (Rust→WASM)
 
- [ ] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
- [ ] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
- [ ] WebSocket connection manager: connect, reconnect, heartbeat, buffered send queue
- [ ] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
- [ ] Session persistence: `localStorage` for session ID and auth token across page reloads
- [ ] H5 chat UI: mobile-responsive chat interface (HTML/CSS/JS or Yew/Leptos framework)
- [ ] Streaming response display: progressive text rendering as agent generates output
- [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
- [ ] Media attachment support: image upload → base64 encoding → agent context
- [ ] PWA manifest: installable as home screen app (offline shell + online WebSocket)
- [ ] `wasm-pack build --target web` build pipeline in CI
+- [x] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
+- [x] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
+- [x] WebSocket connection manager: connect, disconnect, is_connected
+- [x] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
+- [x] Session persistence: `localStorage` for session ID across page reloads
+ - [ ] H5 chat UI: mobile-responsive chat interface (HTML/CSS/JS or Yew/Leptos framework)
+ - [ ] Streaming response display: progressive text rendering as agent generates output
+ - [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
+ - [ ] Media attachment support: image upload → base64 encoding → agent context
+ - [ ] PWA manifest: installable as home screen app (offline shell + online WebSocket)
+ - [ ] `wasm-pack build --target web` build pipeline in CI
 
 #### Quality
 
- [ ] Unit tests: WebSocket handshake, token auth, message framing, reconnect logic
- [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
- [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
+- [x] Unit tests: WebSocket message parsing, token auth, session ID, CORS layer
+ - [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
+ - [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
 
 ### Skills System
 
@@ -229,7 +229,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 ### Quality & CI
 
-- [x] 726 unit + integration tests across all crates (`cargo test --workspace`)
+- [x] 699 unit + integration tests across all crates (`cargo test --workspace`)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
 - [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`

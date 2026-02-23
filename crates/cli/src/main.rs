@@ -25,7 +25,7 @@ use agent::{
     ToolRegistry,
 };
 #[cfg(not(test))]
-use channels::{ChannelAdapter, CliAdapter, TelegramAdapter};
+use channels::{ChannelAdapter, CliAdapter, TelegramAdapter, WebAdapter, WhatsAppAdapter};
 #[cfg(not(test))]
 use config::Config;
 #[cfg(not(test))]
@@ -451,6 +451,51 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    // WhatsApp adapter
+    let mut whatsapp_resp_adapter: Option<WhatsAppAdapter> = None;
+    if config.channels.whatsapp.enabled {
+        let wa_config = channels::whatsapp::WhatsAppAdapterConfig {
+            phone_number_id: config.channels.whatsapp.phone_number_id.clone(),
+            access_token: config.channels.whatsapp.access_token.clone(),
+            verify_token: config.channels.whatsapp.verify_token.clone(),
+            app_secret: config.channels.whatsapp.app_secret.clone(),
+            webhook_port: config.channels.whatsapp.webhook_port,
+        };
+        if wa_config.access_token.is_empty() {
+            warn!("WhatsApp enabled but no access token configured");
+        } else {
+            let tx = event_tx.clone();
+            let adapter = WhatsAppAdapter::new(wa_config.clone(), resp_tx.clone());
+            whatsapp_resp_adapter = Some(WhatsAppAdapter::new(wa_config, resp_tx.clone()));
+
+            tokio::spawn(async move {
+                if let Err(e) = adapter.run(tx).await {
+                    error!("WhatsApp adapter error: {e}");
+                }
+            });
+        }
+    }
+
+    // Web adapter
+    let mut web_resp_adapter: Option<WebAdapter> = None;
+    if config.channels.web.enabled {
+        let web_config = channels::web::WebAdapterConfig {
+            port: config.channels.web.port,
+            token: config.channels.web.token.clone(),
+            cors_origins: config.channels.web.cors_origins.clone(),
+            static_dir: config.channels.web.static_dir.clone(),
+        };
+        let tx = event_tx.clone();
+        let adapter = WebAdapter::new(web_config, resp_tx.clone());
+        web_resp_adapter = Some(adapter.clone_for_responses());
+
+        tokio::spawn(async move {
+            if let Err(e) = adapter.run(tx).await {
+                error!("Web adapter error: {e}");
+            }
+        });
+    }
+
     // Response forwarder (always consume `resp_rx` to avoid dropped/backed-up responses)
     tokio::spawn(async move {
         while let Some(resp) = resp_rx.recv().await {
@@ -474,6 +519,28 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
                     }
                 } else {
                     warn!("Telegram response dropped because Telegram channel is disabled");
+                }
+                continue;
+            }
+
+            if should_send_whatsapp_response(&channel_id) {
+                if let Some(adapter) = &whatsapp_resp_adapter {
+                    if let Err(e) = adapter.send_response(resp).await {
+                        error!("Failed to send WhatsApp response: {e}");
+                    }
+                } else {
+                    warn!("WhatsApp response dropped because WhatsApp channel is disabled");
+                }
+                continue;
+            }
+
+            if should_send_web_response(&channel_id) {
+                if let Some(adapter) = &web_resp_adapter {
+                    if let Err(e) = adapter.send_response(resp).await {
+                        error!("Failed to send Web response: {e}");
+                    }
+                } else {
+                    warn!("Web response dropped because Web channel is disabled");
                 }
                 continue;
             }
@@ -971,6 +1038,14 @@ fn should_send_telegram_response(channel_id: &ChannelId) -> bool {
 /// Returns whether a response should be routed to CLI.
 fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
+}
+
+fn should_send_whatsapp_response(channel_id: &ChannelId) -> bool {
+    channel_id.as_str().starts_with("whatsapp:")
+}
+
+fn should_send_web_response(channel_id: &ChannelId) -> bool {
+    channel_id.as_str().starts_with("web:")
 }
 
 /// Builds an outbound response from runtime result.

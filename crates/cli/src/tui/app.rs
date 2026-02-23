@@ -75,6 +75,14 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/session delete <id>",
         description: "Delete a session by ID",
     },
+    SlashCommand {
+        name: "/whatsapp",
+        description: "Configure WhatsApp channel",
+    },
+    SlashCommand {
+        name: "/whatsapp status",
+        description: "Show WhatsApp config status",
+    },
 ];
 
 // ─── Data types ──────────────────────────────────────────────
@@ -192,6 +200,40 @@ pub enum AppState {
         /// Short preview text shown in the confirmation dialog.
         session_preview: String,
     },
+    /// WhatsApp configuration wizard.
+    WhatsAppSetup {
+        /// Current wizard step.
+        step: WhatsAppSetupStep,
+        /// Input buffer for the current field.
+        input_buffer: String,
+        /// Collected phone_number_id.
+        phone_number_id: String,
+        /// Collected access_token.
+        access_token: String,
+        /// Collected verify_token.
+        verify_token: String,
+        /// Collected app_secret.
+        app_secret: String,
+        /// Collected webhook_port.
+        webhook_port: String,
+    },
+}
+
+/// Steps in the WhatsApp configuration wizard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WhatsAppSetupStep {
+    /// Enter the WhatsApp Business phone number ID.
+    PhoneNumberId,
+    /// Enter the Meta Graph API access token.
+    AccessToken,
+    /// Enter the webhook verification token.
+    VerifyToken,
+    /// Enter the app secret for HMAC verification.
+    AppSecret,
+    /// Choose the webhook server port.
+    WebhookPort,
+    /// Review and confirm all values.
+    Confirm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,7 +483,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -458,6 +500,9 @@ impl TuiApp {
                     "Loading model catalog... (inside browser: s or / to search, r to refresh)"
                         .to_string(),
                 );
+            }
+            "/whatsapp" => {
+                // "status" subcommand is handled in event.rs; bare /whatsapp opens wizard
             }
             other => {
                 self.push_error(format!(
@@ -1022,6 +1067,24 @@ impl TuiApp {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        // ── WhatsApp setup wizard ────────────────────
+        if let AppState::WhatsAppSetup {
+            step, input_buffer, ..
+        } = &mut self.state
+        {
+            match key.code {
+                KeyCode::Char(c) => {
+                    input_buffer.push(c);
+                }
+                KeyCode::Backspace => {
+                    input_buffer.pop();
+                }
+                _ => {} // Enter/Esc handled by map_key_event
+            }
+            let _ = step; // suppress unused warning
             return;
         }
 
@@ -1981,6 +2044,161 @@ impl TuiApp {
                 self.scroll_to_bottom();
                 Command::None
             }
+
+            // ── WhatsApp setup wizard ──────────────────────
+            Action::OpenWhatsAppSetup => {
+                self.input.clear();
+                self.cursor_pos = 0;
+                self.state = AppState::WhatsAppSetup {
+                    step: WhatsAppSetupStep::PhoneNumberId,
+                    input_buffer: String::new(),
+                    phone_number_id: String::new(),
+                    access_token: String::new(),
+                    verify_token: String::new(),
+                    app_secret: String::new(),
+                    webhook_port: "8080".to_string(),
+                };
+                self.screen = Screen::Chat;
+                Command::None
+            }
+            Action::WhatsAppSetupNext => {
+                if let AppState::WhatsAppSetup {
+                    step,
+                    input_buffer,
+                    phone_number_id,
+                    access_token,
+                    verify_token,
+                    app_secret,
+                    webhook_port,
+                } = &mut self.state
+                {
+                    let val = input_buffer.trim().to_string();
+                    match step {
+                        WhatsAppSetupStep::PhoneNumberId => {
+                            if val.is_empty() {
+                                return Command::None;
+                            }
+                            *phone_number_id = val;
+                            *input_buffer = String::new();
+                            *step = WhatsAppSetupStep::AccessToken;
+                        }
+                        WhatsAppSetupStep::AccessToken => {
+                            if val.is_empty() {
+                                return Command::None;
+                            }
+                            *access_token = val;
+                            *input_buffer = String::new();
+                            *step = WhatsAppSetupStep::VerifyToken;
+                        }
+                        WhatsAppSetupStep::VerifyToken => {
+                            if val.is_empty() {
+                                return Command::None;
+                            }
+                            *verify_token = val;
+                            *input_buffer = String::new();
+                            *step = WhatsAppSetupStep::AppSecret;
+                        }
+                        WhatsAppSetupStep::AppSecret => {
+                            if val.is_empty() {
+                                return Command::None;
+                            }
+                            *app_secret = val;
+                            *input_buffer = String::new();
+                            *step = WhatsAppSetupStep::WebhookPort;
+                        }
+                        WhatsAppSetupStep::WebhookPort => {
+                            let port_str = if val.is_empty() {
+                                "8080".to_string()
+                            } else {
+                                val
+                            };
+                            if port_str.parse::<u16>().is_err() {
+                                return Command::None;
+                            }
+                            *webhook_port = port_str;
+                            *input_buffer = String::new();
+                            *step = WhatsAppSetupStep::Confirm;
+                        }
+                        WhatsAppSetupStep::Confirm => {
+                            // Handled by WhatsAppSetupComplete
+                        }
+                    }
+                }
+                Command::None
+            }
+            Action::WhatsAppSetupBack => {
+                let is_first_step = matches!(
+                    &self.state,
+                    AppState::WhatsAppSetup {
+                        step: WhatsAppSetupStep::PhoneNumberId,
+                        ..
+                    }
+                );
+                if is_first_step {
+                    self.state = AppState::Idle;
+                    self.push_assistant("WhatsApp setup cancelled.".to_string());
+                } else if let AppState::WhatsAppSetup {
+                    step, input_buffer, ..
+                } = &mut self.state
+                {
+                    *input_buffer = String::new();
+                    match step {
+                        WhatsAppSetupStep::PhoneNumberId => unreachable!(),
+                        WhatsAppSetupStep::AccessToken => {
+                            *step = WhatsAppSetupStep::PhoneNumberId;
+                        }
+                        WhatsAppSetupStep::VerifyToken => {
+                            *step = WhatsAppSetupStep::AccessToken;
+                        }
+                        WhatsAppSetupStep::AppSecret => {
+                            *step = WhatsAppSetupStep::VerifyToken;
+                        }
+                        WhatsAppSetupStep::WebhookPort => {
+                            *step = WhatsAppSetupStep::AppSecret;
+                        }
+                        WhatsAppSetupStep::Confirm => {
+                            *step = WhatsAppSetupStep::WebhookPort;
+                        }
+                    }
+                }
+                Command::None
+            }
+            Action::WhatsAppSetupCancel => {
+                self.state = AppState::Idle;
+                self.push_assistant("WhatsApp setup cancelled.".to_string());
+                Command::None
+            }
+            Action::WhatsAppSetupComplete => {
+                if let AppState::WhatsAppSetup {
+                    phone_number_id,
+                    access_token,
+                    verify_token,
+                    app_secret,
+                    webhook_port,
+                    ..
+                } = &self.state
+                {
+                    let wa_config = crate::config::WhatsAppConfig {
+                        enabled: true,
+                        phone_number_id: phone_number_id.clone(),
+                        access_token: access_token.clone(),
+                        verify_token: verify_token.clone(),
+                        app_secret: app_secret.clone(),
+                        webhook_port: webhook_port.parse().unwrap_or(8080),
+                    };
+                    self.state = AppState::Idle;
+                    self.push_assistant(
+                        "WhatsApp configuration saved! Restart openpista to apply changes."
+                            .to_string(),
+                    );
+                    return Command::SaveWhatsAppConfig(wa_config);
+                }
+                Command::None
+            }
+            Action::WhatsAppSetupKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
         }
     }
 
@@ -2033,6 +2251,34 @@ impl TuiApp {
 
         if matches!(self.state, AppState::SessionBrowsing { .. }) {
             return vec![Action::SessionBrowserKey(key)];
+        }
+
+        if matches!(self.state, AppState::WhatsAppSetup { .. }) {
+            return match (key.modifiers, key.code) {
+                (_, KeyCode::Esc) => vec![Action::WhatsAppSetupCancel],
+                (_, KeyCode::Enter) => {
+                    if let AppState::WhatsAppSetup { step, .. } = &self.state {
+                        match step {
+                            WhatsAppSetupStep::Confirm => vec![Action::WhatsAppSetupComplete],
+                            _ => vec![Action::WhatsAppSetupNext],
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                (_, KeyCode::Backspace) => {
+                    if let AppState::WhatsAppSetup { input_buffer, .. } = &self.state {
+                        if input_buffer.is_empty() {
+                            vec![Action::WhatsAppSetupBack]
+                        } else {
+                            vec![Action::WhatsAppSetupKey(key)]
+                        }
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => vec![Action::WhatsAppSetupKey(key)],
+            };
         }
 
         let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
@@ -2238,6 +2484,11 @@ impl TuiApp {
 
         if matches!(self.state, AppState::SessionBrowsing { .. }) {
             self.render_session_browser(frame, area);
+            return;
+        }
+
+        if let AppState::WhatsAppSetup { .. } = &self.state {
+            self.render_whatsapp_setup(frame, area);
             return;
         }
 
@@ -3038,6 +3289,213 @@ impl TuiApp {
     pub fn scroll_to_bottom(&mut self) {
         // Set to a large value; render_history clamps it to max_scroll.
         self.history_scroll = u16::MAX;
+    }
+
+    fn render_whatsapp_setup(&self, frame: &mut Frame<'_>, area: Rect) {
+        let AppState::WhatsAppSetup {
+            step,
+            input_buffer,
+            phone_number_id,
+            access_token,
+            verify_token,
+            app_secret,
+            webhook_port,
+        } = &self.state
+        else {
+            return;
+        };
+
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+        // Title bar
+        let step_num = match step {
+            WhatsAppSetupStep::PhoneNumberId => 1,
+            WhatsAppSetupStep::AccessToken => 2,
+            WhatsAppSetupStep::VerifyToken => 3,
+            WhatsAppSetupStep::AppSecret => 4,
+            WhatsAppSetupStep::WebhookPort => 5,
+            WhatsAppSetupStep::Confirm => 6,
+        };
+        let title = Line::from(vec![
+            Span::styled(
+                " WhatsApp Setup ",
+                Style::default()
+                    .fg(THEME.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("(step {step_num}/6)"),
+                Style::default().fg(THEME.fg_dim),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(title), chunks[0]);
+
+        // Main content
+        let content_lines = match step {
+            WhatsAppSetupStep::Confirm => {
+                let mask = |s: &str| {
+                    if s.len() <= 4 {
+                        "****".to_string()
+                    } else {
+                        format!("{}\u{2026}{}", &s[..2], &s[s.len() - 2..])
+                    }
+                };
+                vec![
+                    Line::from(Span::styled(
+                        " Review your WhatsApp configuration:",
+                        Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("   Phone Number ID: ", Style::default().fg(THEME.fg_dim)),
+                        Span::styled(phone_number_id.as_str(), Style::default().fg(THEME.fg)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Access Token:    ", Style::default().fg(THEME.fg_dim)),
+                        Span::styled(mask(access_token), Style::default().fg(THEME.fg)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Verify Token:    ", Style::default().fg(THEME.fg_dim)),
+                        Span::styled(mask(verify_token), Style::default().fg(THEME.fg)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   App Secret:      ", Style::default().fg(THEME.fg_dim)),
+                        Span::styled(mask(app_secret), Style::default().fg(THEME.fg)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   Webhook Port:    ", Style::default().fg(THEME.fg_dim)),
+                        Span::styled(webhook_port.as_str(), Style::default().fg(THEME.fg)),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            " Enter",
+                            Style::default()
+                                .fg(THEME.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(": confirm  ", Style::default().fg(THEME.fg_muted)),
+                        Span::styled(
+                            "Backspace",
+                            Style::default()
+                                .fg(THEME.warning)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(": go back  ", Style::default().fg(THEME.fg_muted)),
+                        Span::styled(
+                            "Esc",
+                            Style::default()
+                                .fg(THEME.error)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(": cancel", Style::default().fg(THEME.fg_muted)),
+                    ]),
+                ]
+            }
+            _ => {
+                let (prompt, hint) = match step {
+                    WhatsAppSetupStep::PhoneNumberId => (
+                        "Enter your WhatsApp Business Phone Number ID:",
+                        "Found in Meta Business Suite \u{2192} WhatsApp \u{2192} API Setup",
+                    ),
+                    WhatsAppSetupStep::AccessToken => (
+                        "Enter your Meta Graph API Access Token:",
+                        "Generate a permanent token in Meta Business Suite",
+                    ),
+                    WhatsAppSetupStep::VerifyToken => (
+                        "Enter your Webhook Verification Token:",
+                        "A shared secret you choose for webhook verification",
+                    ),
+                    WhatsAppSetupStep::AppSecret => (
+                        "Enter your App Secret:",
+                        "Found in Meta App Dashboard \u{2192} Settings \u{2192} Basic",
+                    ),
+                    WhatsAppSetupStep::WebhookPort => (
+                        "Enter the Webhook Server Port:",
+                        "Default: 8080. Press Enter to accept default.",
+                    ),
+                    WhatsAppSetupStep::Confirm => unreachable!(),
+                };
+                vec![
+                    Line::from(Span::styled(
+                        format!(" {prompt}"),
+                        Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        format!(" {hint}"),
+                        Style::default().fg(THEME.fg_dim),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            " Enter",
+                            Style::default()
+                                .fg(THEME.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(": next  ", Style::default().fg(THEME.fg_muted)),
+                        Span::styled(
+                            "Backspace",
+                            Style::default()
+                                .fg(THEME.warning)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" (empty): back  ", Style::default().fg(THEME.fg_muted)),
+                        Span::styled(
+                            "Esc",
+                            Style::default()
+                                .fg(THEME.error)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(": cancel", Style::default().fg(THEME.fg_muted)),
+                    ]),
+                ]
+            }
+        };
+
+        let content = Paragraph::new(content_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(THEME.border))
+                    .title(Span::styled(
+                        " WhatsApp Configuration ",
+                        Style::default().fg(THEME.accent),
+                    )),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(content, chunks[1]);
+
+        // Input box (hidden on Confirm step)
+        if *step != WhatsAppSetupStep::Confirm {
+            let display_text = if matches!(
+                step,
+                WhatsAppSetupStep::AccessToken | WhatsAppSetupStep::AppSecret
+            ) {
+                "\u{2022}".repeat(input_buffer.len())
+            } else {
+                input_buffer.clone()
+            };
+            let input_widget = Paragraph::new(display_text.as_str()).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(THEME.accent))
+                    .title(Span::styled(" Input ", Style::default().fg(THEME.fg_dim))),
+            );
+            frame.render_widget(input_widget, chunks[2]);
+
+            // Place cursor
+            let cursor_x = chunks[2].x + 1 + UnicodeWidthStr::width(input_buffer.as_str()) as u16;
+            let cursor_y = chunks[2].y + 1;
+            if cursor_x < chunks[2].x + chunks[2].width - 1 {
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+        }
     }
 }
 
