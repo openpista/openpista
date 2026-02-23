@@ -62,6 +62,14 @@ enabled = true
 
 
 
+[channels.whatsapp]
+enabled = false
+phone_number_id = ""  # WhatsApp Business phone number ID
+access_token = ""     # Graph API access token
+verify_token = ""     # Webhook verification token
+app_secret = ""       # App secret for HMAC-SHA256 verification
+webhook_port = 8080    # Webhook listener port
+
 [channels.web]
 enabled = false
 token = ""        # 또는 환경 변수 openpista_WEB_TOKEN

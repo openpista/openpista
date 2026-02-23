@@ -68,6 +68,64 @@ The first public release establishes the core autonomous loop: the LLM receives 
  - [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
 
 
+### WhatsApp Channel Adapter
+
+> WhatsApp follows the same HTTP-to-mpsc bridge pattern as Telegram. The adapter receives webhook events over HTTP (via `axum`), converts them to `ChannelEvent`, and forwards through `tokio::mpsc`.
+
+- [x] `WhatsAppAdapter` — WhatsApp Business Cloud API integration via `reqwest`
+- [x] Webhook HTTP server (via `axum`) for incoming messages: GET verification challenge + POST message handler
+- [x] HMAC-SHA256 webhook payload signature verification (`X-Hub-Signature-256` header)
+- [x] Text message sending via Meta Graph API (`POST /v21.0/{phone_number_id}/messages`)
+- [x] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
+- [x] `WhatsAppConfig` — `[channels.whatsapp]` config section: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
+- [x] Environment variable overrides: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
+- [x] Incoming message parsing: text (image, audio, video, document, location, contacts — future)
+- [x] Message status webhook callback handling (sent → delivered → read)
+ - [ ] Media message download and forwarding (incoming media → base64 or local path for agent context)
+ - [ ] Interactive message support: reply buttons, list messages, quick replies
+ - [ ] Message template rendering for outbound notifications (HSM templates required by WhatsApp 24h policy)
+ - [ ] Rate limiting compliance with WhatsApp Business API tiers (messaging limits, throughput)
+ - [ ] Retry logic with exponential backoff for transient API failures (429, 500)
+- [x] Error responses clearly surfaced to the user (consistent with other adapters)
+- [x] Response routing integration: WhatsApp responses → Graph API `send_message`
+ - [ ] Multi-number support: configurable phone number IDs for business accounts with multiple numbers
+- [x] Unit tests: webhook verification, message parsing, session ID generation, response formatting, signature validation
+ - [ ] Integration test: end-to-end webhook → `ChannelEvent` → `AgentResponse` → WhatsApp send flow
+
+#### Reference Open-Source Projects
+
+> **Rust crates**
+>
+> | Crate | Description |
+> |-------|-------------|
+> | [`whatsapp-business-rs`](https://github.com/veecore/whatsapp-business-rs) | Full WhatsApp Business Cloud API SDK — axum webhook server, HMAC-SHA256 verification, message send/receive. Primary candidate. |
+> | [`whatsapp-cloud-api`](https://github.com/sajuthankappan/whatsapp-cloud-api-rs) | Lightweight API client for Meta Graph API (30k+ downloads). No webhook server — pair with custom axum handler. |
+> | [`whatsapp_handler`](https://github.com/bambby-plus/whatsapp_handler) | Webhook message processing + media/interactive message sending. |
+>
+> **Similar-architecture Rust AI agents**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | Trait-based `Channel` pattern nearly identical to openpista's `ChannelAdapter`. Multi-channel including WhatsApp. |
+> | [`opencrust`](https://github.com/opencrust-org/opencrust) | Same `crates/` workspace layout. Separate `whatsapp/webhook.rs` + `api.rs` module structure. |
+> | [`localgpt`](https://github.com/localgpt-app/localgpt) | `bridges/whatsapp/` bridge pattern for WhatsApp integration. |
+> | [`loom`](https://github.com/ghuntley/loom) | Axum-based `routes/whatsapp.rs` route handler in a Rust workspace. |
+>
+> **API spec references (TypeScript)**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`WhatsApp-Nodejs-SDK`](https://github.com/WhatsApp/WhatsApp-Nodejs-SDK) | Official Meta SDK — authoritative webhook payload schemas and API endpoint specs. |
+> | [`whatsapp-business-sdk`](https://github.com/MarcosNicolau/whatsapp-business-sdk) | Clean TypeScript types and good test coverage for Business Cloud API. |
+>
+> **Axum webhook HMAC-SHA256 patterns**
+>
+> | Resource | Description |
+> |----------|-------------|
+> | [pg3.dev — GitHub Webhooks in Rust with Axum](https://pg3.dev/post/github_webhooks_rust) | Complete HMAC-SHA256 + axum tutorial. `X-Hub-Signature-256` format identical to WhatsApp. |
+> | [`axum-github-hooks`](https://github.com/rustunit/axum-github-hooks) | Axum extractor pattern for webhook signature verification — adaptable to `WhatsAppWebhookPayload`. |
+
+
 ### Web Channel Adapter (Rust→WASM + WebSocket)
 
 > The Web adapter brings openpista to any phone or desktop browser — no native app required. The client is written in Rust, compiled to WASM, and served alongside an H5 chat UI. Communication uses standard WebSocket, which is universally supported in all browsers.
@@ -227,7 +285,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 ### Quality & CI
 
-- [x] 726 unit + integration tests across all crates (`cargo test --workspace`)
+- [x] 699 unit + integration tests across all crates (`cargo test --workspace`)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
 - [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`

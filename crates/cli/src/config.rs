@@ -563,7 +563,10 @@ pub struct ChannelsConfig {
     pub telegram: TelegramConfig,
     /// Local CLI adapter config.
     pub cli: CliConfig,
-    /// Web adapter config.
+    /// WhatsApp Business Cloud API adapter config.
+    #[serde(default)]
+    pub whatsapp: WhatsAppConfig,
+    /// Web adapter (WebSocket + static WASM serving) config.
     #[serde(default)]
     pub web: WebConfig,
 }
@@ -590,30 +593,92 @@ impl Default for CliConfig {
     }
 }
 
-/// Web channel adapter config.
+/// WhatsApp Business Cloud API adapter config.
+///
+/// Configure via `[channels.whatsapp]` in `config.toml` or environment variables:
+/// - `WHATSAPP_ACCESS_TOKEN` — Meta Graph API access token
+/// - `WHATSAPP_VERIFY_TOKEN` — Webhook verification token (shared secret)
+/// - `WHATSAPP_PHONE_NUMBER_ID` — WhatsApp Business phone number ID
+/// - `WHATSAPP_APP_SECRET` — App secret for HMAC-SHA256 webhook signature verification
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WhatsAppConfig {
+    /// Whether WhatsApp adapter is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// WhatsApp Business phone number ID.
+    #[serde(default)]
+    pub phone_number_id: String,
+    /// Meta Graph API access token.
+    #[serde(default)]
+    pub access_token: String,
+    /// Webhook verification token (shared secret between your app and Meta).
+    #[serde(default)]
+    pub verify_token: String,
+    /// App secret for HMAC-SHA256 webhook payload signature verification.
+    #[serde(default)]
+    pub app_secret: String,
+    /// HTTP port for the webhook server (default: 8080).
+    #[serde(default = "default_whatsapp_webhook_port")]
+    pub webhook_port: u16,
+}
+
+impl WhatsAppConfig {
+    /// Returns `true` when all required fields are non-empty.
+    #[allow(dead_code)]
+    pub fn is_configured(&self) -> bool {
+        self.enabled
+            && !self.phone_number_id.is_empty()
+            && !self.access_token.is_empty()
+            && !self.verify_token.is_empty()
+            && !self.app_secret.is_empty()
+    }
+}
+
+fn default_whatsapp_webhook_port() -> u16 {
+    8080
+}
+
+/// Web adapter config for WebSocket + static file serving.
+///
+/// Configure via `[channels.web]` in `config.toml` or environment variables:
+/// - `openpista_WEB_TOKEN` — Bearer token for WebSocket authentication
+/// - `openpista_WEB_PORT` — HTTP/WebSocket server port (default: 3210)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfig {
     /// Whether Web adapter is enabled.
+    #[serde(default)]
     pub enabled: bool,
-    /// Authentication token for WebSocket connections.
+    /// Bearer token for WebSocket handshake authentication.
+    #[serde(default)]
     pub token: String,
-    /// HTTP/WS listen port.
+    /// HTTP/WebSocket server port.
+    #[serde(default = "default_web_port")]
     pub port: u16,
-    /// Allowed CORS origins (comma-separated or "*").
+    /// Allowed CORS origins (comma-separated). Empty = allow all.
+    #[serde(default)]
     pub cors_origins: String,
-    /// Directory for static files (WASM bundle, H5 assets).
+    /// Directory for serving WASM bundle and H5 static assets.
+    #[serde(default = "default_web_static_dir")]
     pub static_dir: String,
+}
+
+fn default_web_port() -> u16 {
+    3210
+}
+
+fn default_web_static_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{home}/.openpista/web")
 }
 
 impl Default for WebConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
             enabled: false,
             token: String::new(),
-            port: 3210,
-            cors_origins: "*".to_string(),
-            static_dir: format!("{home}/.openpista/web"),
+            port: default_web_port(),
+            cors_origins: String::new(),
+            static_dir: default_web_static_dir(),
         }
     }
 }
@@ -692,6 +757,30 @@ impl Config {
         if let Ok(workspace) = std::env::var("openpista_WORKSPACE") {
             config.skills.workspace = workspace;
         }
+        // WhatsApp env overrides
+        if let Ok(token) = std::env::var("WHATSAPP_ACCESS_TOKEN") {
+            config.channels.whatsapp.access_token = token;
+            config.channels.whatsapp.enabled = true;
+        }
+        if let Ok(verify) = std::env::var("WHATSAPP_VERIFY_TOKEN") {
+            config.channels.whatsapp.verify_token = verify;
+        }
+        if let Ok(phone) = std::env::var("WHATSAPP_PHONE_NUMBER_ID") {
+            config.channels.whatsapp.phone_number_id = phone;
+        }
+        if let Ok(secret) = std::env::var("WHATSAPP_APP_SECRET") {
+            config.channels.whatsapp.app_secret = secret;
+        }
+        // Web adapter env overrides
+        if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {
+            config.channels.web.token = token;
+            config.channels.web.enabled = true;
+        }
+        if let Ok(port) = std::env::var("openpista_WEB_PORT")
+            && let Ok(p) = port.parse::<u16>()
+        {
+            config.channels.web.port = p;
+        }
 
         if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {
             config.channels.web.token = token;
@@ -710,6 +799,17 @@ impl Config {
             "Config loaded"
         );
         Ok(config)
+    }
+
+    /// Persist the current configuration to `~/.openpista/config.toml`.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let path = PathBuf::from(home).join(".openpista").join("config.toml");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(&path, content)
     }
 
     /// Resolves the API key to use for the configured provider.

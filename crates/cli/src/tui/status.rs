@@ -128,6 +128,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             " Web adapter setup wizard active ",
             Style::default().fg(THEME.status_hint),
         )),
+        AppState::WhatsAppSetup { .. } => Line::from(Span::styled(
+            " WhatsApp setup wizard — Enter: next, Esc: cancel ",
+            Style::default().fg(THEME.status_hint),
+        )),
     };
 
     // Create a split to right-align the version

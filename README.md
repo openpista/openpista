@@ -19,7 +19,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ## What is openpista?
 
-openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, CLI, web browser) to your **operating system** via an AI agent loop.
+openpista is a lightweight daemon written in Rust that bridges **messaging channels** (Telegram, WhatsApp, CLI, web browser) to your **operating system** via an AI agent loop.
 
 - Send a message in Telegram: the LLM decides what to do, bash runs it, the reply comes back
  Single static binary, ~10 MB, minimal memory footprint
@@ -28,7 +28,7 @@ openpista is a lightweight daemon written in Rust that bridges **messaging chann
 - Extensible **Skills** system: drop a `SKILL.md` in your workspace to add new agent capabilities
 
 ```
-[ Channel Adapters ]  Telegram · CLI (TUI) · Web (WASM)
+[ Channel Adapters ]  Telegram · WhatsApp · CLI (TUI) · Web (WASM)
         │  tokio::mpsc  ChannelEvent
         ▼
 [ OS Gateway ]        in-process router · cron scheduler
@@ -61,7 +61,8 @@ openpista is a lightweight daemon written in Rust that bridges **messaging chann
 | Model catalog browser | ✅ v0.1.0 |
 | OpenAI Responses API (SSE) | ✅ v0.1.0 |
 | Anthropic Claude provider | ✅ v0.1.0 |
-| Web adapter (Rust→WASM + WebSocket) | 🔜 v0.1.0 |
+| Web adapter (Rust→WASM + WebSocket) | ✅ v0.1.0 |
+| WhatsApp channel (Business Cloud API) | ✅ v0.1.0 |
 | Discord / Slack adapters | 🔜 v0.2.0 |
 
 ---
@@ -219,6 +220,20 @@ token = ""
 enabled = true
 url = "~/.openpista/memory.db"
 workspace = "~/.openpista/workspace"
+
+[channels.whatsapp]
+enabled = false
+phone_number_id = ""
+access_token = ""
+verify_token = ""
+app_secret = ""
+webhook_port = 8080
+
+[channels.web]
+enabled = false
+token = ""
+port = 3210
+static_dir = "~/.openpista/web"
 ```
 
 ### Environment Variable Overrides (CI / Scripts)
@@ -234,6 +249,10 @@ Environment variables override config file values. They are intended for CI pipe
 | `openpista_WEB_TOKEN` | Web adapter auth token |
 | `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
 | `openpista_WORKSPACE` | Custom skills workspace path |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp Business API access token |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp webhook verification token |
+| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp Business phone number ID |
+| `WHATSAPP_APP_SECRET` | WhatsApp app secret for HMAC verification |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 ---
@@ -289,7 +308,7 @@ From the TUI:
 
 Press `Tab` to toggle the sidebar, which shows recent sessions. Navigate with `j`/`k` or arrow keys, `Enter` to open, `d`/`Delete` to request deletion, `Esc` to unfocus.
 
-### Daemon mode (Telegram + CLI + Web UI)
+### Daemon mode (Telegram + WhatsApp + CLI + Web UI)
 
 ```bash
 openpista start
@@ -305,6 +324,33 @@ Enable Telegram in `config.toml` or via environment:
 
 # Or via env var for CI/Docker
 TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
+```
+
+Enable WhatsApp in `config.toml`:
+
+```bash
+# [channels.whatsapp]
+# enabled = true
+# phone_number_id = "123456789"
+# access_token = "EAA..."
+# verify_token = "my-verify-token"
+# app_secret = "abc123..."
+
+# Or via env vars
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER_ID=123456789 openpista start
+```
+
+Enable the Web UI adapter:
+
+```bash
+# [channels.web]
+# enabled = true
+# token = "my-secret-token"
+# port = 3210
+
+# Or via env vars
+openpista_WEB_TOKEN=my-secret-token openpista_WEB_PORT=3210 openpista start
+# Then open http://localhost:3210 in your browser
 ```
 The daemon:
  Starts all enabled channel adapters
@@ -335,7 +381,7 @@ openpista/
 │   ├── gateway/    # In-process gateway, cron scheduler
 │   ├── agent/      # ReAct loop, OpenAI / Anthropic / Responses API, SQLite memory
 │   ├── tools/      # Tool trait — BashTool, BrowserTool, ScreenTool, ContainerTool
-│   ├── channels/   # CliAdapter, TelegramAdapter, WebAdapter
+│   ├── channels/   # CliAdapter, TelegramAdapter, WhatsAppAdapter, WebAdapter
 │   ├── skills/     # SKILL.md loader, subprocess + WASM runner
 │   ├── web/        # Rust→WASM browser client (wasm-bindgen, H5 chat UI)
 │   └── cli/        # Binary entry point, clap, config, TUI (ratatui + crossterm)

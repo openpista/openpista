@@ -4,6 +4,7 @@ pub mod adapter;
 pub mod cli;
 pub mod telegram;
 pub mod web;
+pub mod whatsapp;
 
 /// Trait implemented by all channel adapters.
 pub use adapter::ChannelAdapter;
@@ -13,3 +14,5 @@ pub use cli::CliAdapter;
 pub use telegram::TelegramAdapter;
 /// Web adapter implementation.
 pub use web::WebAdapter;
+/// WhatsApp adapter implementation.
+pub use whatsapp::WhatsAppAdapter;

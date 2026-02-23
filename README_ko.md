@@ -18,7 +18,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 ## openpista란?
 
-openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, 웹 브라우저)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
+openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, 왓츠앱, CLI, 웹 브라우저)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
 - 텔레그램에서 메시지를 보내면: LLM이 무엇을 할지 결정하고, bash가 실행하며, 결과가 돌아옵니다
  단일 정적 바이너리, ~10 MB, 최소 메모리 사용
@@ -27,7 +27,7 @@ openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 - 확장 가능한 **Skills** 시스템: 워크스페이스에 `SKILL.md`를 넣어 새로운 에이전트 기능 추가
 
 ```
-[ 채널 어댑터 ]        텔레그램 · CLI (TUI) · 웹 (WASM)
+[ 채널 어댑터 ]        텔레그램 · 왓츠앱 · CLI (TUI) · 웹 (WASM)
         │  tokio::mpsc  ChannelEvent
         ▼
 [ OS 게이트웨이 ]      프로세스 내 라우터 · 크론 스케줄러
@@ -59,7 +59,8 @@ openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 | 모델 카탈로그 브라우저 | ✅ v0.1.0 |
 | OpenAI Responses API (SSE) | ✅ v0.1.0 |
 | Anthropic Claude 프로바이더 | ✅ v0.1.0 |
-| 웹 어댑터 (Rust→WASM + WebSocket) | 🔜 v0.1.0 |
+| 웹 어댑터 (Rust→WASM + WebSocket) | ✅ v0.1.0 |
+| 왓츠앱 채널 (Business Cloud API) | ✅ v0.1.0 |
 | Discord / Slack 어댑터 | 🔜 v0.2.0 |
 
 ---
@@ -217,6 +218,20 @@ token = ""
 enabled = true
 url = "~/.openpista/memory.db"
 workspace = "~/.openpista/workspace"
+
+[channels.whatsapp]
+enabled = false
+phone_number_id = ""
+access_token = ""
+verify_token = ""
+app_secret = ""
+webhook_port = 8080
+
+[channels.web]
+enabled = false
+token = ""
+port = 3210
+static_dir = "~/.openpista/web"
 ```
 
 ### 환경 변수 오버라이드 (CI / 스크립트용)
@@ -232,6 +247,10 @@ workspace = "~/.openpista/workspace"
 | `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
 | `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
 | `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
+| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 Business API 액세스 토큰 |
+| `WHATSAPP_VERIFY_TOKEN` | 왓츠앱 웹훅 검증 토큰 |
+| `WHATSAPP_PHONE_NUMBER_ID` | 왓츠앱 Business 전화번호 ID |
+| `WHATSAPP_APP_SECRET` | 왓츠앱 앱 시크릿 (HMAC 검증용) |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 ---
@@ -287,7 +306,7 @@ TUI 명령:
 
 `Tab`을 눌러 최근 세션 목록을 보여주는 사이드바를 토글합니다. `j`/`k` 또는 화살표 키로 이동하고, `Enter`로 열고, `d`/`Delete`로 삭제를 요청하고, `Esc`로 포커스를 해제합니다.
 
-### 데몬 모드 (텔레그램 + CLI + 웹 UI)
+### 데몬 모드 (텔레그램 + 왓츠앱 + CLI + 웹 UI)
 
 ```bash
 openpista start
@@ -303,6 +322,33 @@ openpista start
 
 # 또는 CI/Docker용 환경 변수
 TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
+```
+
+왓츠앱을 `config.toml`에서 활성화하세요:
+
+```bash
+# [channels.whatsapp]
+# enabled = true
+# phone_number_id = "123456789"
+# access_token = "EAA..."
+# verify_token = "my-verify-token"
+# app_secret = "abc123..."
+
+# 또는 환경 변수로
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER_ID=123456789 openpista start
+```
+
+웹 UI 어댑터를 활성화하세요:
+
+```bash
+# [channels.web]
+# enabled = true
+# token = "my-secret-token"
+# port = 3210
+
+# 또는 환경 변수로
+openpista_WEB_TOKEN=my-secret-token openpista_WEB_PORT=3210 openpista start
+# 그러면 브라우저에서 http://localhost:3210 으로 접속하세요
 ```
 
 데몬은:
@@ -334,7 +380,7 @@ openpista/
 │   ├── gateway/    # 프로세스 내 게이트웨이, 크론 스케줄러
 │   ├── agent/      # ReAct 루프, OpenAI / Anthropic / Responses API, SQLite 메모리
 │   ├── tools/      # Tool 트레이트 — BashTool, BrowserTool, ScreenTool, ContainerTool
-│   ├── channels/   # CliAdapter, TelegramAdapter, WebAdapter
+│   ├── channels/   # CliAdapter, TelegramAdapter, WhatsAppAdapter, WebAdapter
 │   ├── skills/     # SKILL.md 로더, 서브프로세스 + WASM 실행기
 │   ├── web/        # Rust→WASM 브라우저 클라이언트 (wasm-bindgen, H5 채팅 UI)
 │   └── cli/        # 바이너리 진입점, clap, config, TUI (ratatui + crossterm)

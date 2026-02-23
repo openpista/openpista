@@ -88,6 +88,64 @@
  - [x] `WebAdapter` — axum WebSocket 서버 + 정적 H5 채팅 UI (`static/`) 서빙; Rust→WASM 클라이언트 진행 중 (웹 채널 어댑터 섹션 참조)
 
 
+### WhatsApp 채널 어댑터 (WhatsApp Channel Adapter)
+
+> WhatsApp은 Telegram과 동일한 HTTP→mpsc 브릿지 패턴을 따릅니다. 어댑터는 HTTP(`axum`)를 통해 웹훅 이벤트를 수신하고, `ChannelEvent`로 변환한 후 `tokio::mpsc`를 통해 전달합니다.
+
+- [x] `WhatsAppAdapter` — `reqwest`를 통한 WhatsApp Business Cloud API 통합
+- [x] 수신 메시지를 위한 웹훅 HTTP 서버 (`axum` 기반): GET 검증 챌린지 + POST 메시지 핸들러
+- [x] HMAC-SHA256 웹훅 페이로드 서명 검증 (`X-Hub-Signature-256` 헤더)
+- [x] Meta Graph API를 통한 텍스트 메시지 전송 (`POST /v21.0/{phone_number_id}/messages`)
+- [x] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
+- [x] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
+- [x] 환경 변수 재정의: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
+- [x] 수신 메시지 파싱: 텍스트 (이미지, 오디오, 비디오, 문서, 위치, 연락처 — 향후 예정)
+- [x] 메시지 상태 웹훅 콜백 처리 (발송 → 수신 → 읽음)
+ - [ ] 미디어 메시지 다운로드 및 전달 (수신 미디어 → base64 또는 로컬 경로로 에이전트 컨텍스트에 전달)
+ - [ ] 인터랙티브 메시지 지원: 응답 버튼, 목록 메시지, 빠른 답장
+ - [ ] 아웃바운드 알림을 위한 메시지 템플릿 렌더링 (WhatsApp 24시간 정책에 필요한 HSM 템플릿)
+ - [ ] WhatsApp Business API 등급(tier)에 따른 처리율 제한 준수 (메시지 제한, 처리량)
+ - [ ] 일시적 API 장애(429, 500)에 대한 지수 백오프(exponential backoff) 재시도 로직
+- [x] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
+- [x] 응답 라우팅 통합: WhatsApp 응답 → Graph API `send_message`
+ - [ ] 다중 번호 지원: 여러 번호를 가진 비즈니스 계정을 위한 구성 가능한 전화번호 ID
+- [x] 유닛 테스트: 웹훅 검증, 메시지 파싱, 세션 ID 생성, 응답 포맷팅, 서명 검증
+ - [ ] 통합 테스트: 엔드-투-엔드 웹훅 → `ChannelEvent` → `AgentResponse` → WhatsApp 전송 흐름
+
+#### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
+
+> **Rust 크레이트**
+>
+> | 크레이트 | 설명 |
+> |----------|------|
+> | [`whatsapp-business-rs`](https://github.com/veecore/whatsapp-business-rs) | WhatsApp Business Cloud API 풀 SDK — axum 웹훅 서버 내장, HMAC-SHA256 검증, 메시지 송수신. 최우선 후보. |
+> | [`whatsapp-cloud-api`](https://github.com/sajuthankappan/whatsapp-cloud-api-rs) | Meta Graph API 경량 클라이언트 (30k+ 다운로드). 웹훅 서버 미포함 — 별도 axum 핸들러와 조합 필요. |
+> | [`whatsapp_handler`](https://github.com/bambby-plus/whatsapp_handler) | 웹훅 메시지 처리 + 미디어/인터랙티브 메시지 전송 지원. |
+>
+> **유사 아키텍처 Rust AI 에이전트**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | trait 기반 `Channel` 패턴이 openpista의 `ChannelAdapter`와 거의 동일. WhatsApp 포함 다채널 지원. |
+> | [`opencrust`](https://github.com/opencrust-org/opencrust) | 동일한 `crates/` 워크스페이스 구조. `whatsapp/webhook.rs` + `api.rs` 분리 모듈 패턴 참고. |
+> | [`localgpt`](https://github.com/localgpt-app/localgpt) | `bridges/whatsapp/` 브릿지 패턴으로 WhatsApp 통합. |
+> | [`loom`](https://github.com/ghuntley/loom) | Rust 워크스페이스 내 axum 기반 `routes/whatsapp.rs` 라우트 핸들러. |
+>
+> **API 스펙 레퍼런스 (TypeScript)**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`WhatsApp-Nodejs-SDK`](https://github.com/WhatsApp/WhatsApp-Nodejs-SDK) | Meta 공식 SDK — 웹훅 페이로드 스키마 및 API 엔드포인트 스펙의 권위 있는 출처. |
+> | [`whatsapp-business-sdk`](https://github.com/MarcosNicolau/whatsapp-business-sdk) | 깔끔한 TypeScript 타입 정의와 Business Cloud API에 대한 좋은 테스트 커버리지. |
+>
+> **Axum 웹훅 HMAC-SHA256 패턴**
+>
+> | 리소스 | 설명 |
+> |--------|------|
+> | [pg3.dev — GitHub Webhooks in Rust with Axum](https://pg3.dev/post/github_webhooks_rust) | HMAC-SHA256 + axum 완성형 튜토리얼. `X-Hub-Signature-256` 형식이 WhatsApp과 동일. |
+> | [`axum-github-hooks`](https://github.com/rustunit/axum-github-hooks) | 웹훅 서명 검증을 위한 axum extractor 패턴 — `WhatsAppWebhookPayload` extractor로 응용 가능. |
+
+
 ### 웹 채널 어댑터 (Web Channel Adapter — Rust→WASM + WebSocket)
 
 > 웹 어댑터는 네이티브 앱 없이 openpista를 모든 폰 또는 데스크톱 브라우저로 가져옵니다. 클라이언트는 Rust로 작성되어 WASM으로 컴파일되며, H5 채팅 UI와 함께 서빙됩니다. 통신은 모든 브라우저에서 보편적으로 지원되는 표준 WebSocket을 사용합니다.
@@ -247,7 +305,7 @@
 
 ### 품질 및 CI (Quality & CI)
 
-- [x] 모든 크레이트에 걸친 726개의 유닛 + 통합 테스트 (`cargo test --workspace`)
+- [x] 모든 크레이트에 걸친 699개의 유닛 + 통합 테스트 (`cargo test --workspace`)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
 - [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우

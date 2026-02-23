@@ -165,6 +165,20 @@ pub enum Action {
     // ── Slash commands (non-async) ───────────────────────────
     /// Execute a local slash command (e.g. /help, /clear, /quit).
     SlashCommand(String),
+
+    // ── WhatsApp setup wizard ─────────────────────────────────
+    /// Open the WhatsApp configuration wizard.
+    OpenWhatsAppSetup,
+    /// Advance to the next wizard step.
+    WhatsAppSetupNext,
+    /// Go back to the previous wizard step.
+    WhatsAppSetupBack,
+    /// Cancel the wizard and return to idle.
+    WhatsAppSetupCancel,
+    /// Complete the wizard and persist the configuration.
+    WhatsAppSetupComplete,
+    /// Forward a raw key event to handle_key for character input/deletion.
+    WhatsAppSetupKey(crossterm::event::KeyEvent),
 }
 
 // ─── Command ─────────────────────────────────────────────────────────────────
@@ -193,4 +207,6 @@ pub enum Command {
     CopyToClipboard(String),
     /// Execute multiple commands sequentially.
     Batch(Vec<Command>),
+    /// Persist the WhatsApp configuration to the config file.
+    SaveWhatsAppConfig(crate::config::WhatsAppConfig),
 }

@@ -207,6 +207,89 @@ fn parse_web_command(raw: &str) -> Option<WebCommand> {
     }
 }
 
+/// Parsed sub-command for the `/whatsapp` slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WhatsAppCommand {
+    /// `/whatsapp` — open the interactive setup wizard.
+    Setup,
+    /// `/whatsapp status` — show current WhatsApp configuration.
+    Status,
+    /// Invalid sub-command.
+    Invalid(String),
+}
+
+fn parse_whatsapp_command(raw: &str) -> Option<WhatsAppCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/whatsapp" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("setup") => Some(WhatsAppCommand::Setup),
+        Some("status") => Some(WhatsAppCommand::Status),
+        Some(_) => Some(WhatsAppCommand::Invalid(
+            "Usage: /whatsapp [setup|status]".to_string(),
+        )),
+    }
+}
+
+fn format_whatsapp_status(config: &Config) -> String {
+    let wa = &config.channels.whatsapp;
+    let mask = |s: &str| -> String {
+        if s.len() <= 4 {
+            "****".to_string()
+        } else {
+            format!("{}****", &s[..4])
+        }
+    };
+
+    let mut lines = vec!["WhatsApp Configuration Status".to_string(), "".to_string()];
+    lines.push(format!(
+        "  Enabled:         {}",
+        if wa.enabled { "Yes" } else { "No" }
+    ));
+    lines.push(format!(
+        "  Phone Number ID: {}",
+        if wa.phone_number_id.is_empty() {
+            "(not set)".to_string()
+        } else {
+            wa.phone_number_id.clone()
+        }
+    ));
+    lines.push(format!(
+        "  Access Token:    {}",
+        if wa.access_token.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.access_token)
+        }
+    ));
+    lines.push(format!(
+        "  Verify Token:    {}",
+        if wa.verify_token.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.verify_token)
+        }
+    ));
+    lines.push(format!(
+        "  App Secret:      {}",
+        if wa.app_secret.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.app_secret)
+        }
+    ));
+    lines.push(format!("  Webhook Port:    {}", wa.webhook_port));
+    lines.push("".to_string());
+    if wa.is_configured() {
+        lines.push("  Status: Ready (all fields configured)".to_string());
+    } else {
+        lines.push("  Status: Incomplete — run /whatsapp to configure".to_string());
+    }
+    lines.join("\n")
+}
+
+
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelTaskMode {
@@ -772,6 +855,23 @@ pub async fn run_tui(
                                     continue;
                                 }
 
+                                if let Some(wa_cmd) = parse_whatsapp_command(&message) {
+                                    match wa_cmd {
+                                        WhatsAppCommand::Setup => {
+                                            app.update(Action::OpenWhatsAppSetup);
+                                        }
+                                        WhatsAppCommand::Status => {
+                                            let status = format_whatsapp_status(&config);
+                                            app.update(Action::PushAssistantMessage(status));
+                                        }
+                                        WhatsAppCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
                                     app.update(Action::ScrollToBottom);
@@ -1071,6 +1171,22 @@ pub async fn run_tui(
                                 let new_sid = proto::SessionId::new();
                                 app.update(super::action::Action::NewSession(new_sid.clone()));
                                 session_id = new_sid;
+                            }
+                            Command::SaveWhatsAppConfig(wa_config) => {
+                                config.channels.whatsapp = wa_config;
+                                match config.save() {
+                                    Ok(()) => {
+                                        app.update(Action::PushAssistantMessage(
+                                            "WhatsApp configuration saved to config.toml".to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.update(Action::PushError(
+                                            format!("Failed to save config: {e}"),
+                                        ));
+                                    }
+                                }
+                                app.update(Action::ScrollToBottom);
                             }
                             _ => {
                                 // Other commands (CopyToClipboard, Batch) already handled
@@ -1642,5 +1758,52 @@ mod tests {
         let result = maybe_exchange_copilot_token("openai", cred).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().access_token, "some_token");
+    }
+
+    #[test]
+    fn parse_whatsapp_command_supports_all_variants() {
+        assert_eq!(
+            parse_whatsapp_command("/whatsapp"),
+            Some(WhatsAppCommand::Setup)
+        );
+        assert_eq!(
+            parse_whatsapp_command("/whatsapp setup"),
+            Some(WhatsAppCommand::Setup)
+        );
+        assert_eq!(
+            parse_whatsapp_command("/whatsapp status"),
+            Some(WhatsAppCommand::Status)
+        );
+        assert!(matches!(
+            parse_whatsapp_command("/whatsapp foo"),
+            Some(WhatsAppCommand::Invalid(_))
+        ));
+        assert_eq!(parse_whatsapp_command("/model"), None);
+        assert_eq!(parse_whatsapp_command("/help"), None);
+    }
+
+    #[test]
+    fn format_whatsapp_status_shows_masked_secrets() {
+        let config = Config::default();
+        let status = format_whatsapp_status(&config);
+        assert!(status.contains("WhatsApp Configuration Status"));
+        assert!(status.contains("(not set)"));
+        assert!(status.contains("Incomplete"));
+    }
+
+    #[test]
+    fn format_whatsapp_status_configured() {
+        let mut config = Config::default();
+        config.channels.whatsapp.enabled = true;
+        config.channels.whatsapp.phone_number_id = "123456789".to_string();
+        config.channels.whatsapp.access_token = "EAAtoken123456".to_string();
+        config.channels.whatsapp.verify_token = "my-verify-token".to_string();
+        config.channels.whatsapp.app_secret = "abc123secret".to_string();
+        let status = format_whatsapp_status(&config);
+        assert!(status.contains("123456789")); // phone ID not masked
+        assert!(status.contains("EAAt****")); // access token masked
+        assert!(status.contains("my-v****")); // verify token masked
+        assert!(status.contains("abc1****")); // app secret masked
+        assert!(status.contains("Ready"));
     }
 }
