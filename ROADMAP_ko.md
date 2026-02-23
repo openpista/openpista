@@ -63,15 +63,15 @@
 ### Docker 샌드박스 (Docker Sandbox)
 
 - [x] `container.run` 도구 — 작업(task)당 격리된 Docker 컨테이너 생성
-- [ ] 작업별 임시 토큰: 컨테이너 시작 시 주입되고 종료 시 자동 폐기되는 짧은 수명의 크레덴셜
-- [ ] 오케스트레이터/워커 패턴: 메인 에이전트가 오케스트레이터로 동작하며 무겁거나 위험한 작업을 위해 워커 컨테이너 생성
-- [ ] 워커 컨테이너는 QUIC 스트림을 통해 오케스트레이터 세션으로 결과를 다시 보고
-- [ ] 컨테이너 수준의 리소스 제한 적용: CPU 할당량, 메모리 제한, 기본적으로 네트워크 차단(no-network)
-- [ ] 워커가 호스트에 대한 쓰기 권한 없이 스킬/파일을 읽을 수 있도록 작업 공간 볼륨 마운트(읽기 전용)
-- [ ] 컨테이너 생명주기: 생성 → 토큰 주입 → 작업 실행 → 결과 수집 → 파기 (재사용 없음)
-- [ ] Docker API 통합을 위한 `bollard` 크레이트 (`docker` CLI 쉘 호출 아님)
-- [ ] 스킬별로 구성 가능한 베이스 이미지 (`SKILL.md`의 `image:` 필드)
-- [ ] Docker 데몬을 사용할 수 없는 경우 하위 프로세스(subprocess) 모드로 폴백
+- [x] 작업별 임시 토큰: 컨테이너 시작 시 주입되고 종료 시 자동 폐기되는 짧은 수명의 크레덴셜
+- [x] 오케스트레이터/워커 패턴: 메인 에이전트가 오케스트레이터로 동작하며 무겁거나 위험한 작업을 위해 워커 컨테이너 생성
+- [x] 워커 컨테이너는 QUIC 스트림을 통해 오케스트레이터 세션으로 결과를 다시 보고
+- [x] 컨테이너 수준의 리소스 제한 적용: CPU 할당량, 메모리 제한, 기본적으로 네트워크 차단(no-network)
+- [x] 워커가 호스트에 대한 쓰기 권한 없이 스킬/파일을 읽을 수 있도록 작업 공간 볼륨 마운트(읽기 전용)
+- [x] 컨테이너 생명주기: 생성 → 토큰 주입 → 작업 실행 → 결과 수집 → 파기 (재사용 없음)
+- [x] Docker API 통합을 위한 `bollard` 크레이트 (`docker` CLI 쉘 호출 아님)
+- [x] 스킬별로 구성 가능한 베이스 이미지 (`SKILL.md`의 `image:` 필드)
+- [x] Docker 데몬을 사용할 수 없는 경우 하위 프로세스(subprocess) 모드로 폴백
 
 ### WASM 스킬 샌드박스 (WASM Skill Sandbox)
 
@@ -96,20 +96,21 @@
 - [x] 모든 시크릿(secrets)에 대한 환경 변수 재정의 기능
 - [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
+- [x] Elm 아키텍처(TEA) 반응형 TUI — 단방향 데이터 흐름 (`Action → update() → State → view()`)
 
 ### 품질 및 CI (Quality & CI)
 
 - [x] 유닛 + 통합 테스트: `cargo test --workspace` (목표: 90+ 테스트)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
-- [ ] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우
-- [ ] Codecov 커버리지 리포팅
+- [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우
+- [x] Codecov 커버리지 리포팅
 
 ### 문서화 및 릴리스 아티팩트 (Documentation & Release Artifacts)
 
-- [ ] 배지(CI, codecov, Rust 버전, 라이선스)를 포함한 `README.md`
-- [ ] `ROADMAP.md` (이 문서)
-- [ ] v0.1.0 항목이 포함된 `CHANGELOG.md`
+- [x] 배지(CI, codecov, Rust 버전, 라이선스)를 포함한 `README.md`
+- [x] `ROADMAP.md` (이 문서)
+- [x] v0.1.0 항목이 포함된 `CHANGELOG.md`
 - [ ] `LICENSE-MIT` 및 `LICENSE-APACHE`
 - [ ] 모든 옵션이 문서화된 `config.example.toml`
 - [ ] 미리 빌드된 바이너리가 포함된 GitHub 릴리스(Release):

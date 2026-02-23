@@ -1,6 +1,7 @@
 //! Full-screen ratatui//! Terminal User Interface for openpista.
 #![allow(dead_code, unused_imports)]
 
+pub mod action;
 pub mod app;
 pub mod chat;
 pub mod event;
