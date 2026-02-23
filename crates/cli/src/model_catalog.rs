@@ -482,7 +482,9 @@ async fn fetch_anthropic_model_ids(api_key: &str) -> Result<Vec<String>, String>
     let mut req_builder = client.get(url).header("anthropic-version", "2023-06-01");
 
     if proto::is_anthropic_oauth_token(api_key) {
-        req_builder = req_builder.bearer_auth(api_key);
+        req_builder = req_builder
+            .bearer_auth(api_key)
+            .header("anthropic-beta", "oauth-2025-04-20");
     } else {
         req_builder = req_builder.header("x-api-key", api_key);
     }
@@ -918,5 +920,145 @@ mod tests {
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
         assert!(!proto::is_anthropic_oauth_token(""));
+    }
+
+    #[test]
+    fn models_url_for_anthropic_always_uses_anthropic_endpoint() {
+        assert_eq!(
+            models_url("anthropic", None),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            models_url("anthropic", Some("http://proxy")),
+            "https://api.anthropic.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn models_url_uses_custom_base_url_with_models_path() {
+        assert_eq!(
+            models_url("openai", Some("https://custom.api/v1/")),
+            "https://custom.api/v1/models"
+        );
+        // Trailing slash stripped
+        assert_eq!(
+            models_url("together", Some("https://together.ai/v1")),
+            "https://together.ai/v1/models"
+        );
+    }
+
+    #[test]
+    fn models_url_defaults_to_openai_when_no_base_url() {
+        assert_eq!(
+            models_url("openai", None),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            models_url("unknown", None),
+            "https://api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn provider_cache_path_uses_env_override() {
+        unsafe {
+            std::env::set_var("openpista_MODELS_CACHE_PATH", "/tmp/override.json");
+        }
+        let path = provider_cache_path("openai");
+        unsafe {
+            std::env::remove_var("openpista_MODELS_CACHE_PATH");
+        }
+        assert_eq!(path, std::path::PathBuf::from("/tmp/override.json"));
+    }
+
+    #[test]
+    fn provider_cache_path_default_uses_home_dir() {
+        unsafe {
+            std::env::remove_var("openpista_MODELS_CACHE_PATH");
+        }
+        let path = provider_cache_path("anthropic");
+        assert!(path.to_str().unwrap().contains(".openpista"));
+        assert!(path.to_str().unwrap().contains("anthropic.json"));
+    }
+
+    #[test]
+    fn model_status_deprecated_variant() {
+        assert_eq!(ModelStatus::Deprecated.as_str(), "deprecated");
+    }
+
+    #[test]
+    fn seed_models_for_openrouter_and_ollama_providers() {
+        let or_entries = seed_models_for_provider("openrouter");
+        assert!(!or_entries.is_empty());
+        assert!(or_entries.iter().all(|e| e.provider == "openrouter"));
+
+        let ol_entries = seed_models_for_provider("ollama");
+        assert!(!ol_entries.is_empty());
+        assert!(ol_entries.iter().all(|e| e.provider == "ollama"));
+    }
+
+    #[tokio::test]
+    async fn load_catalog_returns_from_fresh_cache() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cache_file = tmp.path().join("openai.json");
+        // Pre-populate a fresh cache
+        let cached = CachedCatalog {
+            fetched_at: Utc::now(),
+            entries: seed_models_for_provider("openai"),
+        };
+        save_cache(&cache_file, &cached).expect("save cache");
+
+        // Override the env var so provider_cache_path returns our temp file
+        unsafe {
+            std::env::set_var("openpista_MODELS_CACHE_PATH", cache_file.to_str().unwrap());
+        }
+        let result = load_catalog("openai", None, "", false).await;
+        unsafe {
+            std::env::remove_var("openpista_MODELS_CACHE_PATH");
+        }
+
+        assert_eq!(result.provider, "openai");
+        assert!(!result.entries.is_empty());
+        assert!(
+            result.sync_status.contains("cache"),
+            "expected cache hit: {}",
+            result.sync_status
+        );
+    }
+
+    #[tokio::test]
+    async fn load_catalog_falls_back_to_seed_when_fetch_fails_and_no_cache() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let no_cache_file = tmp.path().join("nonexistent.json");
+
+        unsafe {
+            std::env::set_var(
+                "openpista_MODELS_CACHE_PATH",
+                no_cache_file.to_str().unwrap(),
+            );
+        }
+        // Pass a deliberately bad URL and empty key so the fetch always fails
+        let result = load_catalog("openrouter", Some("http://127.0.0.1:1"), "", true).await;
+        unsafe {
+            std::env::remove_var("openpista_MODELS_CACHE_PATH");
+        }
+
+        assert_eq!(result.provider, "openrouter");
+        // Should fall back to seed defaults
+        assert!(
+            result.sync_status.contains("Fetch failed"),
+            "expected fallback: {}",
+            result.sync_status
+        );
+        // Seed entries for openrouter should be present
+        assert!(!result.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_catalog_multi_aggregates_results() {
+        // With no real providers configured, it should still aggregate (empty providers -> empty result)
+        let result = load_catalog_multi(&[]).await;
+        assert!(result.entries.is_empty());
+        assert!(result.sync_statuses.is_empty());
     }
 }

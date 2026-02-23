@@ -169,3 +169,50 @@ fn selection_cols_for_row(
         (0, width)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_cols_row_before_selection_returns_zero() {
+        // screen_row < sr => (0, 0)
+        let (s, e) = selection_cols_for_row(0, (2, 5), (4, 8), 80);
+        assert_eq!((s, e), (0, 0));
+    }
+
+    #[test]
+    fn selection_cols_row_after_selection_returns_zero() {
+        // screen_row > er => (0, 0)
+        let (s, e) = selection_cols_for_row(5, (2, 5), (4, 8), 80);
+        assert_eq!((s, e), (0, 0));
+    }
+
+    #[test]
+    fn selection_cols_single_row_selection() {
+        // sr == er => (sc, ec)
+        let (s, e) = selection_cols_for_row(3, (3, 10), (3, 20), 80);
+        assert_eq!((s, e), (10, 20));
+    }
+
+    #[test]
+    fn selection_cols_first_row_of_multi_row() {
+        // screen_row == sr, sr != er => (sc, width)
+        let (s, e) = selection_cols_for_row(2, (2, 5), (4, 8), 80);
+        assert_eq!((s, e), (5, 80));
+    }
+
+    #[test]
+    fn selection_cols_last_row_of_multi_row() {
+        // screen_row == er, sr != er => (0, ec)
+        let (s, e) = selection_cols_for_row(4, (2, 5), (4, 8), 80);
+        assert_eq!((s, e), (0, 8));
+    }
+
+    #[test]
+    fn selection_cols_middle_row_of_multi_row() {
+        // sr < screen_row < er => (0, width)
+        let (s, e) = selection_cols_for_row(3, (2, 5), (5, 8), 80);
+        assert_eq!((s, e), (0, 80));
+    }
+}

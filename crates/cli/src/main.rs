@@ -18,9 +18,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[cfg(not(test))]
+use crate::auth::is_openai_oauth_credential_for_key;
+#[cfg(not(test))]
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 #[cfg(not(test))]
-use agent::{AgentRuntime, AnthropicProvider, OpenAiProvider, ResponsesApiProvider, SqliteMemory, ToolRegistry};
+use agent::{
+    AgentRuntime, AnthropicProvider, OpenAiProvider, ResponsesApiProvider, SqliteMemory,
+    ToolRegistry,
+};
 #[cfg(not(test))]
 use channels::{ChannelAdapter, CliAdapter, MobileAdapter, TelegramAdapter};
 #[cfg(not(test))]
@@ -621,7 +626,11 @@ async fn cmd_models(config: Config) -> anyhow::Result<()> {
     let provider_names: Vec<&str> = providers.iter().map(|(n, _, _)| n.as_str()).collect();
     println!(
         "model | providers:{} | total:{} | matched:{} | recommended:{} | available:{}",
-        provider_names.join(","), summary.total, summary.matched, summary.recommended, summary.available
+        provider_names.join(","),
+        summary.total,
+        summary.matched,
+        summary.recommended,
+        summary.available
     );
     for status in &catalog.sync_statuses {
         println!("{status}");
@@ -757,10 +766,7 @@ async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<(
         let runtime = match build_runtime(&test_config, None).await {
             Ok(rt) => rt,
             Err(e) => {
-                println!(
-                    "  [{}] {:<24} FAIL (setup): {e}",
-                    entry.provider, entry.id
-                );
+                println!("  [{}] {:<24} FAIL (setup): {e}", entry.provider, entry.id);
                 failed += 1;
                 continue;
             }
@@ -780,7 +786,7 @@ async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<(
                 let preview: String = text.chars().take(50).collect();
                 let preview = preview.replace('\n', " ");
                 println!(
-                    "  [{}] {:<24} OK ({:.1}s) \u{2014} \"{}{}\"" ,
+                    "  [{}] {:<24} OK ({:.1}s) \u{2014} \"{}{}\"",
                     entry.provider,
                     entry.id,
                     elapsed.as_secs_f64(),
@@ -997,22 +1003,6 @@ fn cmd_auth_status() -> anyhow::Result<()> {
         println!("  {provider}: {status}");
     }
     Ok(())
-}
-
-
-/// Returns true if the given API key came from an OpenAI OAuth flow.
-/// When `Credentials` has a matching `openai` entry with this key and a
-/// `refresh_token`, we know the key was obtained via token exchange and the
-/// user should be billed via the Responses API (subscription) rather than
-/// Chat Completions API (API credits).
-fn is_openai_oauth_credential_for_key(api_key: &str) -> bool {
-    let creds = crate::auth::Credentials::load();
-    if let Some(cred) = creds.get("openai") {
-        // Has refresh_token = came from OAuth flow (not a manual API key)
-        cred.access_token == api_key && cred.refresh_token.is_some()
-    } else {
-        false
-    }
 }
 
 /// Prints the branded farewell banner with session resume instructions.

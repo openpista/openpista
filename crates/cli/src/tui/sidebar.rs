@@ -192,4 +192,31 @@ mod tests {
         let past = chrono::Utc::now() - chrono::Duration::days(2);
         assert_eq!(format_relative_time(&past), "2d ago");
     }
+
+    #[test]
+    fn format_relative_time_over_a_week_shows_date() {
+        let past = chrono::Utc::now() - chrono::Duration::days(10);
+        let result = format_relative_time(&past);
+        // Should be formatted as "Mon DD" (e.g. "Jan 01")
+        assert!(
+            !result.ends_with("ago"),
+            "expected date format, got: {result}"
+        );
+        assert!(
+            result.contains(' '),
+            "expected space in date format, got: {result}"
+        );
+    }
+
+    #[test]
+    fn sidebar_width_returns_positive_value() {
+        let w = sidebar_width();
+        assert!(w > 0);
+        assert_eq!(w, 30);
+    }
+
+    #[test]
+    fn truncate_str_zero_max_returns_empty() {
+        assert_eq!(truncate_str("hello", 0), "");
+    }
 }
