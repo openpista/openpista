@@ -610,48 +610,34 @@ impl Default for CliConfig {
     }
 }
 
-/// WhatsApp Business Cloud API adapter config.
+/// WhatsApp access-token-based adapter config.
 ///
 /// Configure via `[channels.whatsapp]` in `config.toml` or environment variables:
-/// - `WHATSAPP_ACCESS_TOKEN` — Meta Graph API access token
-/// - `WHATSAPP_VERIFY_TOKEN` — Webhook verification token (shared secret)
-/// - `WHATSAPP_PHONE_NUMBER_ID` — WhatsApp Business phone number ID
-/// - `WHATSAPP_APP_SECRET` — App secret for HMAC-SHA256 webhook signature verification
+/// - `WHATSAPP_PHONE_NUMBER` — WhatsApp phone number (e.g. `15551234567`)
+/// - `WHATSAPP_ACCESS_TOKEN` — Access token for the WhatsApp gateway
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WhatsAppConfig {
     /// Whether WhatsApp adapter is enabled.
     #[serde(default)]
     pub enabled: bool,
-    /// WhatsApp Business phone number ID.
+    /// WhatsApp phone number (e.g. `15551234567`).
     #[serde(default)]
-    pub phone_number_id: String,
-    /// Meta Graph API access token.
+    pub phone_number: Option<String>,
+    /// Access token for the WhatsApp gateway.
     #[serde(default)]
-    pub access_token: String,
-    /// Webhook verification token (shared secret between your app and Meta).
-    #[serde(default)]
-    pub verify_token: String,
-    /// App secret for HMAC-SHA256 webhook payload signature verification.
-    #[serde(default)]
-    pub app_secret: String,
-    /// HTTP port for the webhook server (default: 8080).
+    pub access_token: Option<String>,
+    /// HTTP port for the webhook server (default: 8443).
     #[serde(default = "default_whatsapp_webhook_port")]
     pub webhook_port: u16,
 }
-
 impl WhatsAppConfig {
-    /// Returns `true` when all required fields are non-empty.
+    /// Returns `true` when all required fields are present.
     pub fn is_configured(&self) -> bool {
-        self.enabled
-            && !self.phone_number_id.is_empty()
-            && !self.access_token.is_empty()
-            && !self.verify_token.is_empty()
-            && !self.app_secret.is_empty()
+        self.phone_number.is_some() && self.access_token.is_some()
     }
 }
-
 fn default_whatsapp_webhook_port() -> u16 {
-    8080
+    8443
 }
 
 /// Web adapter config for WebSocket + static file serving.
@@ -779,17 +765,11 @@ impl Config {
         }
         // WhatsApp env overrides
         if let Ok(token) = std::env::var("WHATSAPP_ACCESS_TOKEN") {
-            config.channels.whatsapp.access_token = token;
+            config.channels.whatsapp.access_token = Some(token);
             config.channels.whatsapp.enabled = true;
         }
-        if let Ok(verify) = std::env::var("WHATSAPP_VERIFY_TOKEN") {
-            config.channels.whatsapp.verify_token = verify;
-        }
-        if let Ok(phone) = std::env::var("WHATSAPP_PHONE_NUMBER_ID") {
-            config.channels.whatsapp.phone_number_id = phone;
-        }
-        if let Ok(secret) = std::env::var("WHATSAPP_APP_SECRET") {
-            config.channels.whatsapp.app_secret = secret;
+        if let Ok(phone) = std::env::var("WHATSAPP_PHONE_NUMBER") {
+            config.channels.whatsapp.phone_number = Some(phone);
         }
         // Web adapter env overrides
         if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {

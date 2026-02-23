@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
             Commands::Run { .. } => "run",
             Commands::Model { .. } => "model",
             Commands::Auth { .. } => "auth",
+            Commands::Web { .. } => "web",
         };
         info!(
             version = env!("CARGO_PKG_VERSION"),
@@ -596,10 +597,18 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     let mut whatsapp_resp_adapter: Option<WhatsAppAdapter> = None;
     if config.channels.whatsapp.enabled {
         let wa_config = channels::whatsapp::WhatsAppAdapterConfig {
-            phone_number_id: config.channels.whatsapp.phone_number_id.clone(),
-            access_token: config.channels.whatsapp.access_token.clone(),
-            verify_token: config.channels.whatsapp.verify_token.clone(),
-            app_secret: config.channels.whatsapp.app_secret.clone(),
+            phone_number: config
+                .channels
+                .whatsapp
+                .phone_number
+                .clone()
+                .unwrap_or_default(),
+            access_token: config
+                .channels
+                .whatsapp
+                .access_token
+                .clone()
+                .unwrap_or_default(),
             webhook_port: config.channels.whatsapp.webhook_port,
         };
         if wa_config.access_token.is_empty() {

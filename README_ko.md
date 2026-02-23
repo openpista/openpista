@@ -221,8 +221,9 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-session_dir = "~/.openpista/whatsapp-session"
-# bridge_path = "whatsapp-bridge/index.js"
+phone_number = ""
+access_token = ""
+webhook_port = 8443
 
 [channels.web]
 enabled = false
@@ -244,8 +245,8 @@ static_dir = "~/.openpista/web"
 | `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
 | `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
 | `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
-| `WHATSAPP_SESSION_DIR` | 왓츠앱 Web 세션 디렉토리 |
-| `WHATSAPP_BRIDGE_PATH` | 왓츠앱 브릿지 스크립트 경로 |
+| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 액세스 토큰 |
+| `WHATSAPP_PHONE_NUMBER` | 왓츠앱 전화번호 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 ---
@@ -323,8 +324,9 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# session_dir = "~/.openpista/whatsapp-session"
-WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
+# phone_number = "15551234567"
+# access_token = "EAA..."
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
 ```
 
 웹 UI 어댑터를 활성화하세요:

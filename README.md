@@ -223,8 +223,9 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-session_dir = "~/.openpista/whatsapp-session"
-# bridge_path = "whatsapp-bridge/index.js"
+phone_number = ""
+access_token = ""
+webhook_port = 8443
 
 [channels.web]
 enabled = false
@@ -246,8 +247,8 @@ Environment variables override config file values. They are intended for CI pipe
 | `openpista_WEB_TOKEN` | Web adapter auth token |
 | `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
 | `openpista_WORKSPACE` | Custom skills workspace path |
-| `WHATSAPP_SESSION_DIR` | WhatsApp Web session directory |
-| `WHATSAPP_BRIDGE_PATH` | WhatsApp bridge script path |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp access token |
+| `WHATSAPP_PHONE_NUMBER` | WhatsApp phone number |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 ---
@@ -325,8 +326,9 @@ Enable WhatsApp in `config.toml` (see [WHATSAPP.md](./WHATSAPP.md) for full setu
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# session_dir = "~/.openpista/whatsapp-session"
-WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
+# phone_number = "15551234567"
+# access_token = "EAA..."
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
 ```
 
 Enable the Web UI adapter:
