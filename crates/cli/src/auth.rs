@@ -1107,4 +1107,10 @@ mod tests {
             "<redacted response>"
         );
     }
+
+    #[test]
+    fn is_openai_oauth_credential_for_key_returns_false_when_no_credentials() {
+        // Without a persisted OpenAI credential the function should always return false.
+        assert!(!is_openai_oauth_credential_for_key("sk-fake-key-1234"));
+    }
 }

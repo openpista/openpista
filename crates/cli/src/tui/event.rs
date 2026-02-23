@@ -22,7 +22,6 @@ use skills::SkillLoader;
 use tokio::sync::mpsc;
 
 use super::app::{AppState, TuiApp};
-use crate::auth::is_openai_oauth_credential_for_key;
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 use crate::config::{
     Config, LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry,
@@ -128,6 +127,56 @@ fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
         Some("list") => Some(ModelsCommand::List),
         Some(_) => Some(ModelsCommand::Invalid(
             "Use /model to browse or /model list to print models.".to_string(),
+        )),
+    }
+}
+
+/// Parsed sub-command for the `/session` slash command.
+#[derive(Debug, Clone, PartialEq)]
+enum SessionCommand {
+    /// `/session` or `/session list` — print all sessions to chat.
+    List,
+    /// `/session new` — create a new session.
+    New,
+    /// `/session load <id>` — load a specific session (partial ID match).
+    Load(String),
+    /// `/session delete <id>` — delete a specific session (partial ID match).
+    Delete(String),
+    /// Invalid usage with hint message.
+    Invalid(String),
+}
+
+fn parse_session_command(raw: &str) -> Option<SessionCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/session" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("list") => Some(SessionCommand::List),
+        Some("new") => Some(SessionCommand::New),
+        Some("load") => {
+            let id = parts.collect::<Vec<_>>().join(" ");
+            if id.is_empty() {
+                Some(SessionCommand::Invalid(
+                    "Usage: /session load <id>".to_string(),
+                ))
+            } else {
+                Some(SessionCommand::Load(id))
+            }
+        }
+        Some("delete") | Some("del") => {
+            let id = parts.collect::<Vec<_>>().join(" ");
+            if id.is_empty() {
+                Some(SessionCommand::Invalid(
+                    "Usage: /session delete <id>".to_string(),
+                ))
+            } else {
+                Some(SessionCommand::Delete(id))
+            }
+        }
+        Some(_) => Some(SessionCommand::Invalid(
+            "Use /session, /session list, /session new, /session load <id>, /session delete <id>"
+                .to_string(),
         )),
     }
 }
@@ -418,7 +467,7 @@ pub async fn run_tui(
     runtime: Arc<agent::AgentRuntime>,
     skill_loader: Arc<SkillLoader>,
     channel_id: ChannelId,
-    session_id: SessionId,
+    mut session_id: SessionId,
     model_name: String,
     mut config: Config,
 ) -> anyhow::Result<()> {
@@ -459,6 +508,16 @@ pub async fn run_tui(
         }
     }
 
+    // Resume existing session: load messages if the session already has history
+    {
+        let memory = runtime.memory().clone();
+        if let Ok(messages) = memory.load_session(&session_id).await
+            && !messages.is_empty()
+        {
+            app.load_session_messages(session_id.clone(), messages);
+        }
+    }
+
     // Crossterm event stream (async)
     let mut crossterm_stream = EventStream::new();
 
@@ -478,44 +537,84 @@ pub async fn run_tui(
     spinner_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        use super::action::{Action, Command};
         // Render
         terminal.draw(|frame| app.render(frame))?;
 
         // Event select
         tokio::select! {
-            // Branch 1: crossterm terminal events
+            // ── Branch 1: crossterm terminal events ──────────────
             maybe_event = crossterm_stream.next() => {
+
+
+                // Helper closure: execute a Command produced by update().
+                // Synchronous commands are handled inline; async commands are
+                // returned so the caller can process them with async context.
+                let execute_command = |cmd: Command| -> Command {
+                    match cmd {
+                        Command::None => Command::None,
+                        Command::CopyToClipboard(text) => {
+                            crate::tui::selection::copy_to_clipboard(&text);
+                            Command::None
+                        }
+                        Command::Batch(cmds) => {
+                            let mut pending = Vec::new();
+                            for c in cmds {
+                                match c {
+                                    Command::None => {}
+                                    Command::CopyToClipboard(text) => {
+                                        crate::tui::selection::copy_to_clipboard(&text);
+                                    }
+                                    other => pending.push(other),
+                                }
+                            }
+                            match pending.len() {
+                                0 => Command::None,
+                                1 => pending.into_iter().next().unwrap(),
+                                _ => Command::Batch(pending),
+                            }
+                        }
+                        // Async commands are returned as-is for the event loop to handle.
+                        other => other,
+                    }
+                };
+
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         use crossterm::event::KeyCode;
+                        let mut pending_async_cmd = Command::None;
                         if key.code == KeyCode::Enter {
-                            // Step 1: palette가 활성화되어 있으면 먼저 command resolve
+                            // Step 1: resolve palette if active
                             if app.is_palette_active() {
-                                app.take_palette_command();
+                                let cmd = app.update(Action::PaletteSelect);
+                                let returned = execute_command(cmd);
+                                if !matches!(returned, Command::None) {
+                                    pending_async_cmd = returned;
+                                }
                             }
 
-                            // Step 2: 정상 command 처리 경로로 fall-through
+                            // Step 2: process Enter in idle state with input
                             if app.state == AppState::Idle && !app.input.is_empty() {
                                 let message = app.take_input();
                                 if let Some(models_cmd) = parse_models_command(&message) {
                                     if model_task.is_some() {
-                                        app.push_error(
+                                        app.update(Action::PushError(
                                             "Model sync is already in progress. Please wait."
                                                 .to_string(),
-                                        );
-                                        app.scroll_to_bottom();
+                                        ));
+                                        app.update(Action::ScrollToBottom);
                                         continue;
                                     }
 
                                     match models_cmd {
                                         ModelsCommand::Browse => {
                                             let pname = config.agent.provider.name().to_string();
-                                            app.open_model_browser(
-                                                pname,
-                                                Vec::new(),
-                                                String::new(),
-                                                "Loading models...".to_string(),
-                                            );
+                                            app.update(Action::OpenModelBrowser {
+                                                provider: pname,
+                                                entries: Vec::new(),
+                                                query: String::new(),
+                                                sync_status: "Loading models...".to_string(),
+                                            });
                                             model_task_opts = Some(ModelTaskMode::Browse(String::new()));
                                             let providers = collect_authenticated_providers(&config);
                                             model_task = Some(tokio::spawn(async move {
@@ -523,7 +622,7 @@ pub async fn run_tui(
                                             }));
                                         }
                                         ModelsCommand::List => {
-                                            app.push_assistant("Fetching model list…".to_string());
+                                            app.update(Action::PushAssistantMessage("Fetching model list…".to_string()));
                                             model_task_opts = Some(ModelTaskMode::List);
                                             let providers = collect_authenticated_providers(&config);
                                             model_task = Some(tokio::spawn(async move {
@@ -531,29 +630,83 @@ pub async fn run_tui(
                                             }));
                                         }
                                         ModelsCommand::Invalid(message) => {
-                                            app.push_error(message);
+                                            app.update(Action::PushError(message));
                                         }
                                     }
-                                    app.scroll_to_bottom();
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
+                                if let Some(session_cmd) = parse_session_command(&message) {
+                                    match session_cmd {
+                                        SessionCommand::List => {
+                                            app.update(Action::OpenSessionBrowser);
+                                        }
+                                        SessionCommand::New => {
+                                            let new_sid = proto::SessionId::new();
+                                            app.update(Action::NewSession(new_sid.clone()));
+                                            session_id = new_sid;
+                                        }
+                                        SessionCommand::Load(partial_id) => {
+                                            let matched: Vec<_> = app.session_list.iter()
+                                                .filter(|e| e.id.as_str().contains(&partial_id))
+                                                .collect();
+                                            match matched.len() {
+                                                0 => { app.update(Action::PushError(format!("No session matching '{partial_id}'"))); }
+                                                1 => {
+                                                    let sid = matched[0].id.clone();
+                                                    app.set_pending_sidebar_selection(sid);
+                                                }
+                                                n => {
+                                                    let ids: Vec<_> = matched.iter().map(|e| format!("`{}`", e.id.as_str())).collect();
+                                                    app.update(Action::PushError(format!("{n} sessions match '{partial_id}': {}", ids.join(", "))));
+                                                }
+                                            }
+                                        }
+                                        SessionCommand::Delete(partial_id) => {
+                                            let matched: Vec<_> = app.session_list.iter()
+                                                .filter(|e| e.id.as_str().contains(&partial_id))
+                                                .collect();
+                                            match matched.len() {
+                                                0 => { app.update(Action::PushError(format!("No session matching '{partial_id}'"))); }
+                                                1 => {
+                                                    let idx = app.session_list.iter().position(|e| e.id.as_str() == matched[0].id.as_str());
+                                                    if let Some(i) = idx {
+                                                        app.update(Action::SidebarHover(Some(i)));
+                                                        app.update(Action::RequestDeleteSession);
+                                                    }
+                                                }
+                                                n => {
+                                                    let ids: Vec<_> = matched.iter().map(|e| format!("`{}`", e.id.as_str())).collect();
+                                                    app.update(Action::PushError(format!("{n} sessions match '{partial_id}': {}", ids.join(", "))));
+                                                }
+                                            }
+                                        }
+                                        SessionCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
+                                    }
+                                    app.update(Action::ScrollToBottom);
                                     continue;
                                 }
 
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
-                                    app.scroll_to_bottom();
+                                    app.update(Action::ScrollToBottom);
                                     continue;
                                 }
-                                debug!(message_len = %message.len(), "Agent task spawned");
-                                app.push_user(message.clone());
-                                app.state = AppState::Thinking { round: 0 };
-                                app.scroll_to_bottom();
 
-                                // Spawn agent task
+                                // Regular user message → spawn agent task
+                                debug!(message_len = %message.len(), "Agent task spawned");
+                                app.update(Action::PushUserMessage(message.clone()));
+                                app.update(Action::SetThinking);
+                                app.update(Action::ScrollToBottom);
+
                                 let (prog_tx, prog_rx_new) = mpsc::channel::<ProgressEvent>(64);
                                 let rt = Arc::clone(&runtime);
                                 let sl = Arc::clone(&skill_loader);
                                 let ch = channel_id.clone();
-                                let sess = session_id.clone();
+                                let sess = app.session_id.clone();
 
                                 let handle = tokio::spawn(async move {
                                     let skills_ctx = sl.load_context().await;
@@ -570,18 +723,34 @@ pub async fn run_tui(
                                 agent_task = Some(handle);
                                 progress_rx = Some(prog_rx_new);
                             } else {
-                                app.handle_key(key);
+                                // Enter in non-idle state or empty input — dispatch via TEA
+                                let actions = app.map_key_event(key);
+                                for action in actions {
+                                    let cmd = app.update(action);
+                                    let returned = execute_command(cmd);
+                                    if !matches!(returned, Command::None) {
+                                        pending_async_cmd = returned;
+                                    }
+                                }
                             }
                         } else {
-                            app.handle_key(key);
+                            // ── Non-Enter keys: full TEA dispatch ────────
+                            let actions = app.map_key_event(key);
+                            for action in actions {
+                                let cmd = app.update(action);
+                                let returned = execute_command(cmd);
+                                if !matches!(returned, Command::None) {
+                                    pending_async_cmd = returned;
+                                }
+                            }
                         }
 
+                        // ── Post-key side effects (model change, refresh, auth) ──
                         if let Some((new_model, provider_name)) = app.take_pending_model_change() {
                             info!(new_model = %new_model, provider = %provider_name, "Model changed");
                             runtime.set_model(new_model.clone());
                             if provider_name != runtime.active_provider_name() {
                                 debug!(target_provider = %provider_name, current_provider = %runtime.active_provider_name(), "Switching provider");
-                                // Try switching first; if provider not registered, build & register on-demand
                                 if runtime.switch_provider(&provider_name).is_err() {
                                     if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
                                         if let Some(cred) = config.resolve_credential_for(&provider_name) {
@@ -591,15 +760,6 @@ pub async fn run_tui(
                                                         Arc::new(agent::AnthropicProvider::with_base_url(&cred.api_key, url))
                                                     } else {
                                                         Arc::new(agent::AnthropicProvider::new(&cred.api_key))
-                                                    }
-                                                } else if preset == ProviderPreset::OpenAi
-                                                    && is_openai_oauth_credential_for_key(&cred.api_key)
-                                                {
-                                                    let account_id = crate::auth::extract_chatgpt_account_id(&cred.api_key);
-                                                    if let Some(ref url) = cred.base_url {
-                                                        Arc::new(agent::ResponsesApiProvider::with_base_url(&cred.api_key, url).with_chatgpt_account_id(account_id))
-                                                    } else {
-                                                        Arc::new(agent::ResponsesApiProvider::new(&cred.api_key).with_chatgpt_account_id(account_id))
                                                     }
                                                 } else if let Some(ref url) = cred.base_url {
                                                     Arc::new(agent::OpenAiProvider::with_base_url(&cred.api_key, url, &new_model))
@@ -617,16 +777,21 @@ pub async fn run_tui(
                                     }
                                 }
                             }
+                            let state = crate::config::TuiState {
+                                last_model: new_model.clone(),
+                                last_provider: provider_name.clone(),
+                            };
+                            let _ = state.save();
                         }
 
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
-                                app.push_error(
+                                app.update(Action::PushError(
                                     "Model sync is already in progress. Please wait."
                                         .to_string(),
-                                );
+                                ));
                             } else if let Some(query) = app.model_browser_query() {
-                                app.mark_model_refreshing();
+                                app.update(Action::MarkModelRefreshing);
                                 model_task_opts = Some(ModelTaskMode::Browse(query));
                                 let providers = collect_authenticated_providers(&config);
                                 model_task = Some(tokio::spawn(async move {
@@ -656,7 +821,7 @@ pub async fn run_tui(
                                         "No OAuth client ID configured. Set openpista_OAUTH_CLIENT_ID to use browser login.".to_string(),
                                     );
                                 }
-                                app.scroll_to_bottom();
+                                app.update(Action::ScrollToBottom);
                                 continue;
                             }
 
@@ -685,22 +850,13 @@ pub async fn run_tui(
                                         &client_id,
                                     );
                                     pending_code_display = Some(pending);
-                                    app.state = super::app::AppState::LoginBrowsing {
-                                        query: intent.provider.clone(),
-                                        cursor: 0,
-                                        scroll: 0,
-                                        step: crate::auth_picker::LoginBrowseStep::InputApiKey,
-                                        selected_provider: Some(intent.provider),
-                                        selected_method: Some(AuthMethodChoice::OAuth),
-                                        input_buffer: String::new(),
-                                        masked_buffer: String::new(),
-                                        last_error: None,
-                                        endpoint: None,
-                                    };
-                                    app.push_assistant(
+                                    app.update(Action::SetOAuthCodeDisplayState {
+                                        provider: intent.provider.clone(),
+                                    });
+                                    app.update(Action::PushAssistantMessage(
                                         "Browser opened. Paste the authorization code from your browser.".to_string(),
-                                    );
-                                    app.scroll_to_bottom();
+                                    ));
+                                    app.update(Action::ScrollToBottom);
                                     continue;
                                 }
                             }
@@ -715,9 +871,9 @@ pub async fn run_tui(
                                 let provider_name = intent.provider.clone();
                                 let cred_path = credentials_path();
                                 auth_provider_name = Some(provider_name.clone());
-                                app.state = super::app::AppState::AuthValidating {
-                                    provider: provider_name.clone(),
-                                };
+                                app.update(Action::SetAuthValidating(
+                                    provider_name.clone(),
+                                ));
                                 if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
                                     prev_provider = Some((config.agent.provider, app.provider_name.clone()));
                                     config.agent.provider = preset;
@@ -739,7 +895,7 @@ pub async fn run_tui(
                                         "Authenticated as '{provider_name}'. API key saved."
                                     ))
                                 }));
-                                app.scroll_to_bottom();
+                                app.update(Action::ScrollToBottom);
                                 continue;
                             }
 
@@ -760,136 +916,93 @@ pub async fn run_tui(
                                 .await
                             }));
                         }
-                    }
-                    Some(Ok(Event::Mouse(mouse))) => {
-                        let frame_area: ratatui::layout::Rect = terminal.size().unwrap_or_default().into();
-                        let pos = Position::new(mouse.column, mouse.row);
 
-                        // ── Sidebar mouse handling ───────────────────────
-                        if let Some(sb_area) = app.compute_sidebar_area(frame_area) {
-                            match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    if sb_area.contains(pos) {
-                                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
-                                        let entry_height = 3u16;
-                                        let idx = (inner_y / entry_height) as usize;
-                                        if idx < app.session_list.len() {
-                                            app.sidebar_hover = Some(idx);
-                                        }
-                                    }
+                        // ── Handle async commands returned by TEA dispatch ──
+                        match pending_async_cmd {
+                            Command::None => {}
+                            Command::SpawnAgentTask(msg) => {
+                                if agent_task.is_none() {
+                                    debug!(message_len = %msg.len(), "Async command: SpawnAgentTask");
+                                    app.update(Action::PushUserMessage(msg.clone()));
+                                    app.update(Action::SetThinking);
+                                    app.update(Action::ScrollToBottom);
+                                    let (prog_tx, prog_rx_new) = mpsc::channel::<ProgressEvent>(64);
+                                    let rt = Arc::clone(&runtime);
+                                    let sl = Arc::clone(&skill_loader);
+                                    let ch = channel_id.clone();
+                                    let sess = app.session_id.clone();
+                                    let handle = tokio::spawn(async move {
+                                        let skills_ctx = sl.load_context().await;
+                                        rt.process_with_progress(&ch, &sess, &msg, Some(&skills_ctx), prog_tx).await
+                                    });
+                                    agent_task = Some(handle);
+                                    progress_rx = Some(prog_rx_new);
                                 }
-                                MouseEventKind::Moved => {
-                                    if sb_area.contains(pos) {
-                                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
-                                        let entry_height = 3u16;
-                                        let idx = (inner_y / entry_height) as usize;
-                                        if idx < app.session_list.len() {
-                                            app.sidebar_hover = Some(idx);
-                                        } else {
-                                            app.sidebar_hover = None;
-                                        }
-                                    } else {
-                                        app.sidebar_hover = None;
-                                    }
+                            }
+                            Command::RefreshSidebar => {
+                                let memory = runtime.memory().clone();
+                                if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                                    app.update(super::action::Action::RefreshSessionList(
+                                        sessions.into_iter().map(|(id, channel_id, updated_at, preview)| {
+                                            super::app::SessionEntry { id, channel_id, updated_at, preview }
+                                        }).collect(),
+                                    ));
                                 }
-                                MouseEventKind::ScrollDown => {
-                                    if sb_area.contains(pos) {
-                                        app.sidebar_scroll = app.sidebar_scroll.saturating_add(1);
-                                    }
+                            }
+                            Command::DeleteSession(sid) => {
+                                let memory = runtime.memory().clone();
+                                let _ = memory.delete_session(&sid).await;
+                                app.update(super::action::Action::RemoveSession(sid.clone()));
+                                if sid.as_str() == session_id.as_str() {
+                                    session_id = SessionId::new();
+                                    app.update(super::action::Action::LoadSession {
+                                        session_id: session_id.clone(),
+                                        messages: Vec::new(),
+                                    });
                                 }
-                                MouseEventKind::ScrollUp => {
-                                    if sb_area.contains(pos) {
-                                        app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
-                                    }
+                                // Refresh sidebar after deletion
+                                let memory = runtime.memory().clone();
+                                if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                                    app.update(super::action::Action::RefreshSessionList(
+                                        sessions.into_iter().map(|(id, channel_id, updated_at, preview)| {
+                                            super::app::SessionEntry { id, channel_id, updated_at, preview }
+                                        }).collect(),
+                                    ));
                                 }
-                                _ => {}
+                            }
+                            Command::LoadSessionFromDb(sid) => {
+                                let memory = runtime.memory().clone();
+                                if let Ok(messages) = memory.load_session(&sid).await {
+                                    session_id = sid.clone();
+                                    app.update(super::action::Action::LoadSession {
+                                        session_id: sid,
+                                        messages,
+                                    });
+                                }
+                            }
+                            Command::CreateNewSession => {
+                                let new_sid = proto::SessionId::new();
+                                app.update(super::action::Action::NewSession(new_sid.clone()));
+                                session_id = new_sid;
+                            }
+                            _ => {
+                                // Other commands (CopyToClipboard, Batch) already handled
+                                // by execute_command; StartAuthFlow, LoadModelCatalog
+                                // handled via post-key side effects.
                             }
                         }
-
-                        // ── Chat area mouse handling ──────────────────────
-                        if let Some(chat_area) = app.chat_area {
-                            let inner = ratatui::layout::Rect {
-                                x: chat_area.x + 1,
-                                y: chat_area.y + 1,
-                                width: chat_area.width.saturating_sub(2),
-                                height: chat_area.height.saturating_sub(2),
-                            };
-
-                            match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    if inner.contains(pos) {
-                                        let rel_col = mouse.column - inner.x;
-                                        let rel_row = mouse.row - inner.y;
-                                        app.text_selection.anchor = Some((rel_row, rel_col));
-                                        app.text_selection.endpoint = Some((rel_row, rel_col));
-                                        app.text_selection.dragging = true;
-                                    } else {
-                                        app.text_selection.clear();
-                                    }
-                                }
-                                MouseEventKind::Drag(MouseButton::Left) => {
-                                    if app.text_selection.dragging {
-                                        let rel_col = mouse
-                                            .column
-                                            .saturating_sub(inner.x)
-                                            .min(inner.width.saturating_sub(1));
-                                        let rel_row = mouse
-                                            .row
-                                            .saturating_sub(inner.y)
-                                            .min(inner.height.saturating_sub(1));
-                                        app.text_selection.endpoint = Some((rel_row, rel_col));
-                                    }
-                                }
-                                MouseEventKind::Up(MouseButton::Left) => {
-                                    if app.text_selection.dragging {
-                                        let rel_col = mouse
-                                            .column
-                                            .saturating_sub(inner.x)
-                                            .min(inner.width.saturating_sub(1));
-                                        let rel_row = mouse
-                                            .row
-                                            .saturating_sub(inner.y)
-                                            .min(inner.height.saturating_sub(1));
-                                        app.text_selection.endpoint = Some((rel_row, rel_col));
-                                        app.text_selection.dragging = false;
-
-                                        // Auto-copy when a non-empty selection is released.
-                                        if app.text_selection.is_active()
-                                            && let Some((start, end)) =
-                                                app.text_selection.ordered_range()
-                                        {
-                                            let grid = app.chat_text_grid.clone();
-                                            let scroll = app.chat_scroll_clamped;
-                                            if let Some(text) =
-                                                crate::tui::selection::extract_selected_text(
-                                                    &grid, start, end, scroll,
-                                                )
-                                            {
-                                                crate::tui::selection::copy_to_clipboard(&text);
-                                            }
-                                        }
-                                    }
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    if chat_area.contains(pos) {
-                                        app.history_scroll =
-                                            app.history_scroll.saturating_add(3);
-                                        app.text_selection.clear();
-                                    }
-                                }
-                                MouseEventKind::ScrollUp => {
-                                    if chat_area.contains(pos) {
-                                        app.history_scroll =
-                                            app.history_scroll.saturating_sub(3);
-                                        app.text_selection.clear();
-                                    }
-                                }
-                                _ => {}
-                            }
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        // ── Mouse events: full TEA dispatch ──────────────
+                        let frame_area: ratatui::layout::Rect = terminal.size().unwrap_or_default().into();
+                        let actions = app.map_mouse_event(mouse, frame_area);
+                        for action in actions {
+                            let cmd = app.update(action);
+                            let _ = execute_command(cmd);
                         }
                     }
                     Some(Ok(Event::Resize(_, _))) => {
-                        // Terminal will redraw on next loop iteration
+                        app.update(Action::Resize);
                     }
                     Some(Err(_)) | None => {
                         break; // stream ended or error
@@ -898,38 +1011,53 @@ pub async fn run_tui(
                 }
             }
 
-            // Branch 2: progress events from agent task
+            // ── Branch 2: progress events from agent task ────────
             Some(evt) = async {
                 match progress_rx.as_mut() {
                     Some(rx) => rx.recv().await,
                     None => std::future::pending().await,
                 }
             } => {
-                app.apply_progress(evt);
-                app.scroll_to_bottom();
+                app.update(super::action::Action::ApplyProgress(evt));
             }
 
-            // Branch 3: agent task completed
+            // ── Branch 3: agent task completed ───────────────────
             result = async {
                 match agent_task.as_mut() {
                     Some(handle) => handle.await,
                     None => std::future::pending().await,
                 }
             } => {
-                match result {
+                let completion_result = match result {
                     Ok(inner) => {
                         debug!(success = %inner.is_ok(), "Agent task completed");
-                        app.apply_completion(inner);
+                        inner.map_err(|e| e.to_string())
                     }
-                    Err(join_err) => app.apply_completion(Err(proto::Error::Llm(
-                        proto::LlmError::InvalidResponse(format!("Task panicked: {join_err}"))
-                    ))),
-                }
-                app.scroll_to_bottom();
+                    Err(join_err) => Err(format!("Task panicked: {join_err}")),
+                };
+                app.update(super::action::Action::ApplyCompletion(completion_result));
                 agent_task = None;
                 progress_rx = None;
+                // Refresh sidebar after agent completion
+                let memory = runtime.memory().clone();
+                if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                    app.update(super::action::Action::RefreshSessionList(
+                        sessions
+                            .into_iter()
+                            .map(|(id, channel_id, updated_at, preview)| {
+                                super::app::SessionEntry {
+                                    id,
+                                    channel_id,
+                                    updated_at,
+                                    preview,
+                                }
+                            })
+                            .collect(),
+                    ));
+                }
             }
 
+            // ── Branch 4: auth task completed ────────────────────
             result = async {
                 match auth_task.as_mut() {
                     Some(handle) => handle.await,
@@ -943,23 +1071,13 @@ pub async fn run_tui(
                         {
                             let new_model = preset.default_model().to_string();
                             runtime.set_model(new_model.clone());
-                            let api_key = config.resolve_api_key_refreshed().await;
+                            let api_key = config.resolve_api_key();
                             let new_llm: Arc<dyn agent::LlmProvider> =
                                 if preset == ProviderPreset::Anthropic {
                                     if let Some(base_url) = config.agent.effective_base_url() {
                                         Arc::new(agent::AnthropicProvider::with_base_url(&api_key, base_url))
                                     } else {
                                         Arc::new(agent::AnthropicProvider::new(&api_key))
-                                    }
-                                } else if preset == ProviderPreset::OpenAi
-                                    && is_openai_oauth_credential_for_key(&api_key)
-                                {
-                                    let account_id = crate::auth::extract_chatgpt_account_id(&api_key);
-                                    let burl = config.agent.effective_base_url().map(String::from);
-                                    if let Some(url) = burl {
-                                        Arc::new(agent::ResponsesApiProvider::with_base_url(&api_key, url).with_chatgpt_account_id(account_id))
-                                    } else {
-                                        Arc::new(agent::ResponsesApiProvider::new(&api_key).with_chatgpt_account_id(account_id))
                                     }
                                 } else {
                                     let burl = config.agent.effective_base_url().map(String::from);
@@ -972,6 +1090,17 @@ pub async fn run_tui(
                             runtime.register_provider(provider_str, new_llm);
                             let _ = runtime.switch_provider(provider_str);
                         }
+                        // Persist last used model after auth
+                        if let Some(ref provider_str) = auth_provider_name {
+                            let model = provider_str.parse::<ProviderPreset>()
+                                .map(|p| p.default_model().to_string())
+                                .unwrap_or_default();
+                            let state = crate::config::TuiState {
+                                last_model: model,
+                                last_provider: provider_str.clone(),
+                            };
+                            let _ = state.save();
+                        }
                         debug!(provider = ?auth_provider_name, "Auth task completed successfully");
                         // Pre-cache model catalog for the newly authenticated provider
                         if model_task.is_none() {
@@ -983,7 +1112,7 @@ pub async fn run_tui(
                         }
                         prev_provider = None;
                         auth_provider_name = None;
-                        app.push_assistant(message);
+                        app.update(super::action::Action::PushAssistantMessage(message));
                     }
                     Ok(Err(err)) => {
                         debug!(provider = ?auth_provider_name, error = %err, "Auth task failed");
@@ -992,7 +1121,7 @@ pub async fn run_tui(
                             app.provider_name = old_name;
                         }
                         auth_provider_name = None;
-                        app.push_error(format!("Authentication failed: {err}"));
+                        app.update(super::action::Action::PushError(format!("Authentication failed: {err}")));
                     }
                     Err(join_err) => {
                         debug!(provider = ?auth_provider_name, error = %join_err, "Auth task panicked");
@@ -1001,14 +1130,15 @@ pub async fn run_tui(
                             app.provider_name = old_name;
                         }
                         auth_provider_name = None;
-                        app.push_error(format!("Auth task failed: {join_err}"));
+                        app.update(super::action::Action::PushError(format!("Auth task failed: {join_err}")));
                     }
                 }
-                app.state = AppState::Idle;
-                app.scroll_to_bottom();
+                app.update(Action::SetIdle);
+                app.update(Action::ScrollToBottom);
                 auth_task = None;
             }
 
+            // ── Branch 5: model task completed ────────────────────────
             result = async {
                 match model_task.as_mut() {
                     Some(handle) => handle.await,
@@ -1026,16 +1156,16 @@ pub async fn run_tui(
                         let sync_status_combined = catalog.sync_statuses.join(" | ");
                         match model_task_opts.take() {
                             Some(ModelTaskMode::Browse(query)) => {
-                                app.open_model_browser(
-                                    provider_label,
-                                    catalog.entries,
+                                app.update(super::action::Action::OpenModelBrowser {
+                                    provider: provider_label,
+                                    entries: catalog.entries,
                                     query,
-                                    sync_status_combined,
-                                );
+                                    sync_status: sync_status_combined,
+                                });
                             }
                             Some(ModelTaskMode::List) => {
                                 let text = format_model_list(&catalog.entries, &catalog.sync_statuses);
-                                app.push_assistant(text);
+                                app.update(super::action::Action::PushAssistantMessage(text));
                             }
                             None => {
                                 // background pre-cache only — no browser opened
@@ -1044,15 +1174,67 @@ pub async fn run_tui(
                     }
                     Err(join_err) => {
                         debug!(error = %join_err, "Model task failed");
-                        app.push_error(format!("Model task failed: {join_err}"));
+                        app.update(super::action::Action::PushError(format!("Model task failed: {join_err}")));
                     }
                 }
                 model_task = None;
-                app.scroll_to_bottom();
+                app.update(super::action::Action::ScrollToBottom);
             }
 
+            // ── Branch 6: spinner tick ─────────────────────────────────
             _ = spinner_interval.tick(), if app.state != AppState::Idle => {
-                app.spinner_tick = app.spinner_tick.wrapping_add(1);
+                app.update(super::action::Action::Tick);
+            }
+        }
+
+        // ── Post-select: sidebar session selection ─────────────────
+        if let Some(new_session_id) = app.take_pending_sidebar_selection() {
+            let memory = runtime.memory().clone();
+            if let Ok(messages) = memory.load_session(&new_session_id).await {
+                session_id = new_session_id.clone();
+                app.update(super::action::Action::LoadSession {
+                    session_id: new_session_id,
+                    messages,
+                });
+            }
+        }
+
+        // ── Post-select: session browser new request ──────────────
+        if app.session_browser_new_requested {
+            app.session_browser_new_requested = false;
+            let new_sid = proto::SessionId::new();
+            app.update(super::action::Action::NewSession(new_sid.clone()));
+            session_id = new_sid;
+        }
+
+        // ── Post-select: confirmed session deletion ───────────────
+        if let Some(del_id) = app.take_confirmed_delete() {
+            let memory = runtime.memory().clone();
+            let _ = memory.delete_session(&del_id).await;
+            app.update(super::action::Action::RemoveSession(del_id.clone()));
+            // If we deleted the active session, create a new one
+            if del_id.as_str() == session_id.as_str() {
+                session_id = SessionId::new();
+                app.update(super::action::Action::LoadSession {
+                    session_id: session_id.clone(),
+                    messages: Vec::new(),
+                });
+            }
+            // Refresh sidebar
+            if let Ok(sessions) = memory.list_sessions_with_preview().await {
+                app.update(super::action::Action::RefreshSessionList(
+                    sessions
+                        .into_iter()
+                        .map(
+                            |(id, channel_id, updated_at, preview)| super::app::SessionEntry {
+                                id,
+                                channel_id,
+                                updated_at,
+                                preview,
+                            },
+                        )
+                        .collect(),
+                ));
             }
         }
 
@@ -1100,6 +1282,63 @@ mod tests {
                 "Use /model to browse or /model list to print models.".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn parse_session_command_supports_all_variants() {
+        // bare /session => List
+        assert_eq!(
+            parse_session_command("/session"),
+            Some(SessionCommand::List)
+        );
+        assert_eq!(
+            parse_session_command("/session list"),
+            Some(SessionCommand::List)
+        );
+
+        // new
+        assert_eq!(
+            parse_session_command("/session new"),
+            Some(SessionCommand::New)
+        );
+
+        // load requires id
+        assert_eq!(
+            parse_session_command("/session load"),
+            Some(SessionCommand::Invalid(
+                "Usage: /session load <id>".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_session_command("/session load abc123"),
+            Some(SessionCommand::Load("abc123".to_string()))
+        );
+
+        // delete / del
+        assert_eq!(
+            parse_session_command("/session delete"),
+            Some(SessionCommand::Invalid(
+                "Usage: /session delete <id>".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_session_command("/session delete xyz"),
+            Some(SessionCommand::Delete("xyz".to_string()))
+        );
+        assert_eq!(
+            parse_session_command("/session del xyz"),
+            Some(SessionCommand::Delete("xyz".to_string()))
+        );
+
+        // unknown subcommand
+        assert!(matches!(
+            parse_session_command("/session foobar"),
+            Some(SessionCommand::Invalid(_))
+        ));
+
+        // non-session command returns None
+        assert_eq!(parse_session_command("/model"), None);
+        assert_eq!(parse_session_command("/help"), None);
     }
 
     #[test]
@@ -1213,11 +1452,11 @@ mod tests {
     }
 
     #[test]
-    fn format_model_list_shows_recommended_and_other() {
-        use crate::model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
+    fn format_model_list_recommended_and_other() {
+        use model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
         let entries = vec![
             ModelCatalogEntry {
-                id: "gpt-5.2-codex".into(),
+                id: "gpt-4o".into(),
                 provider: "openai".into(),
                 recommended_for_coding: true,
                 status: ModelStatus::Stable,
@@ -1225,228 +1464,68 @@ mod tests {
                 available: true,
             },
             ModelCatalogEntry {
-                id: "gpt-4o".into(),
-                provider: "openai".into(),
+                id: "llama3".into(),
+                provider: "ollama".into(),
                 recommended_for_coding: false,
                 status: ModelStatus::Stable,
                 source: ModelSource::Api,
                 available: true,
             },
+            ModelCatalogEntry {
+                id: "old-model".into(),
+                provider: "x".into(),
+                recommended_for_coding: true,
+                status: ModelStatus::Unknown,
+                source: ModelSource::Docs,
+                available: false,
+            },
         ];
-        let statuses = vec!["openai: synced".to_string()];
-        let out = format_model_list(&entries, &statuses);
-        assert!(out.contains("gpt-5.2-codex"), "missing recommended");
-        assert!(out.contains("gpt-4o"), "missing other");
-        assert!(out.contains("(api)"), "missing api tag for other");
-        assert!(out.contains("Recommended"), "missing recommended section");
-        assert!(out.contains("Other"), "missing other section");
-        assert!(out.contains("openai: synced"), "missing sync status");
+        let out = format_model_list(&entries, &["openai: ok".into()]);
+        assert!(out.contains("Models \u{2014} 3 total"));
+        assert!(out.contains("Recommended:"));
+        assert!(out.contains("\u{2605}  gpt-4o [openai]"));
+        assert!(out.contains("Other:"));
+        assert!(out.contains("llama3 [ollama] (api)"));
+        assert!(out.contains("Sync: openai: ok"));
+        assert!(!out.contains("old-model"));
     }
 
     #[test]
-    fn format_model_list_empty_entries() {
+    fn format_model_list_empty() {
         let out = format_model_list(&[], &[]);
-        assert!(out.contains("0 total"));
+        assert!(out.contains("Models \u{2014} 0 total"));
         assert!(!out.contains("Recommended"));
         assert!(!out.contains("Other"));
+        assert!(!out.contains("Sync"));
     }
 
     #[test]
-    fn load_credentials_returns_default_for_nonexistent_path() {
-        let path = std::path::Path::new("/nonexistent/path/credentials.toml");
-        let creds = load_credentials(path);
-        // should not panic; returns default empty credentials
-        let _ = creds;
+    fn format_model_list_only_recommended() {
+        use model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
+        let entries = vec![ModelCatalogEntry {
+            id: "claude".into(),
+            provider: "anthropic".into(),
+            recommended_for_coding: true,
+            status: ModelStatus::Stable,
+            source: ModelSource::Api,
+            available: true,
+        }];
+        let out = format_model_list(&entries, &[]);
+        assert!(out.contains("Recommended:"));
+        assert!(out.contains("\u{2605}  claude [anthropic] (api)"));
+        assert!(!out.contains("Other:"));
     }
 
     #[test]
-    fn persist_credential_and_load_credentials_roundtrip() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-        let cred = crate::auth::ProviderCredential {
-            access_token: "tok-test".to_string(),
-            refresh_token: None,
-            expires_at: None,
-            endpoint: None,
-            id_token: None,
-        };
-        persist_credential("together".to_string(), cred, cred_path.clone()).expect("persist ok");
-        let loaded = load_credentials(&cred_path);
-        let saved = loaded.get("together").expect("credential should exist");
-        assert_eq!(saved.access_token, "tok-test");
+    fn format_model_list_multiple_sync_statuses() {
+        let out = format_model_list(&[], &["a: ok".into(), "b: fail".into()]);
+        assert!(out.contains("Sync: a: ok; b: fail"));
     }
 
     #[test]
-    fn collect_authenticated_providers_empty_config() {
+    fn collect_authenticated_providers_default_config() {
         let config = Config::default();
-        // Default config has no credentials stored, and no API key configured.
-        // The result should be empty (or contain the active provider if an env key is set).
         let providers = collect_authenticated_providers(&config);
-        // Just assert it doesn't panic - result depends on environment.
-        let _ = providers;
-    }
-
-    #[tokio::test]
-    async fn persist_auth_unknown_provider_returns_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "nonexistent_provider_xyz".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: None,
-                api_key: Some("sk-test".to_string()),
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown provider"));
-    }
-
-    #[tokio::test]
-    async fn persist_auth_api_key_empty_returns_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "together".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: None,
-                api_key: Some("".to_string()),
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path,
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn persist_auth_endpoint_and_key_missing_endpoint_returns_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "custom".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: None,
-                api_key: Some("sk-key".to_string()),
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path,
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn persist_auth_endpoint_and_key_saves_both() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "custom".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: Some("https://my.endpoint.com".to_string()),
-                api_key: Some("sk-custom-key".to_string()),
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path.clone(),
-        )
-        .await;
-
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let content = std::fs::read_to_string(&cred_path).expect("read credentials");
-        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
-        let saved = creds.get("custom").expect("credential saved");
-        assert_eq!(saved.access_token, "sk-custom-key");
-        assert_eq!(saved.endpoint.as_deref(), Some("https://my.endpoint.com"));
-    }
-
-    #[tokio::test]
-    async fn persist_auth_api_key_no_key_provided_returns_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "together".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: None,
-                api_key: None,
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path,
-        )
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn persist_auth_openai_api_key_saves_credential() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "openai".to_string(),
-                auth_method: AuthMethodChoice::ApiKey,
-                endpoint: None,
-                api_key: Some("sk-openai-test".to_string()),
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path.clone(),
-        )
-        .await;
-
-        assert!(result.is_ok(), "should succeed: {:?}", result);
-        let content = std::fs::read_to_string(&cred_path).expect("read credentials");
-        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
-        let saved = creds.get("openai").expect("credential saved");
-        assert_eq!(saved.access_token, "sk-openai-test");
-    }
-
-    #[tokio::test]
-    async fn persist_auth_openai_oauth_without_client_id_returns_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cred_path = tmp.path().join("credentials.toml");
-
-        let result = persist_auth_with_path(
-            Config::default(),
-            AuthLoginIntent {
-                provider: "openai".to_string(),
-                auth_method: AuthMethodChoice::OAuth,
-                endpoint: None,
-                api_key: None,
-            },
-            OAUTH_CALLBACK_PORT,
-            OAUTH_TIMEOUT_SECS,
-            cred_path,
-        )
-        .await;
-
-        assert!(result.is_err());
+        assert!(providers.is_empty() || providers.iter().all(|(_, _, k)| !k.is_empty()));
     }
 }

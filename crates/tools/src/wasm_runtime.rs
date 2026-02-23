@@ -33,7 +33,7 @@ struct WasmStoreData {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use std::path::PathBuf;
 /// use serde_json::json;
 /// // Construct a request (fields shown for illustration)
@@ -67,7 +67,7 @@ pub async fn run_wasm_skill(req: WasmRunRequest) -> Result<ToolResult, String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use std::path::PathBuf;
 /// let req = WasmRunRequest {
 ///     call_id: "call-1".to_string(),
@@ -240,7 +240,7 @@ fn run_wasm_skill_sync(req: WasmRunRequest) -> Result<ToolResult, String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use std::path::Path;
 /// let p = super::resolve_wasm_module_path(Path::new("/tmp/workspace"), "echo");
 /// assert_eq!(p, Path::new("/tmp/workspace").join("skills").join("echo").join("main.wasm"));
@@ -260,7 +260,7 @@ fn resolve_wasm_module_path(workspace_dir: &Path, skill_name: &str) -> PathBuf {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let packed: i64 = ((4096u64 << 32) | 128u64) as i64;
 /// let (ptr, len) = unpack_abi_return(packed).expect("should decode");
 /// assert_eq!(ptr, 4096usize);

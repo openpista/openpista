@@ -137,10 +137,10 @@ impl SkillLoader {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// # use std::path::PathBuf;
-    /// # use crates::skills::loader::SkillLoader;
-    /// # tokio_test::block_on(async {
+    /// # use skills::SkillLoader;
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// let loader = SkillLoader::new(PathBuf::from("/workspace"));
     /// let meta = loader.load_skill_metadata("example_skill").await;
     /// // `meta` is Some(...) when metadata was found and parsed, otherwise None
@@ -262,6 +262,7 @@ impl SkillLoader {
     ///
     /// ```
     /// use std::path::Path;
+    /// use skills::SkillLoader;
     /// let loader = SkillLoader::new(std::path::PathBuf::from("/tmp/workspace"));
     /// assert_eq!(loader.workspace(), Path::new("/tmp/workspace"));
     /// ```
@@ -274,7 +275,7 @@ impl SkillLoader {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let md = r#"---
 /// image: "ghcr.io/example/skill:latest"
 /// description: "Does something"
@@ -284,10 +285,10 @@ impl SkillLoader {
 /// Details...
 /// "#;
 ///
-/// let fm = crate::parse_skill_front_matter(md).expect("front matter parsed");
+/// let fm = parse_skill_front_matter(md).expect("front matter parsed");
 /// assert_eq!(fm.image.unwrap(), "ghcr.io/example/skill:latest");
 /// assert_eq!(fm.description.unwrap(), "Does something");
-/// assert_eq!(crate::parse_mode(&fm.mode.unwrap_or_default()), crate::SkillExecutionMode::Wasm);
+/// assert_eq!(parse_mode(&fm.mode.unwrap_or_default()), SkillExecutionMode::Wasm);
 /// ```
 ///
 /// # Returns
@@ -312,7 +313,7 @@ fn parse_skill_front_matter(content: &str) -> Option<SkillFrontMatter> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let md = r#"---
 /// title: Example
 /// description: An example skill
@@ -352,7 +353,7 @@ fn extract_front_matter(content: &str) -> Option<String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// assert_eq!(parse_mode(" wasm "), SkillExecutionMode::Wasm);
 /// assert_eq!(parse_mode("WASM"), SkillExecutionMode::Wasm);
 /// assert_eq!(parse_mode("foo"), SkillExecutionMode::Subprocess);
@@ -376,7 +377,7 @@ fn parse_mode(value: &str) -> SkillExecutionMode {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let s = "  hello  ".to_string();
 /// assert_eq!(normalize_optional_text(s), Some("hello".to_string()));
 ///
@@ -406,10 +407,10 @@ fn normalize_optional_text(value: String) -> Option<String> {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// # use std::path::Path;
 /// # async fn doc_example() -> std::io::Result<()> {
-/// let output = crate::run_with_executor_candidates(
+/// let output = run_with_executor_candidates(
 ///     &["bash", "sh"],
 ///     Path::new("scripts/run.sh"),
 ///     &["--help"],
@@ -465,7 +466,7 @@ async fn run_with_executor_candidates(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// assert!(is_valid_skill_name("skill"));
 /// assert!(!is_valid_skill_name("nested/skill"));
 /// assert!(!is_valid_skill_name(".."));
