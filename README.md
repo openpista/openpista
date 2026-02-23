@@ -11,7 +11,7 @@ Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 **An OS Gateway AI Agent with browser access via Rust→WASM.** Let your LLM control your machine through any messenger.
 
-> Inspired by [OpenClaw](https://github.com/openpista/openclaw)'s WebSocket-based agent architecture,
+> Inspired by [OpenClaw](https://github.com/openclaw/openclaw)'s WebSocket-based agent architecture,
 > rebuilt from scratch in Rust with a Rust→WASM browser client for universal access —
 > a single static binary with no runtime dependencies.
 
@@ -223,11 +223,9 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number_id = ""
+phone_number = ""
 access_token = ""
-verify_token = ""
-app_secret = ""
-webhook_port = 8080
+webhook_port = 8443
 
 [channels.web]
 enabled = false
@@ -249,10 +247,8 @@ Environment variables override config file values. They are intended for CI pipe
 | `openpista_WEB_TOKEN` | Web adapter auth token |
 | `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
 | `openpista_WORKSPACE` | Custom skills workspace path |
-| `WHATSAPP_ACCESS_TOKEN` | WhatsApp Business API access token |
-| `WHATSAPP_VERIFY_TOKEN` | WhatsApp webhook verification token |
-| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp Business phone number ID |
-| `WHATSAPP_APP_SECRET` | WhatsApp app secret for HMAC verification |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp access token |
+| `WHATSAPP_PHONE_NUMBER` | WhatsApp phone number |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 ---
@@ -331,13 +327,9 @@ Enable WhatsApp in `config.toml`:
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number_id = "123456789"
+# phone_number = "15551234567"
 # access_token = "EAA..."
-# verify_token = "my-verify-token"
-# app_secret = "abc123..."
-
-# Or via env vars
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER_ID=123456789 openpista start
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
 ```
 
 Enable the Web UI adapter:

@@ -276,43 +276,23 @@ fn format_whatsapp_status(config: &Config) -> String {
         if wa.enabled { "Yes" } else { "No" }
     ));
     lines.push(format!(
-        "  Phone Number ID: {}",
-        if wa.phone_number_id.is_empty() {
-            "(not set)".to_string()
-        } else {
-            wa.phone_number_id.clone()
-        }
+        "  Phone Number:    {}",
+        wa.phone_number
+            .as_deref()
+            .map_or("(not set)".to_string(), |s| s.to_string())
     ));
     lines.push(format!(
         "  Access Token:    {}",
-        if wa.access_token.is_empty() {
-            "(not set)".to_string()
-        } else {
-            mask(&wa.access_token)
-        }
-    ));
-    lines.push(format!(
-        "  Verify Token:    {}",
-        if wa.verify_token.is_empty() {
-            "(not set)".to_string()
-        } else {
-            mask(&wa.verify_token)
-        }
-    ));
-    lines.push(format!(
-        "  App Secret:      {}",
-        if wa.app_secret.is_empty() {
-            "(not set)".to_string()
-        } else {
-            mask(&wa.app_secret)
-        }
+        wa.access_token
+            .as_deref()
+            .map_or("(not set)".to_string(), mask)
     ));
     lines.push(format!("  Webhook Port:    {}", wa.webhook_port));
     lines.push("".to_string());
     if wa.is_configured() {
         lines.push("  Status: Ready (all fields configured)".to_string());
-        // Append QR code for wa.me link
-        let wa_me_url = format!("https://wa.me/{}", wa.phone_number_id);
+        let phone = wa.phone_number.as_deref().unwrap_or_default();
+        let wa_me_url = format!("https://wa.me/{phone}");
         lines.push("".to_string());
         lines.push(format!("  QR Code ({})", wa_me_url));
         lines.push("".to_string());
@@ -1823,15 +1803,11 @@ mod tests {
     fn format_whatsapp_status_configured() {
         let mut config = Config::default();
         config.channels.whatsapp.enabled = true;
-        config.channels.whatsapp.phone_number_id = "123456789".to_string();
-        config.channels.whatsapp.access_token = "EAAtoken123456".to_string();
-        config.channels.whatsapp.verify_token = "my-verify-token".to_string();
-        config.channels.whatsapp.app_secret = "abc123secret".to_string();
+        config.channels.whatsapp.phone_number = Some("123456789".to_string());
+        config.channels.whatsapp.access_token = Some("EAAtoken123456".to_string());
         let status = format_whatsapp_status(&config);
-        assert!(status.contains("123456789")); // phone ID not masked
+        assert!(status.contains("123456789")); // phone number not masked
         assert!(status.contains("EAAt****")); // access token masked
-        assert!(status.contains("my-v****")); // verify token masked
-        assert!(status.contains("abc1****")); // app secret masked
         assert!(status.contains("Ready"));
         // QR code should be present for configured WhatsApp
         assert!(status.contains("QR Code"));

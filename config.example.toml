@@ -64,11 +64,9 @@ enabled = true
 
 [channels.whatsapp]
 enabled = false
-phone_number_id = ""  # WhatsApp Business phone number ID
-access_token = ""     # Graph API access token
-verify_token = ""     # Webhook verification token
-app_secret = ""       # App secret for HMAC-SHA256 verification
-webhook_port = 8080    # Webhook listener port
+phone_number = ""    # WhatsApp phone number (e.g. 15551234567)
+access_token = ""    # Access token for the WhatsApp gateway
+webhook_port = 8443   # Webhook listener port
 
 [channels.web]
 enabled = false
