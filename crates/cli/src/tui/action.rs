@@ -167,10 +167,17 @@ pub enum Action {
     SlashCommand(String),
 
     // ── WhatsApp setup ────────────────────────────────────────
-    /// Open the WhatsApp pairing screen (starts bridge, waits for QR).
+    /// Open the WhatsApp pairing screen (checks prereqs, starts bridge, waits for QR).
     OpenWhatsAppSetup,
     /// Cancel the WhatsApp pairing and return to idle.
     WhatsAppSetupCancel,
+    /// Prerequisites check completed.
+    WhatsAppPrereqsChecked {
+        node_ok: bool,
+        bridge_installed: bool,
+    },
+    /// Bridge npm install completed.
+    WhatsAppBridgeInstalled(Result<(), String>),
     /// A QR code was received from the WhatsApp bridge.
     WhatsAppQrReceived(String),
     /// The WhatsApp bridge connected successfully.
@@ -209,5 +216,11 @@ pub enum Command {
     /// Execute multiple commands sequentially.
     Batch(Vec<Command>),
     /// Persist the WhatsApp configuration to the config file.
+    /// Spawn the WhatsApp bridge subprocess.
+    SpawnWhatsAppBridge,
+    /// Check WhatsApp bridge prerequisites.
+    CheckWhatsAppPrereqs,
+    /// Install WhatsApp bridge npm dependencies.
+    InstallWhatsAppBridge,
     SaveWhatsAppConfig(crate::config::WhatsAppConfig),
 }
