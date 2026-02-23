@@ -92,22 +92,20 @@
 
 ### WhatsApp 채널 어댑터 (WhatsApp Channel Adapter)
 
-> WhatsApp은 Telegram과 동일한 HTTP→mpsc 브릿지 패턴을 따릅니다. 어댑터는 HTTP(`axum`)를 통해 웹훅 이벤트를 수신하고, `ChannelEvent`로 변환한 후 `tokio::mpsc`를 통해 전달합니다.
+> WhatsApp은 서브프로세스 브릿지 패턴을 사용합니다: openpista가 Node.js 프로세스(Baileys)를 생성하여 WhatsApp Web에 연결합니다. stdin/stdout 위의 JSON 라인으로 통신하며, QR 코드 스캔으로 페어링합니다 — API 키 불필요.
 
-- [x] `WhatsAppAdapter` — `reqwest`를 통한 WhatsApp Business Cloud API 통합
-- [x] 수신 메시지를 위한 웹훅 HTTP 서버 (`axum` 기반): GET 검증 챌린지 + POST 메시지 핸들러
-- [x] HMAC-SHA256 웹훅 페이로드 서명 검증 (`X-Hub-Signature-256` 헤더)
-- [x] Meta Graph API를 통한 텍스트 메시지 전송 (`POST /v21.0/{phone_number_id}/messages`)
-- [x] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
-- [x] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
-- [x] 환경 변수 재정의: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
-- [x] 수신 메시지 파싱: 텍스트 (이미지, 오디오, 비디오, 문서, 위치, 연락처 — 향후 예정)
-- [x] 메시지 상태 웹훅 콜백 처리 (발송 → 수신 → 읽음)
+ [x] `WhatsAppAdapter` — Node.js Baileys 브릿지 서브프로세스를 통한 WhatsApp Web 멀티 디바이스 프로토콜
+ [x] TUI에서 QR 코드 페어링 플로우 (`/whatsapp` 명령) — API 키 불필요
+ [x] 서브프로세스 브릿지 프로토콜 (stdin/stdout 위의 JSON 라인) Rust ↔ Node.js 통신
+ [x] 세션 지속성 (`session_dir/auth/`) — 재시작 후 자동 재연결
+ [x] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
+ [x] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `enabled`, `session_dir`, `bridge_path`
+ [x] 환경 변수 재정의: `WHATSAPP_SESSION_DIR`, `WHATSAPP_BRIDGE_PATH`
+ [x] 수신 메시지 파싱: 텍스트 (이미지, 오디오, 비디오, 문서 — 향후 예정)
+ [x] `/whatsapp status` TUI 명령 — 페어링 상태 및 설정 표시
  - [ ] 미디어 메시지 다운로드 및 전달 (수신 미디어 → base64 또는 로컬 경로로 에이전트 컨텍스트에 전달)
  - [ ] 인터랙티브 메시지 지원: 응답 버튼, 목록 메시지, 빠른 답장
- - [ ] 아웃바운드 알림을 위한 메시지 템플릿 렌더링 (WhatsApp 24시간 정책에 필요한 HSM 템플릿)
- - [ ] WhatsApp Business API 등급(tier)에 따른 처리율 제한 준수 (메시지 제한, 처리량)
- - [ ] 일시적 API 장애(429, 500)에 대한 지수 백오프(exponential backoff) 재시도 로직
+ - [ ] 일시적 연결 장애에 대한 지수 백오프(exponential backoff) 재시도 로직
 - [x] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
 - [x] 응답 라우팅 통합: WhatsApp 응답 → Graph API `send_message`
  - [ ] 다중 번호 지원: 여러 번호를 가진 비즈니스 계정을 위한 구성 가능한 전화번호 ID

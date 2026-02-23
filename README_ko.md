@@ -60,7 +60,7 @@ openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 | OpenAI Responses API (SSE) | ✅ v0.1.0 |
 | Anthropic Claude 프로바이더 | ✅ v0.1.0 |
 | 웹 어댑터 (Rust→WASM + WebSocket) | ✅ v0.1.0 |
-| 왓츠앱 채널 (Business Cloud API) | ✅ v0.1.0 |
+| 왓츠앱 채널 (WhatsApp Web / QR 페어링) | ✅ v0.1.0 |
 | Discord / Slack 어댑터 | 🔜 v0.2.0 |
 
 ---
@@ -221,9 +221,8 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number = ""
-access_token = ""
-webhook_port = 8443
+session_dir = "~/.openpista/whatsapp-session"
+# bridge_path = "whatsapp-bridge/index.js"
 
 [channels.web]
 enabled = false
@@ -245,8 +244,8 @@ static_dir = "~/.openpista/web"
 | `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
 | `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
 | `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
-| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 액세스 토큰 |
-| `WHATSAPP_PHONE_NUMBER` | 왓츠앱 전화번호 |
+| `WHATSAPP_SESSION_DIR` | 왓츠앱 Web 세션 디렉토리 |
+| `WHATSAPP_BRIDGE_PATH` | 왓츠앱 브릿지 스크립트 경로 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 ---
@@ -321,13 +320,11 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 왓츠앱을 `config.toml`에서 활성화하세요 (자세한 설정 방법은 [WHATSAPP.md](./WHATSAPP.md) 참조):
-
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number = "15551234567"
-# access_token = "EAA..."
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
+# session_dir = "~/.openpista/whatsapp-session"
+WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
 ```
 
 웹 UI 어댑터를 활성화하세요:
