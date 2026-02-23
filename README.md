@@ -7,7 +7,7 @@
 
 **Languages:** English | [한국어](README_ko.md)
 
-Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
+Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md) · [WhatsApp Setup](./WHATSAPP.md)
 
 **An OS Gateway AI Agent with browser access via Rust→WASM.** Let your LLM control your machine through any messenger.
 
@@ -322,7 +322,7 @@ Enable Telegram in `config.toml` or via environment:
 TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
-Enable WhatsApp in `config.toml`:
+Enable WhatsApp in `config.toml` (see [WHATSAPP.md](./WHATSAPP.md) for full setup guide):
 
 ```bash
 # [channels.whatsapp]

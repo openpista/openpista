@@ -303,6 +303,7 @@ fn format_whatsapp_status(config: &Config) -> String {
         lines.push("  Scan with your phone to start a conversation.".to_string());
     } else {
         lines.push("  Status: Incomplete \u{2014} run /whatsapp to configure".to_string());
+        lines.push("  See WHATSAPP.md for token setup guide.".to_string());
     }
     lines.join("\n")
 }

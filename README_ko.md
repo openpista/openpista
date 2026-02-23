@@ -7,7 +7,7 @@
 
 **Languages:** [English](README.md) | 한국어
 
-Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
+Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md) · [WhatsApp 설정 가이드](./WHATSAPP.md)
 
 **Rust→WASM 브라우저 접속을 지원하는 OS 게이트웨이 AI 에이전트.** LLM이 메신저를 통해 여러분의 머신을 제어할 수 있게 합니다.
 > WebSocket 기반 에이전트 아키텍처인 [OpenClaw](https://github.com/openclaw/openclaw)에서 영감을 받아,
@@ -320,7 +320,7 @@ openpista start
 TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
-왓츠앱을 `config.toml`에서 활성화하세요:
+왓츠앱을 `config.toml`에서 활성화하세요 (자세한 설정 방법은 [WHATSAPP.md](./WHATSAPP.md) 참조):
 
 ```bash
 # [channels.whatsapp]
