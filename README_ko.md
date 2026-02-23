@@ -7,32 +7,32 @@
 
 **Languages:** [English](README.md) | 한국어
 
-**QUIC 기반 OS 게이트웨이 AI 에이전트** — LLM이 메신저를 통해 여러분의 머신을 제어할 수 있게 합니다.
+Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
+**Rust→WASM 브라우저 접속을 지원하는 OS 게이트웨이 AI 에이전트.** LLM이 메신저를 통해 여러분의 머신을 제어할 수 있게 합니다.
 > WebSocket 기반 에이전트 아키텍처인 [OpenClaw](https://github.com/openpista/openclaw)에서 영감을 받아,
-> 더 낮은 레이턴시, HOL(Head-of-Line) 블로킹 제거, 런타임 의존성 없는 단일 정적 바이너리를 위해
-> Rust와 QUIC 전송 프로토콜로 완전히 새롭게 작성되었습니다.
+> Rust와 Rust→WASM 브라우저 클라이언트로 완전히 새롭게 작성되었습니다 —
+> 런타임 의존성 없는 단일 정적 바이너리.
 
 ---
 
 ## openpista이란?
 
-openpista은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, WhatsApp)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
+openpista는 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레그램, CLI, 웹 브라우저)과 **운영체제**를 AI 에이전트 루프로 연결합니다.
 
-- 텔레그램에서 메시지를 보내면 → LLM이 무엇을 할지 결정 → bash가 실행 → 결과가 돌아옴
-- 단일 정적 바이너리, ~10 MB, 최소 메모리 사용
-- 낮은 레이턴시를 위한 QUIC 전송 (0-RTT), WebSocket 대신 사용
-- SQLite 기반의 지속적 대화 메모리
+- 텔레그램에서 메시지를 보내면: LLM이 무엇을 할지 결정하고, bash가 실행하며, 결과가 돌아옵니다
+ 단일 정적 바이너리, ~10 MB, 최소 메모리 사용
+ SQLite 기반의 지속적 대화 메모리
+- Chromium CDP를 통한 완전한 브라우저 자동화와 데스크톱 화면 캡처
 - 확장 가능한 **Skills** 시스템: 워크스페이스에 `SKILL.md`를 넣어 새로운 에이전트 기능 추가
 
 ```
-[ 채널 어댑터 ]        텔레그램 · CLI
-        │  tokio::mpsc
+[ 채널 어댑터 ]        텔레그램 · CLI (TUI) · 웹 (WASM)
+        │  tokio::mpsc  ChannelEvent
         ▼
-[ QUIC OS 게이트웨이 ]  quinn · rustls · session · router · cron
-        │  QUIC 스트림
-        ▼
-[ 에이전트 런타임 ]     LLM 루프 · ToolRegistry · SQLite 메모리
+[ OS 게이트웨이 ]      프로세스 내 라우터 · 크론 스케줄러
+        │
+[ 에이전트 런타임 ]     ReAct 루프 · OpenAI / Anthropic / Responses API · SQLite 메모리
         │  tool_call
         ▼
 [ OS 도구 ]            system.run (bash) · screen* · input control*
@@ -49,8 +49,6 @@ openpista은 Rust로 작성된 경량 데몬으로, **메시징 채널**(텔레�
 |---|---|
 | Bash 도구 (`system.run`) | ✅ v0.1.0 |
 | 텔레그램 채널 | ✅ v0.1.0 |
-| 대화형 CLI / REPL | ✅ v0.1.0 |
-| QUIC 게이트웨이 (자체 서명 TLS) | ✅ v0.1.0 |
 | 크론 스케줄러 | ✅ v0.1.0 |
 | SQLite 대화 메모리 | ✅ v0.1.0 |
 | Skills (SKILL.md 로더) | ✅ v0.1.0 |
@@ -191,8 +189,90 @@ TUI 명령:
 ### 모델 카탈로그 (OpenCode)
 
 ```bash
-# 코딩 추천 모델 목록
-openpista models list
+# API 키 로그인 (자격증명 저장소에 저장)
+openpista auth login --non-interactive --provider together --api-key "$TOGETHER_API_KEY"
+# 커스텀 엔드포인트를 사용하는 프로바이더
+openpista auth login --non-interactive \
+  --provider azure-openai \
+  --endpoint "https://your-resource.openai.azure.com" \
+  --api-key "$AZURE_OPENAI_API_KEY"
+```
+
+### 자격증명 해석 우선순위 (Credential Resolution Priority)
+
+openpista는 다음 순서로 자격증명을 해석합니다 (높은 우선순위 순):
+
+| 우선순위 | 출처 | 설명 |
+|---|---|---|
+| 1 | 설정 파일 / `openpista_API_KEY` | `config.toml`의 `api_key` 또는 환경 변수 오버라이드 |
+| 2 | 자격증명 저장소 | `openpista auth login`으로 저장된 토큰 (`~/.openpista/credentials.json`) |
+| 3 | 프로바이더 환경 변수 | 예: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TOGETHER_API_KEY` |
+| 4 | 레거시 폴백 | `OPENAI_API_KEY` (다른 출처가 없을 때 사용) |
+
+대부분의 사용자는 **`openpista auth login` (우선순위 2)만으로 충분합니다.** 환경 변수와 설정 파일 키는 CI 파이프라인, Docker 컨테이너, 비대화형 스크립트용으로 제공됩니다.
+
+---
+
+## 설정 (Configuration)
+
+설정 파일 로딩 순서: `--config` 경로 → `./config.toml` → `~/.openpista/config.toml` → 기본값.
+
+```bash
+cp config.example.toml config.toml
+```
+```toml
+[agent]
+provider = "openai"
+model = "gpt-4o"
+max_tool_rounds = 10
+# api_key = ""       # 선택적 — `openpista auth login` 사용을 권장
+[channels.telegram]
+enabled = false
+token = ""
+[channels.cli]
+enabled = true
+url = "~/.openpista/memory.db"
+workspace = "~/.openpista/workspace"
+```
+
+### 환경 변수 오버라이드 (CI / 스크립트용)
+
+환경 변수는 설정 파일 값을 덮어씁니다. CI 파이프라인, Docker, 비대화형 환경용이며 — 기본 설정 방법이 아닙니다.
+| 변수 | 설명 |
+|---|---|
+| `openpista_API_KEY` | API 키 오버라이드 (최상위 우선순위) |
+| `OPENAI_API_KEY` | OpenAI API 키 |
+| `ANTHROPIC_API_KEY` | Anthropic API 키 |
+| `openpista_MODEL` | 모델 재정의 |
+| `openpista_OAUTH_CLIENT_ID` | 커스텀 OAuth PKCE 클라이언트 ID |
+| `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
+| `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
+| `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
+| `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
+| `OPENCODE_API_KEY` | OpenCode Zen API 키 |
+---
+
+## 사용법 (Usage)
+
+### TUI (기본값)
+
+```bash
+# TUI 실행
+openpista
+openpista -s SESSION_ID
+openpista tui -s SESSION_ID
+```
+
+### 단일 명령 실행
+
+```bash
+openpista run -e "홈 디렉토리의 파일을 나열해줘"
+```
+
+### 모델 카탈로그
+
+```bash
+openpista model list
 ```
 
 TUI 명령:
@@ -209,7 +289,20 @@ r: 원격 카탈로그 강제 동기화
 Esc: (검색 모드) 검색 종료, (일반 모드) 브라우저 종료
 ```
 
-### 데몬 모드 (텔레그램 + CLI + QUIC 게이트웨이)
+### 세션 관리
+
+TUI 명령:
+
+```txt
+/session              - 세션 브라우저 열기
+/session new          - 새 세션 시작
+/session load ID      - ID로 세션 로드
+/session delete ID    - ID로 세션 삭제
+```
+
+`Tab`을 눌러 최근 세션 목록을 보여주는 사이드바를 토글합니다. `j`/`k` 또는 화살표 키로 이동하고, `Enter`로 열고, `d`/`Delete`로 삭제를 요청하고, `Esc`로 포커스를 해제합니다.
+
+### 데몬 모드 (텔레그램 + CLI + 웹 UI)
 
 ```bash
 openpista_API_KEY=sk-... \
@@ -218,11 +311,9 @@ openpista start
 ```
 
 데몬은:
-- 원격 에이전트 연결을 위해 QUIC 포트 `4433`에서 수신 대기
-- 활성화된 모든 채널 어댑터 시작
-- `~/.openpista/openpista.pid`에 PID 파일 저장
-- 정상 종료를 위한 `SIGTERM` / `Ctrl-C` 처리
-
+ 활성화된 모든 채널 어댑터 시작
+ `~/.openpista/openpista.pid`에 PID 파일 저장
+ 정상 종료를 위한 `SIGTERM` / `Ctrl-C` 처리
 ### Skills
 
 워크스페이스에 `SKILL.md`를 배치하여 에이전트 기능을 확장하세요:
@@ -245,12 +336,13 @@ openpista start
 openpista/
 ├── crates/
 │   ├── proto/      # 공유 타입, 에러 (AgentMessage, ToolCall, …)
-│   ├── gateway/    # QUIC 서버, 세션 라우터, 크론 스케줄러
-│   ├── agent/      # ReAct 루프, LLM 프로바이더, SQLite 메모리
-│   ├── tools/      # Tool 트레이트 + BashTool (system.run)
-│   ├── channels/   # ChannelAdapter, CliAdapter, TelegramAdapter
-│   ├── skills/     # SKILL.md 로더, 서브프로세스 실행기
-│   └── cli/        # 바이너리 진입점, clap, config, daemon
+│   ├── gateway/    # 프로세스 내 게이트웨이, 크론 스케줄러
+│   ├── agent/      # ReAct 루프, OpenAI / Anthropic / Responses API, SQLite 메모리
+│   ├── tools/      # Tool 트레이트 — BashTool, BrowserTool, ScreenTool, ContainerTool
+│   ├── channels/   # CliAdapter, TelegramAdapter, WebAdapter
+│   ├── skills/     # SKILL.md 로더, 서브프로세스 + WASM 실행기
+│   ├── web/        # Rust→WASM 브라우저 클라이언트 (wasm-bindgen, H5 채팅 UI)
+│   └── cli/        # 바이너리 진입점, clap, config, TUI (ratatui + crossterm)
 ├── migrations/     # SQLite 스키마 마이그레이션
 ├── config.example.toml
 └── README.md
