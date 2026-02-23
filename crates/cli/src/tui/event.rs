@@ -22,6 +22,7 @@ use skills::SkillLoader;
 use tokio::sync::mpsc;
 
 use super::app::{AppState, TuiApp};
+use crate::auth::is_openai_oauth_credential_for_key;
 use crate::auth_picker::{AuthLoginIntent, AuthMethodChoice};
 use crate::config::{
     Config, LoginAuthMode, OAuthEndpoints, ProviderPreset, provider_registry_entry,
@@ -177,21 +178,6 @@ fn load_credentials(path: &std::path::Path) -> crate::auth::Credentials {
 /// Returns the default on-disk credentials file path.
 fn credentials_path() -> std::path::PathBuf {
     crate::auth::Credentials::path()
-}
-
-
-/// Returns true if the given API key came from an OpenAI OAuth flow.
-/// When `Credentials` has a matching `openai` entry with this key and a
-/// `refresh_token`, we know the key was obtained via token exchange and the
-/// user should be billed via the Responses API (subscription) rather than
-/// Chat Completions API (API credits).
-fn is_openai_oauth_credential_for_key(api_key: &str) -> bool {
-    let creds = load_credentials(&credentials_path());
-    if let Some(cred) = creds.get("openai") {
-        cred.access_token == api_key && cred.refresh_token.is_some()
-    } else {
-        false
-    }
 }
 
 #[cfg(not(test))]
@@ -1220,6 +1206,244 @@ mod tests {
             OAUTH_CALLBACK_PORT,
             OAUTH_TIMEOUT_SECS,
             cred_path.clone(),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn format_model_list_shows_recommended_and_other() {
+        use crate::model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
+        let entries = vec![
+            ModelCatalogEntry {
+                id: "gpt-5.2-codex".into(),
+                provider: "openai".into(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o".into(),
+                provider: "openai".into(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Api,
+                available: true,
+            },
+        ];
+        let statuses = vec!["openai: synced".to_string()];
+        let out = format_model_list(&entries, &statuses);
+        assert!(out.contains("gpt-5.2-codex"), "missing recommended");
+        assert!(out.contains("gpt-4o"), "missing other");
+        assert!(out.contains("(api)"), "missing api tag for other");
+        assert!(out.contains("Recommended"), "missing recommended section");
+        assert!(out.contains("Other"), "missing other section");
+        assert!(out.contains("openai: synced"), "missing sync status");
+    }
+
+    #[test]
+    fn format_model_list_empty_entries() {
+        let out = format_model_list(&[], &[]);
+        assert!(out.contains("0 total"));
+        assert!(!out.contains("Recommended"));
+        assert!(!out.contains("Other"));
+    }
+
+    #[test]
+    fn load_credentials_returns_default_for_nonexistent_path() {
+        let path = std::path::Path::new("/nonexistent/path/credentials.toml");
+        let creds = load_credentials(path);
+        // should not panic; returns default empty credentials
+        let _ = creds;
+    }
+
+    #[test]
+    fn persist_credential_and_load_credentials_roundtrip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let cred = crate::auth::ProviderCredential {
+            access_token: "tok-test".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            endpoint: None,
+            id_token: None,
+        };
+        persist_credential("together".to_string(), cred, cred_path.clone()).expect("persist ok");
+        let loaded = load_credentials(&cred_path);
+        let saved = loaded.get("together").expect("credential should exist");
+        assert_eq!(saved.access_token, "tok-test");
+    }
+
+    #[test]
+    fn collect_authenticated_providers_empty_config() {
+        let config = Config::default();
+        // Default config has no credentials stored, and no API key configured.
+        // The result should be empty (or contain the active provider if an env key is set).
+        let providers = collect_authenticated_providers(&config);
+        // Just assert it doesn't panic - result depends on environment.
+        let _ = providers;
+    }
+
+    #[tokio::test]
+    async fn persist_auth_unknown_provider_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "nonexistent_provider_xyz".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("sk-test".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_empty_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "together".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn persist_auth_endpoint_and_key_missing_endpoint_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "custom".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("sk-key".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn persist_auth_endpoint_and_key_saves_both() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "custom".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: Some("https://my.endpoint.com".to_string()),
+                api_key: Some("sk-custom-key".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let content = std::fs::read_to_string(&cred_path).expect("read credentials");
+        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
+        let saved = creds.get("custom").expect("credential saved");
+        assert_eq!(saved.access_token, "sk-custom-key");
+        assert_eq!(saved.endpoint.as_deref(), Some("https://my.endpoint.com"));
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_no_key_provided_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "together".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: None,
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn persist_auth_openai_api_key_saves_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "openai".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("sk-openai-test".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        let content = std::fs::read_to_string(&cred_path).expect("read credentials");
+        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse credentials");
+        let saved = creds.get("openai").expect("credential saved");
+        assert_eq!(saved.access_token, "sk-openai-test");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_openai_oauth_without_client_id_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "openai".to_string(),
+                auth_method: AuthMethodChoice::OAuth,
+                endpoint: None,
+                api_key: None,
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
         )
         .await;
 

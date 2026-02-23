@@ -734,7 +734,10 @@ impl Config {
             debug!(source = "credential_store", provider = %self.agent.provider.name(), "API key resolved");
             // Warn about potentially stale credential formats
             let token = &cred.access_token;
-            if self.agent.provider == ProviderPreset::OpenAi && token.starts_with("eyJ") {
+            if self.agent.provider == ProviderPreset::OpenAi
+                && token.starts_with("eyJ")
+                && cred.id_token.is_none()
+            {
                 warn!(
                     provider = "openai",
                     "Stored credential looks like a raw OAuth JWT — consider re-login with `openpista auth login`"
@@ -975,15 +978,6 @@ impl Config {
         }
 
         None
-    }
-
-    /// Test stub for [`resolve_credential_for_refreshed`].
-    #[cfg(test)]
-    pub async fn resolve_credential_for_refreshed(
-        &self,
-        provider_name: &str,
-    ) -> Option<ResolvedCredential> {
-        self.resolve_credential_for(provider_name)
     }
 }
 
@@ -1320,7 +1314,9 @@ api_key = "tg-key"
             .oauth_endpoints()
             .expect("anthropic oauth endpoints");
         assert!(ep.auth_url.contains("claude.ai"));
-        assert!(ep.token_url.contains("platform.claude.com") || ep.token_url.contains("anthropic.com"));
+        assert!(
+            ep.token_url.contains("platform.claude.com") || ep.token_url.contains("anthropic.com")
+        );
         assert!(ep.default_client_id.is_some());
         assert!(ep.default_callback_port.is_none());
         assert!(!ep.redirect_path.is_empty());

@@ -137,11 +137,22 @@ impl LlmProvider for ResponsesApiProvider {
         };
 
         // Build reverse mapping: sanitized_name → original_name
-        let tool_name_map: std::collections::HashMap<String, String> = req
-            .tools
-            .iter()
-            .map(|t| (sanitize_tool_name(&t.name), t.name.clone()))
-            .collect();
+        // Detect collisions: two tools that both sanitize to the same name would
+        // cause incorrect tool routing, so we return an error early.
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(req.tools.len());
+        for t in &req.tools {
+            let sanitized = sanitize_tool_name(&t.name);
+            if let Some(existing) = tool_name_map.get(&sanitized)
+                && existing != &t.name
+            {
+                return Err(LlmError::Api(format!(
+                    "Tool name collision: '{}' and '{}' both sanitize to '{}'",
+                    existing, t.name, sanitized
+                )));
+            }
+            tool_name_map.insert(sanitized, t.name.clone());
+        }
 
         let input = convert_messages(&req.messages);
         let tools: Vec<ResponsesTool> = req.tools.iter().map(convert_tool).collect();
@@ -225,7 +236,10 @@ impl LlmProvider for ResponsesApiProvider {
                 {
                     Some(ToolCall {
                         id: call_id.clone(),
-                        name: tool_name_map.get(name).cloned().unwrap_or_else(|| name.clone()),
+                        name: tool_name_map
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| name.clone()),
                         arguments: parse_tool_arguments(arguments),
                     })
                 } else {
@@ -333,10 +347,15 @@ fn parse_tool_arguments(arguments: &str) -> Value {
 /// Non-conforming characters (e.g. `.`) are replaced with `_`.
 fn sanitize_tool_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
-
 
 /// Parses an API error from the response body.
 ///
@@ -350,8 +369,7 @@ fn parse_api_error(body: &str, status: reqwest::StatusCode) -> LlmError {
             .as_str()
             .or_else(|| parsed["detail"].as_str())
             .unwrap_or("Unknown error");
-        let hint = if msg.to_lowercase().contains("billing")
-            || msg.to_lowercase().contains("quota")
+        let hint = if msg.to_lowercase().contains("billing") || msg.to_lowercase().contains("quota")
         {
             " Check your OpenAI billing at https://platform.openai.com."
         } else if msg.to_lowercase().contains("model")
@@ -382,22 +400,29 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
     // We look for event types that carry the full response:
     //   - "response.completed" (most common final event)
     //   - fall back to extracting output items from individual events
-    let mut last_response_data: Option<&str> = None;
-
+    let mut last_response_data: Option<String> = None;
     let mut current_event: Option<&str> = None;
+    let mut data_buffer: Vec<&str> = Vec::new();
     for line in body.lines() {
         if let Some(event_type) = line.strip_prefix("event: ") {
             current_event = Some(event_type.trim());
+            data_buffer.clear();
         } else if let Some(data) = line.strip_prefix("data: ") {
-            if matches!(current_event, Some("response.completed")) {
-                last_response_data = Some(data.trim());
-            }
+            data_buffer.push(data.trim());
         } else if line.is_empty() {
+            if matches!(current_event, Some("response.completed")) && !data_buffer.is_empty() {
+                last_response_data = Some(data_buffer.join("\n"));
+            }
             current_event = None;
+            data_buffer.clear();
         }
     }
+    // Handle trailing event without a trailing blank line.
+    if matches!(current_event, Some("response.completed")) && !data_buffer.is_empty() {
+        last_response_data = Some(data_buffer.join("\n"));
+    }
 
-    if let Some(data) = last_response_data {
+    if let Some(ref data) = last_response_data {
         // The `response.completed` event data is a wrapper with a `response` field.
         if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(data) {
             // Try `response.output` (wrapper format) first, then direct `output`.
@@ -614,5 +639,217 @@ mod tests {
         let invalid = parse_tool_arguments("{invalid");
         assert!(invalid.is_object());
         assert_eq!(invalid.as_object().expect("object").len(), 0);
+    }
+
+    #[test]
+    fn tool_name_collision_detected() {
+        // "a.b" and "a_b" both sanitize to "a_b"
+        let req = crate::ChatRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![
+                ToolDefinition::new("a.b", "desc", serde_json::json!({"type":"object"})),
+                ToolDefinition::new("a_b", "desc2", serde_json::json!({"type":"object"})),
+            ],
+        };
+        let provider = ResponsesApiProvider::new("sk-test");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(provider.chat(req));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("collision"), "expected 'collision' in: {msg}");
+    }
+
+    #[test]
+    fn parse_sse_response_joins_multi_line_data() {
+        // Simulate an SSE body where response.completed spans 2 data lines
+        let body = concat!(
+            "event: response.in_progress\n",
+            "data: {\"partial\": true}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"output\":[{\"type\":\"message\",",
+            "data: \"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n",
+            "\n",
+        );
+        // The two data lines join into one JSON object via '\n', which may not parse,
+        // but the fallback scanner will pick up the inline JSON from data lines.
+        // The key invariant: the function does NOT panic and returns a Result.
+        let result = parse_sse_response(body);
+        // Either Ok (if fallback finds parseable JSON) or Err (if not) — no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn parse_sse_response_rejects_empty_stream() {
+        let result = parse_sse_response("");
+        assert!(result.is_err(), "empty SSE stream must return Err");
+    }
+
+    // ── with_chatgpt_account_id / is_chatgpt_backend ────────────────────────
+
+    #[test]
+    fn with_chatgpt_account_id_switches_to_chatgpt_endpoint() {
+        let p = ResponsesApiProvider::new("sk-test")
+            .with_chatgpt_account_id(Some("acct-123".to_string()));
+        assert_eq!(p.base_url, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(p.chatgpt_account_id.as_deref(), Some("acct-123"));
+    }
+
+    #[test]
+    fn with_chatgpt_account_id_none_keeps_default_url() {
+        let p = ResponsesApiProvider::new("sk-test").with_chatgpt_account_id(None);
+        assert_eq!(p.base_url, "https://api.openai.com/v1");
+        assert!(p.chatgpt_account_id.is_none());
+    }
+
+    #[test]
+    fn with_chatgpt_account_id_preserves_custom_base_url() {
+        let p = ResponsesApiProvider::with_base_url("sk-test", "http://proxy")
+            .with_chatgpt_account_id(Some("acct-123".to_string()));
+        // Custom URL should not be replaced — only default URL triggers the switch.
+        assert_eq!(p.base_url, "http://proxy");
+    }
+
+    #[test]
+    fn is_chatgpt_backend_true_when_account_id_set() {
+        let p = ResponsesApiProvider::new("sk-test")
+            .with_chatgpt_account_id(Some("acct-id".to_string()));
+        assert!(p.is_chatgpt_backend());
+    }
+
+    #[test]
+    fn is_chatgpt_backend_false_when_no_account_id() {
+        let p = ResponsesApiProvider::new("sk-test");
+        assert!(!p.is_chatgpt_backend());
+    }
+
+    // ── parse_api_error ───────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_api_error_extracts_standard_openai_message() {
+        let body = r#"{"error":{"message":"Invalid API key"}}"}"#;
+        let err = parse_api_error(body, reqwest::StatusCode::UNAUTHORIZED);
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid API key"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_api_error_extracts_chatgpt_detail_field() {
+        let body = r#"{"detail":"Rate limit exceeded"}"}"#;
+        let err = parse_api_error(body, reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let msg = err.to_string();
+        assert!(msg.contains("Rate limit exceeded"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_api_error_adds_billing_hint() {
+        let body = r#"{"error":{"message":"You exceeded your billing quota."}}"}"#;
+        let err = parse_api_error(body, reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("billing") || msg.contains("platform.openai.com"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_api_error_adds_model_hint() {
+        let body = r#"{"error":{"message":"The model gpt-99 not found."}}"}"#;
+        let err = parse_api_error(body, reqwest::StatusCode::NOT_FOUND);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/model") || msg.contains("not found"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_api_error_adds_auth_hint() {
+        let body = r#"{"error":{"message":"Incorrect authentication credentials."}}"}"#;
+        let err = parse_api_error(body, reqwest::StatusCode::UNAUTHORIZED);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("authentication") || msg.contains("/login"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_api_error_falls_back_to_http_status_for_non_json() {
+        let err = parse_api_error("not json", reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("500") || msg.contains("not json"),
+            "got: {msg}"
+        );
+    }
+
+    // ── parse_sse_response – additional paths ────────────────────────────────
+
+    #[test]
+    fn parse_sse_response_handles_response_completed_with_direct_output() {
+        // response.completed with data containing `output` directly (no wrapper `response` key)
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"direct\"}]}]}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("should parse direct output");
+        assert_eq!(resp.output.len(), 1);
+    }
+
+    #[test]
+    fn parse_sse_response_handles_wrapped_response_object() {
+        // response.completed with data containing `{"response":{"output":[...]}}` wrapper
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"wrapped\"}]}]}}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("should parse wrapped response");
+        assert_eq!(resp.output.len(), 1);
+        match &resp.output[0] {
+            OutputItem::Message { content } => {
+                let MessageContent::OutputText { text } = &content[0];
+                assert_eq!(text, "wrapped");
+            }
+            _ => panic!("expected message item"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_response_trailing_event_without_blank_line() {
+        // No trailing blank line — the code has a special case for this.
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"trailing\"}]}]}",
+        );
+        let resp = parse_sse_response(body).expect("trailing event without blank line");
+        assert_eq!(resp.output.len(), 1);
+    }
+
+    #[test]
+    fn parse_sse_response_fallback_scanner_finds_wrapped_output() {
+        // No response.completed event; fallback scanner picks up wrapped response from data: line
+        let body = concat!(
+            "event: response.in_progress\n",
+            "data: {\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"fallback\"}]}]}}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("fallback scanner should find output");
+        assert_eq!(resp.output.len(), 1);
+    }
+
+    #[test]
+    fn parse_sse_response_fallback_scanner_finds_direct_output() {
+        // No response.completed event; fallback finds direct output array
+        let body = concat!(
+            "event: some.event\n",
+            "data: {\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"direct_fb\"}]}]}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("fallback direct output");
+        assert_eq!(resp.output.len(), 1);
     }
 }

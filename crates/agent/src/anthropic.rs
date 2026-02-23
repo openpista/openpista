@@ -118,11 +118,22 @@ impl LlmProvider for AnthropicProvider {
         let messages = convert_messages(&req.messages)?;
         let tools: Vec<AnthropicTool> = req.tools.iter().map(convert_tool).collect();
         // Build reverse mapping: sanitized_name → original_name
-        let tool_name_map: std::collections::HashMap<String, String> = req
-            .tools
-            .iter()
-            .map(|t| (sanitize_tool_name(&t.name), t.name.clone()))
-            .collect();
+        // Detect collisions: two tools that both sanitize to the same name would
+        // cause incorrect tool routing, so we return an error early.
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(req.tools.len());
+        for t in &req.tools {
+            let sanitized = sanitize_tool_name(&t.name);
+            if let Some(existing) = tool_name_map.get(&sanitized)
+                && existing != &t.name
+            {
+                return Err(LlmError::Api(format!(
+                    "Tool name collision: '{}' and '{}' both sanitize to '{}'",
+                    existing, t.name, sanitized
+                )));
+            }
+            tool_name_map.insert(sanitized, t.name.clone());
+        }
 
         let anthropic_req = AnthropicRequest {
             model: req.model.clone(),
@@ -343,7 +354,13 @@ fn convert_tool(t: &ToolDefinition) -> AnthropicTool {
 /// Non-conforming characters (e.g. dots) are replaced with underscores.
 fn sanitize_tool_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -616,5 +633,24 @@ mod tests {
         let t = convert_tool(&def);
         assert_eq!(t.name, "system_run");
         assert_eq!(t.description, "Run a shell command");
+    }
+
+    #[test]
+    fn tool_name_collision_detected() {
+        // "a.b" and "a_b" both sanitize to "a_b"
+        let req = crate::ChatRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![
+                ToolDefinition::new("a.b", "desc", serde_json::json!({"type":"object"})),
+                ToolDefinition::new("a_b", "desc2", serde_json::json!({"type":"object"})),
+            ],
+        };
+        let provider = AnthropicProvider::new("sk-ant-test");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(provider.chat(req));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("collision"), "expected 'collision' in: {msg}");
     }
 }

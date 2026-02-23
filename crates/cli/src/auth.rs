@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(not(test))]
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+#[cfg(not(test))]
+use tracing::warn;
+use tracing::{debug, trace};
 
 // ── Credential types ──────────────────────────────────────────────────────────
 
@@ -361,7 +363,11 @@ async fn exchange_code(
 /// This is an additional step required after the standard PKCE flow for OpenAI:
 /// the OAuth `access_token` lacks API permissions; only the exchanged key works.
 #[cfg(not(test))]
-async fn exchange_id_token_for_api_key(token_url: &str, id_token: &str, client_id: &str) -> anyhow::Result<String> {
+async fn exchange_id_token_for_api_key(
+    token_url: &str,
+    id_token: &str,
+    client_id: &str,
+) -> anyhow::Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -391,23 +397,26 @@ async fn exchange_id_token_for_api_key(token_url: &str, id_token: &str, client_i
     let status = response.status();
     debug!(status = %status.as_u16(), "id_token → API key exchange response");
 
-    let body = response.text().await.context("failed to read exchange response body")?;
+    let body = response
+        .text()
+        .await
+        .context("failed to read exchange response body")?;
 
     if !status.is_success() {
+        let safe_msg = sanitize_error_body(&body);
         debug!(
             status = %status.as_u16(),
-            body = %body.chars().take(500).collect::<String>(),
-            "id_token → API key exchange skipped (expected for personal ChatGPT Pro accounts)"
+            "id_token \u{2192} API key exchange skipped (expected for personal ChatGPT Pro accounts)"
         );
-        anyhow::bail!("id_token exchange failed: HTTP {status}: {}", body.chars().take(500).collect::<String>());
+        anyhow::bail!("id_token exchange failed: HTTP {status}: {safe_msg}");
     }
     #[derive(Deserialize)]
     struct ApiKeyResponse {
         access_token: String,
     }
 
-    let result: ApiKeyResponse = serde_json::from_str(&body)
-        .context("failed to parse id_token exchange response")?;
+    let result: ApiKeyResponse =
+        serde_json::from_str(&body).context("failed to parse id_token exchange response")?;
     Ok(result.access_token)
 }
 
@@ -633,7 +642,9 @@ pub fn start_code_display_flow(
     let code_verifier = generate_code_verifier();
     let code_challenge = compute_code_challenge(&code_verifier);
     let state = generate_state();
-    let redirect_base = endpoints.redirect_base.unwrap_or_else(|| auth_url_origin(endpoints.auth_url));
+    let redirect_base = endpoints
+        .redirect_base
+        .unwrap_or_else(|| auth_url_origin(endpoints.auth_url));
     let redirect_uri = format!("{}{}", redirect_base, endpoints.redirect_path);
 
     let auth_url = format!(
@@ -672,7 +683,9 @@ pub fn start_code_display_flow(
         state: "test_state".to_string(),
         redirect_uri: format!(
             "{}{}",
-            endpoints.redirect_base.unwrap_or_else(|| auth_url_origin(endpoints.auth_url)),
+            endpoints
+                .redirect_base
+                .unwrap_or_else(|| auth_url_origin(endpoints.auth_url)),
             endpoints.redirect_path
         ),
         token_url: endpoints.token_url.to_string(),
@@ -794,6 +807,37 @@ pub async fn read_code_from_stdin() -> anyhow::Result<String> {
 #[cfg(test)]
 pub async fn read_code_from_stdin() -> anyhow::Result<String> {
     anyhow::bail!("read_code_from_stdin not available in tests")
+}
+
+/// Extracts a short, non-sensitive error description from a response body.
+///
+/// Tries to parse a JSON `{"error": "..."}` or `{"message": "..."}` field; falls back to a
+/// redacted placeholder so raw tokens are never leaked in logs or error messages.
+fn sanitize_error_body(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let msg = v["error"]["message"]
+            .as_str()
+            .or_else(|| v["error"].as_str())
+            .or_else(|| v["message"].as_str());
+        if let Some(m) = msg {
+            return m.chars().take(120).collect();
+        }
+    }
+    "<redacted response>".to_string()
+}
+
+/// Returns `true` if `api_key` was obtained via an OpenAI OAuth flow.
+///
+/// A credential that has a `refresh_token` was issued through token exchange (not a
+/// manually-entered API key), so the Responses API (subscription billing) should be
+/// used instead of Chat Completions.
+pub fn is_openai_oauth_credential_for_key(api_key: &str) -> bool {
+    let creds = Credentials::load();
+    if let Some(cred) = creds.get("openai") {
+        cred.access_token == api_key && cred.refresh_token.is_some()
+    } else {
+        false
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1005,7 +1049,9 @@ mod tests {
 
     #[test]
     fn extract_chatgpt_account_id_from_valid_jwt() {
-        let jwt = fake_jwt(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_123abc"},"sub":"user"}"#);
+        let jwt = fake_jwt(
+            r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_123abc"},"sub":"user"}"#,
+        );
         assert_eq!(
             extract_chatgpt_account_id(&jwt),
             Some("acct_123abc".to_string())
@@ -1028,5 +1074,37 @@ mod tests {
     fn extract_chatgpt_account_id_returns_none_when_nested_key_missing() {
         let jwt = fake_jwt(r#"{"https://api.openai.com/auth":{"organization_id":"org_xyz"}}"#);
         assert_eq!(extract_chatgpt_account_id(&jwt), None);
+    }
+
+    #[test]
+    fn sanitize_error_body_extracts_nested_message() {
+        let body = r#"{"error":{"message":"quota exceeded","type":"rate_limit"}}"#;
+        assert_eq!(sanitize_error_body(body), "quota exceeded");
+    }
+
+    #[test]
+    fn sanitize_error_body_extracts_flat_error() {
+        let body = r#"{"error":"rate limit hit"}"#;
+        assert_eq!(sanitize_error_body(body), "rate limit hit");
+    }
+
+    #[test]
+    fn sanitize_error_body_extracts_message_field() {
+        let body = r#"{"message":"bad request"}"#;
+        assert_eq!(sanitize_error_body(body), "bad request");
+    }
+
+    #[test]
+    fn sanitize_error_body_redacts_unknown_json() {
+        let body = r#"{"token":"eyJhbGciOiJSUzI1NiJ9.secret","status":403}"#;
+        assert_eq!(sanitize_error_body(body), "<redacted response>");
+    }
+
+    #[test]
+    fn sanitize_error_body_redacts_non_json() {
+        assert_eq!(
+            sanitize_error_body("raw body with token"),
+            "<redacted response>"
+        );
     }
 }
