@@ -182,6 +182,14 @@ pub enum Action {
     WhatsAppQrReceived(String),
     /// The WhatsApp bridge connected successfully.
     WhatsAppConnected { phone: String, name: String },
+    /// Complete the wizard and persist the configuration.
+    WhatsAppSetupComplete,
+    /// Forward a raw key event to handle_key for character input/deletion.
+    WhatsAppSetupKey(crossterm::event::KeyEvent),
+    /// Advance to the next wizard step.
+    WhatsAppSetupNext,
+    /// Go back to the previous wizard step.
+    WhatsAppSetupBack,
     // ── QR code display ─────────────────────────────────────
     /// Open the QR code overlay showing the Web UI URL.
     OpenQrCode { url: String, qr_lines: Vec<String> },
@@ -216,11 +224,5 @@ pub enum Command {
     /// Execute multiple commands sequentially.
     Batch(Vec<Command>),
     /// Persist the WhatsApp configuration to the config file.
-    /// Spawn the WhatsApp bridge subprocess.
-    SpawnWhatsAppBridge,
-    /// Check WhatsApp bridge prerequisites.
-    CheckWhatsAppPrereqs,
-    /// Install WhatsApp bridge npm dependencies.
-    InstallWhatsAppBridge,
     SaveWhatsAppConfig(crate::config::WhatsAppConfig),
 }

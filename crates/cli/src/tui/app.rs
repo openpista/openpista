@@ -1182,6 +1182,7 @@ impl TuiApp {
             return;
         }
 
+
         // ── ConfirmDelete state ──────────────────────────────
         if let AppState::ConfirmDelete { session_id, .. } = &self.state {
             match key.code {
@@ -2492,16 +2493,19 @@ impl TuiApp {
                         webhook_port: webhook_port.parse().unwrap_or(8080),
                     };
                     self.state = AppState::Idle;
-                    self.push_assistant(
+                    let wa_me_url = format!("https://wa.me/{}", wa_config.phone_number_id);
+                    let mut msg =
                         "WhatsApp configuration saved! Restart openpista to apply changes."
-                            .to_string(),
-                    );
+                            .to_string();
+                    if let Some(qr) = super::event::render_qr_text(&wa_me_url) {
+                        msg.push_str("\n\n");
+                        msg.push_str(&format!("  QR Code ({wa_me_url})\n\n"));
+                        msg.push_str(&qr);
+                        msg.push_str("\n\n  Scan with your phone to start a conversation.");
+                    }
+                    self.push_assistant(msg);
                     return Command::SaveWhatsAppConfig(wa_config);
                 }
-                Command::None
-            }
-            Action::WhatsAppSetupKey(key) => {
-                self.handle_key(key);
                 Command::None
             }
             Action::OpenQrCode { url, qr_lines } => {
@@ -2510,6 +2514,26 @@ impl TuiApp {
             }
             Action::CloseQrCode => {
                 self.state = AppState::Idle;
+                Command::None
+            }
+            Action::WhatsAppSetupKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
+            Action::WhatsAppPrereqsChecked { .. } => Command::None,
+            Action::WhatsAppBridgeInstalled(_) => Command::None,
+            Action::WhatsAppQrReceived(url) => {
+                match generate_qr_lines(&url) {
+                    Ok(qr_lines) => {
+                        self.state = AppState::QrCodeDisplay { url, qr_lines };
+                    }
+                    Err(_) => {}
+                }
+                Command::None
+            }
+            Action::WhatsAppConnected { phone, name: _ } => {
+                self.state = AppState::Idle;
+                self.push_assistant(format!("WhatsApp connected: {phone}"));
                 Command::None
             }
         }

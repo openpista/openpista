@@ -8,7 +8,6 @@ members = [
     "crates/channels",
     "crates/skills",
     "crates/cli",
-    "crates/web",
 ]
 exclude = [
     "skills/hello-wasm",
@@ -79,7 +78,6 @@ chromiumoxide = "0.8"
 bollard = "0.19"
 wasmtime = "40.0.4"
 wasmtime-wasi = "40.0.4"
-sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 tar = "0.4"

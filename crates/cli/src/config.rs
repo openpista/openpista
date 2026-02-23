@@ -641,7 +641,6 @@ pub struct WhatsAppConfig {
 
 impl WhatsAppConfig {
     /// Returns `true` when all required fields are non-empty.
-    #[allow(dead_code)]
     pub fn is_configured(&self) -> bool {
         self.enabled
             && !self.phone_number_id.is_empty()
@@ -810,17 +809,6 @@ impl Config {
             "Config loaded"
         );
         Ok(config)
-    }
-
-    /// Persist the current configuration to `~/.openpista/config.toml`.
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home).join(".openpista").join("config.toml");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&path, content)
     }
 
     /// Resolves the API key to use for the configured provider.
@@ -1135,7 +1123,6 @@ impl Config {
     ///
     /// Path resolution follows the same rule as `save_web_section`:
     /// prefer `./config.toml` when present, otherwise `~/.openpista/config.toml`.
-    #[cfg(not(test))]
     pub fn save(&self) -> Result<(), std::io::Error> {
         let config_path = {
             let cwd = std::env::current_dir().ok().map(|d| d.join("config.toml"));
