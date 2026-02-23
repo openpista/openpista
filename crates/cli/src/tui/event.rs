@@ -355,7 +355,22 @@ async fn build_and_store_credential_with_path(
                     .map_err(|e| e.to_string())?
                 };
 
-                let credential = oauth_credential;
+                // GitHub Copilot requires an additional token exchange:
+                // GitHub OAuth token → Copilot session token
+                let credential = if provider_name == "github-copilot" {
+                    #[cfg(not(test))]
+                    {
+                        crate::auth::exchange_github_copilot_token(&oauth_credential.access_token)
+                            .await
+                            .map_err(|e| format!("Copilot token exchange failed: {e}"))?
+                    }
+                    #[cfg(test)]
+                    {
+                        oauth_credential
+                    }
+                } else {
+                    oauth_credential
+                };
 
                 (
                     credential,

@@ -90,6 +90,9 @@
 - [x] `openpista run -e "..."` — 단발성(single-shot) 에이전트 명령
 - [x] `openpista repl` — 세션 지속성을 갖춘 대화형 REPL
 - [x] `openpista auth login` — OAuth PKCE 브라우저 로그인 + 자격증명 영속 저장
+- [x] 멀티 프로바이더 OAuth PKCE: OpenAI, Anthropic, OpenRouter, GitHub Copilot
+- [x] GitHub Copilot PKCE OAuth — 구독 기반 인증 (GitHub OAuth → Copilot 세션 토큰 교환)
+- [x] 프로바이더 로그인 선택기 (검색, OAuth/API 키 방식 선택, 자격증명 상태 표시)
 - [x] 내부 TUI 슬래시 명령어 (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
 - [x] 중앙 집중식의 랜딩 페이지 스타일 TUI (전용 Home 및 Chat 화면 포함)
 - [x] 문서화된 예제가 포함된 TOML 설정 파일 (`config.toml`)
@@ -97,6 +100,18 @@
 - [x] 시작 시 PID 파일 작성, 종료 시 제거
 - [x] `SIGTERM` + `Ctrl-C` 우아한 종료(graceful shutdown)
 - [x] Elm 아키텍처(TEA) 반응형 TUI — 단방향 데이터 흐름 (`Action → update() → State → view()`)
+
+### 멀티 프로바이더 인증 (Multi-Provider Authentication)
+
+- [x] OpenAI OAuth 2.0 PKCE 브라우저 로그인 (ChatGPT Plus/Pro 구독)
+- [x] Anthropic OAuth 2.0 PKCE 코드 표시 흐름 (Claude Max 구독)
+- [x] GitHub Copilot PKCE OAuth: GitHub OAuth → `copilot_internal/v2/token` 세션 토큰 교환
+- [x] OpenAI `id_token` → API 키 교환 (구독 과금 Responses API)
+- [x] 만료 5분 전 자동 토큰 갱신
+- [x] `~/.openpista/credentials.toml`에 프로바이더별 토큰 영속 저장
+- [x] 확장 프로바이더 슬롯: GitHub Copilot, Google, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+- [x] `openpista auth status` — 모든 저장된 프로바이더 자격증명 및 만료 표시
+- [x] `openpista auth logout` — 프로바이더별 자격증명 제거
 
 ### 품질 및 CI (Quality & CI)
 

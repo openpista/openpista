@@ -90,6 +90,9 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `openpista run -e "..."` — single-shot agent command
 - [x] `openpista repl` — interactive REPL with session persistence
 - [x] `openpista auth login` — browser OAuth PKCE login with persisted credentials
+- [x] Multi-provider OAuth PKCE: OpenAI, Anthropic, OpenRouter, GitHub Copilot
+- [x] GitHub Copilot PKCE OAuth — subscription-based auth via GitHub OAuth → Copilot session token exchange
+- [x] Provider login picker with search, OAuth/API-key method chooser, and credential status dots
 - [x] Internal TUI slash commands (`/help`, `/login`, `/clear`, `/quit`, `/exit`)
 - [x] Centralized, Landing Page-style TUI with dedicated Home and Chat screens
 - [x] TOML config file with documented examples (`config.toml`)
@@ -97,6 +100,18 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] PID file written on start, removed on exit
 - [x] `SIGTERM` + `Ctrl-C` graceful shutdown
 - [x] Elm Architecture (TEA) reactive TUI — unidirectional data flow (`Action → update() → State → view()`)
+
+### Multi-Provider Authentication
+
+- [x] OAuth 2.0 PKCE browser login for OpenAI (ChatGPT Plus/Pro subscription)
+- [x] OAuth 2.0 PKCE code-display flow for Anthropic (Claude Max subscription)
+- [x] GitHub Copilot PKCE OAuth: GitHub OAuth → `copilot_internal/v2/token` session token exchange
+- [x] OpenAI `id_token` → API key exchange for subscription-billing Responses API
+- [x] Automatic token refresh with 5-minute pre-expiry window
+- [x] Credential store in `~/.openpista/credentials.toml` with per-provider tokens
+- [x] Extension provider slots: GitHub Copilot, Google, Vercel AI Gateway, Azure OpenAI, AWS Bedrock
+- [x] `openpista auth status` — show all stored provider credentials and expiry
+- [x] `openpista auth logout` — per-provider credential removal
 
 ### Quality & CI
 

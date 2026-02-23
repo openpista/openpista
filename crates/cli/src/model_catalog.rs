@@ -283,6 +283,32 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
             source: ModelSource::Docs,
             available: true,
         }],
+        "github-copilot" => vec![
+            ModelCatalogEntry {
+                id: "gpt-4o".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "gpt-4o-mini".to_string(),
+                provider: p.clone(),
+                recommended_for_coding: false,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+            ModelCatalogEntry {
+                id: "claude-3.5-sonnet".to_string(),
+                provider: p,
+                recommended_for_coding: true,
+                status: ModelStatus::Stable,
+                source: ModelSource::Docs,
+                available: true,
+            },
+        ],
         _ => vec![],
     }
 }

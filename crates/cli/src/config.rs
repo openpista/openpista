@@ -124,7 +124,7 @@ const EXTENSION_PROVIDER_SLOTS: &[ProviderRegistryEntry] = &[
         category: ProviderCategory::Extension,
         sort_order: 30,
         search_aliases: &["github", "copilot", "gh"],
-        auth_mode: LoginAuthMode::ApiKey,
+        auth_mode: LoginAuthMode::OAuth,
         api_key_env: "GITHUB_COPILOT_TOKEN",
         endpoint_env: None,
         supports_runtime: false,
@@ -484,8 +484,18 @@ impl std::str::FromStr for ProviderPreset {
 
 /// Returns OAuth endpoints for extension providers that support browser login.
 pub fn extension_oauth_endpoints(provider_name: &str) -> Option<OAuthEndpoints> {
-    let _ = provider_name;
-    None
+    match provider_name {
+        "github-copilot" => Some(OAuthEndpoints {
+            auth_url: "https://github.com/login/oauth/authorize",
+            token_url: "https://github.com/login/oauth/access_token",
+            scope: "read:user",
+            default_client_id: Some("Iv1.b507a08c87ecfe98"),
+            default_callback_port: Some(1456),
+            redirect_path: "/callback",
+            redirect_base: None,
+        }),
+        _ => None,
+    }
 }
 
 /// Returns true if OAuth login is available for the given provider name.
