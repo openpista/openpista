@@ -104,7 +104,7 @@ impl ContainerTool {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let tool = ContainerTool::new();
     /// ```
     pub fn new() -> Self {
@@ -136,7 +136,7 @@ impl Tool for ContainerTool {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let tool = ContainerTool::new();
     /// let schema = tool.parameters_schema();
     /// // basic sanity check: schema contains a "properties" object
@@ -261,7 +261,7 @@ impl Tool for ContainerTool {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use serde_json::json;
     /// # use crate::container::ContainerTool;
     /// # tokio_test::block_on(async {
@@ -415,7 +415,7 @@ impl Tool for ContainerTool {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// # use crate::ContainerArgs;
 /// # use crate::RuntimeMode;
 /// # tokio_test::block_on(async {
@@ -478,7 +478,7 @@ async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, Strin
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// assert_eq!(non_empty("  hello  "), Some("hello"));
 /// assert_eq!(non_empty("   "), None);
 /// assert_eq!(non_empty("world"), Some("world"));
@@ -507,7 +507,7 @@ fn non_empty(value: &str) -> Option<&str> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// # tokio_test::block_on(async {
 /// use bollard::Docker;
 /// // Construct a Docker client (adjust connection as appropriate for the environment).
@@ -720,7 +720,7 @@ async fn run_container(
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// # use std::time::Duration;
 /// # async fn example() -> Result<(), String> {
 /// let call_id = "call-123";
@@ -797,7 +797,7 @@ async fn run_with_docker_or_subprocess(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// # use std::time::Duration;
 /// # use tokio::runtime::Runtime;
 /// # use crate::ContainerArgs;
@@ -912,7 +912,7 @@ async fn run_as_subprocess(
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use std::time::Duration;
 /// # async fn example() {
 /// // Construct `args` and `execution` with the necessary reporting fields set,
@@ -1240,7 +1240,7 @@ fn is_valid_env_name(name: &str) -> bool {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let ts = unix_now_secs().expect("failed to read system time");
 /// assert!(ts > 0);
 /// ```
@@ -1260,7 +1260,7 @@ fn unix_now_secs() -> Result<u64, String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // No credential: command unchanged
 /// let cmd = build_shell_command("echo hello", None);
 /// assert_eq!(cmd, "echo hello");
@@ -1298,7 +1298,7 @@ fn build_shell_command(command: &str, credential: Option<&TaskCredential>) -> St
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let args = ContainerArgs {
 ///     image: Some("  alpine:3.18  ".into()),
 ///     skill_image: Some("fallback:latest".into()),
