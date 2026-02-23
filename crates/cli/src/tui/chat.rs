@@ -169,3 +169,233 @@ fn selection_cols_for_row(
         (0, width)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::TuiApp;
+    use proto::{ChannelId, SessionId};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    fn test_app() -> TuiApp {
+        TuiApp::new(
+            "gpt-4o",
+            SessionId::new(),
+            ChannelId::from("cli:tui"),
+            "openai",
+        )
+    }
+
+    // ── selection_cols_for_row ─────────────────────────────────────────────
+
+    #[test]
+    fn selection_row_before_range_returns_zero() {
+        assert_eq!(selection_cols_for_row(0, (2, 3), (5, 8), 80), (0, 0));
+    }
+
+    #[test]
+    fn selection_row_after_range_returns_zero() {
+        assert_eq!(selection_cols_for_row(6, (2, 3), (5, 8), 80), (0, 0));
+    }
+
+    #[test]
+    fn selection_single_row() {
+        // sr == er → returns (sc, ec)
+        assert_eq!(selection_cols_for_row(3, (3, 5), (3, 15), 80), (5, 15));
+    }
+
+    #[test]
+    fn selection_multi_row_first_row() {
+        // screen_row == sr → (sc, width)
+        assert_eq!(selection_cols_for_row(2, (2, 5), (7, 10), 80), (5, 80));
+    }
+
+    #[test]
+    fn selection_multi_row_last_row() {
+        // screen_row == er → (0, ec)
+        assert_eq!(selection_cols_for_row(7, (2, 5), (7, 10), 80), (0, 10));
+    }
+
+    #[test]
+    fn selection_multi_row_middle_row() {
+        // middle row → (0, width)
+        assert_eq!(selection_cols_for_row(4, (2, 5), (7, 10), 80), (0, 80));
+    }
+
+    // ── render function ──────────────────────────────────────────────────
+
+    fn render_chat(app: &mut TuiApp, width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_empty_messages() {
+        let mut app = test_app();
+        render_chat(&mut app, 80, 24);
+        assert!(app.chat_text_grid.is_empty());
+        assert_eq!(app.chat_area, Some(Rect::new(0, 0, 80, 24)));
+        assert_eq!(app.chat_scroll_clamped, 0);
+    }
+
+    #[test]
+    fn render_user_messages() {
+        let mut app = test_app();
+        app.messages
+            .push(TuiMessage::User("hello world".to_string()));
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+        assert_eq!(app.chat_area, Some(Rect::new(0, 0, 80, 24)));
+        // User message produces 2 lines: blank + "You: hello world"
+        assert!(app.chat_text_grid.len() >= 2);
+    }
+
+    #[test]
+    fn render_assistant_single_line() {
+        let mut app = test_app();
+        app.messages
+            .push(TuiMessage::Assistant("single line".to_string()));
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+        // blank + "Agent: single line"
+        assert!(app.chat_text_grid.len() >= 2);
+    }
+
+    #[test]
+    fn render_assistant_multi_line() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::Assistant(
+            "line one\nline two\nline three".to_string(),
+        ));
+        render_chat(&mut app, 80, 24);
+        // blank + "Agent: line one" + "       line two" + "       line three"
+        assert!(app.chat_text_grid.len() >= 4);
+    }
+
+    #[test]
+    fn render_tool_call_done() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::ToolCall {
+            tool_name: "system.run".to_string(),
+            args_preview: "ls -la".to_string(),
+            done: true,
+        });
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_tool_call_in_progress() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::ToolCall {
+            tool_name: "bash".to_string(),
+            args_preview: "echo hi".to_string(),
+            done: false,
+        });
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_tool_result_success() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::ToolResult {
+            tool_name: "system.run".to_string(),
+            output_preview: "file1.txt\nfile2.txt".to_string(),
+            is_error: false,
+        });
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_tool_result_error() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::ToolResult {
+            tool_name: "system.run".to_string(),
+            output_preview: "command not found".to_string(),
+            is_error: true,
+        });
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_error_message() {
+        let mut app = test_app();
+        app.messages
+            .push(TuiMessage::Error("something went wrong".to_string()));
+        render_chat(&mut app, 80, 24);
+        assert!(!app.chat_text_grid.is_empty());
+        // blank + "Error: something went wrong"
+        assert!(app.chat_text_grid.len() >= 2);
+    }
+
+    #[test]
+    fn render_mixed_messages_sets_chat_area() {
+        let mut app = test_app();
+        app.messages.push(TuiMessage::User("q".to_string()));
+        app.messages.push(TuiMessage::Assistant("a".to_string()));
+        app.messages.push(TuiMessage::ToolCall {
+            tool_name: "t".to_string(),
+            args_preview: "x".to_string(),
+            done: true,
+        });
+        app.messages.push(TuiMessage::ToolResult {
+            tool_name: "t".to_string(),
+            output_preview: "ok".to_string(),
+            is_error: false,
+        });
+        app.messages.push(TuiMessage::Error("err".to_string()));
+
+        render_chat(&mut app, 100, 30);
+        assert!(app.chat_area.is_some());
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_with_text_selection_active() {
+        let mut app = test_app();
+        app.messages
+            .push(TuiMessage::User("hello world".to_string()));
+        app.messages
+            .push(TuiMessage::Assistant("response text".to_string()));
+
+        // Set up a selection spanning rows 0-1
+        app.text_selection.anchor = Some((0, 2));
+        app.text_selection.endpoint = Some((1, 5));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&mut app, frame, frame.area());
+            })
+            .unwrap();
+
+        // Selection overlay should have been applied; verify state is persisted
+        assert!(app.chat_area.is_some());
+        assert!(!app.chat_text_grid.is_empty());
+    }
+
+    #[test]
+    fn render_scroll_clamped_to_max() {
+        let mut app = test_app();
+        // Push enough messages to overflow a small viewport
+        for i in 0..50 {
+            app.messages.push(TuiMessage::User(format!("message {i}")));
+        }
+        app.history_scroll = 9999; // Excessively high scroll
+        render_chat(&mut app, 60, 10);
+        // Scroll should be clamped to max_scroll
+        let content_height = app.chat_text_grid.len() as u16;
+        let visible_height = 10u16.saturating_sub(2);
+        let expected_max = content_height.saturating_sub(visible_height);
+        assert_eq!(app.chat_scroll_clamped, expected_max);
+    }
+}
