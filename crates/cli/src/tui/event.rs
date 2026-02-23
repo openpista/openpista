@@ -300,6 +300,7 @@ async fn build_and_store_credential_with_path(
                         refresh_token: None,
                         expires_at: None,
                         endpoint: intent.endpoint,
+                        id_token: None,
                     },
                     format!(
                         "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
@@ -376,6 +377,7 @@ async fn build_and_store_credential_with_path(
                     refresh_token: None,
                     expires_at: None,
                     endpoint: intent.endpoint,
+                    id_token: None,
                 },
                 format!(
                     "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
@@ -400,6 +402,7 @@ async fn build_and_store_credential_with_path(
                     refresh_token: None,
                     expires_at: None,
                     endpoint: Some(endpoint.clone()),
+                    id_token: None,
                 },
                 format!(
                     "Saved endpoint+key for '{provider_name}'. Endpoint stored as {}.",

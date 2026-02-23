@@ -10,6 +10,7 @@ use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 8192;
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -116,6 +117,23 @@ impl LlmProvider for AnthropicProvider {
 
         let messages = convert_messages(&req.messages)?;
         let tools: Vec<AnthropicTool> = req.tools.iter().map(convert_tool).collect();
+        // Build reverse mapping: sanitized_name → original_name
+        // Detect collisions: two tools that both sanitize to the same name would
+        // cause incorrect tool routing, so we return an error early.
+        let mut tool_name_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(req.tools.len());
+        for t in &req.tools {
+            let sanitized = sanitize_tool_name(&t.name);
+            if let Some(existing) = tool_name_map.get(&sanitized)
+                && existing != &t.name
+            {
+                return Err(LlmError::Api(format!(
+                    "Tool name collision: '{}' and '{}' both sanitize to '{}'",
+                    existing, t.name, sanitized
+                )));
+            }
+            tool_name_map.insert(sanitized, t.name.clone());
+        }
 
         let anthropic_req = AnthropicRequest {
             model: req.model.clone(),
@@ -144,7 +162,9 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json");
 
         if proto::is_anthropic_oauth_token(&self.api_key) {
-            req_builder = req_builder.bearer_auth(&self.api_key);
+            req_builder = req_builder
+                .bearer_auth(&self.api_key)
+                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA);
         } else {
             req_builder = req_builder.header("x-api-key", &self.api_key);
         }
@@ -205,9 +225,11 @@ impl LlmProvider for AnthropicProvider {
                 .into_iter()
                 .filter_map(|block| {
                     if let ContentBlock::ToolUse { id, name, input } = block {
+                        // Reverse sanitization: map back to original tool name
+                        let original_name = tool_name_map.get(&name).cloned().unwrap_or(name);
                         Some(ToolCall {
                             id,
-                            name,
+                            name: original_name,
                             arguments: input,
                         })
                     } else {
@@ -263,7 +285,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Result<Vec<AnthropicMessage>, L
                         .iter()
                         .map(|tc| ContentBlock::ToolUse {
                             id: tc.id.clone(),
-                            name: tc.name.clone(),
+                            name: sanitize_tool_name(&tc.name),
                             input: tc.arguments.clone(),
                         })
                         .collect();
@@ -321,10 +343,25 @@ fn convert_messages(messages: &[ChatMessage]) -> Result<Vec<AnthropicMessage>, L
 
 fn convert_tool(t: &ToolDefinition) -> AnthropicTool {
     AnthropicTool {
-        name: t.name.clone(),
+        name: sanitize_tool_name(&t.name),
         description: t.description.clone(),
         input_schema: t.parameters.clone(),
     }
+}
+
+/// Sanitizes a tool name for the Anthropic API.
+/// The Anthropic OAuth API only allows `^[a-zA-Z0-9_-]{1,128}$` in tool names.
+/// Non-conforming characters (e.g. dots) are replaced with underscores.
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -564,5 +601,56 @@ mod tests {
         assert!(proto::is_anthropic_oauth_token("sk-ant-oat01-abc123"));
         assert!(!proto::is_anthropic_oauth_token("sk-ant-api03-abc123"));
         assert!(!proto::is_anthropic_oauth_token(""));
+    }
+
+    // ── sanitize_tool_name ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_tool_name_replaces_dots() {
+        assert_eq!(sanitize_tool_name("system.run"), "system_run");
+    }
+
+    #[test]
+    fn sanitize_tool_name_preserves_valid_chars() {
+        assert_eq!(sanitize_tool_name("my-tool"), "my-tool");
+        assert_eq!(sanitize_tool_name("simple"), "simple");
+        assert_eq!(sanitize_tool_name("tool_123"), "tool_123");
+    }
+
+    #[test]
+    fn sanitize_tool_name_replaces_special_chars() {
+        assert_eq!(sanitize_tool_name("tool@v2"), "tool_v2");
+        assert_eq!(sanitize_tool_name("ns::tool"), "ns__tool");
+    }
+
+    #[test]
+    fn convert_tool_sanitizes_name() {
+        let def = ToolDefinition::new(
+            "system.run",
+            "Run a shell command",
+            serde_json::json!({"type": "object"}),
+        );
+        let t = convert_tool(&def);
+        assert_eq!(t.name, "system_run");
+        assert_eq!(t.description, "Run a shell command");
+    }
+
+    #[test]
+    fn tool_name_collision_detected() {
+        // "a.b" and "a_b" both sanitize to "a_b"
+        let req = crate::ChatRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![
+                ToolDefinition::new("a.b", "desc", serde_json::json!({"type":"object"})),
+                ToolDefinition::new("a_b", "desc2", serde_json::json!({"type":"object"})),
+            ],
+        };
+        let provider = AnthropicProvider::new("sk-ant-test");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(provider.chat(req));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("collision"), "expected 'collision' in: {msg}");
     }
 }
