@@ -580,7 +580,7 @@ pub struct ChannelsConfig {
     pub telegram: TelegramConfig,
     /// Local CLI adapter config.
     pub cli: CliConfig,
-    /// WhatsApp Web multi-device adapter config (Baileys bridge).
+    /// WhatsApp Business Cloud API adapter config.
     #[serde(default)]
     pub whatsapp: WhatsAppConfig,
     /// Web adapter (WebSocket + static WASM serving) config.
@@ -610,42 +610,49 @@ impl Default for CliConfig {
     }
 }
 
-/// WhatsApp Web multi-device adapter config (Baileys bridge).
+/// WhatsApp Business Cloud API adapter config.
 ///
 /// Configure via `[channels.whatsapp]` in `config.toml` or environment variables:
-/// - `WHATSAPP_SESSION_DIR` — directory for session auth state (default: `~/.openpista/whatsapp-session`)
-/// - `WHATSAPP_BRIDGE_PATH` — path to the Node.js bridge script (default: bundled `whatsapp-bridge/index.js`)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// - `WHATSAPP_ACCESS_TOKEN` — Meta Graph API access token
+/// - `WHATSAPP_VERIFY_TOKEN` — Webhook verification token (shared secret)
+/// - `WHATSAPP_PHONE_NUMBER_ID` — WhatsApp Business phone number ID
+/// - `WHATSAPP_APP_SECRET` — App secret for HMAC-SHA256 webhook signature verification
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WhatsAppConfig {
     /// Whether WhatsApp adapter is enabled.
     #[serde(default)]
     pub enabled: bool,
-    /// Directory for WhatsApp Web session auth state.
-    #[serde(default = "default_whatsapp_session_dir")]
-    pub session_dir: String,
-    /// Path to the Node.js bridge script. `None` = bundled default.
+    /// WhatsApp Business phone number ID.
     #[serde(default)]
-    pub bridge_path: Option<String>,
+    pub phone_number_id: String,
+    /// Meta Graph API access token.
+    #[serde(default)]
+    pub access_token: String,
+    /// Webhook verification token (shared secret between your app and Meta).
+    #[serde(default)]
+    pub verify_token: String,
+    /// App secret for HMAC-SHA256 webhook payload signature verification.
+    #[serde(default)]
+    pub app_secret: String,
+    /// HTTP port for the webhook server (default: 8080).
+    #[serde(default = "default_whatsapp_webhook_port")]
+    pub webhook_port: u16,
 }
-impl Default for WhatsAppConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            session_dir: default_whatsapp_session_dir(),
-            bridge_path: None,
-        }
-    }
-}
+
 impl WhatsAppConfig {
-    /// Returns `true` when the adapter has a valid session directory.
+    /// Returns `true` when all required fields are non-empty.
     #[allow(dead_code)]
     pub fn is_configured(&self) -> bool {
-        !self.session_dir.is_empty()
+        self.enabled
+            && !self.phone_number_id.is_empty()
+            && !self.access_token.is_empty()
+            && !self.verify_token.is_empty()
+            && !self.app_secret.is_empty()
     }
 }
-fn default_whatsapp_session_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{home}/.openpista/whatsapp-session")
+
+fn default_whatsapp_webhook_port() -> u16 {
+    8080
 }
 
 /// Web adapter config for WebSocket + static file serving.
@@ -772,12 +779,18 @@ impl Config {
             config.skills.workspace = workspace;
         }
         // WhatsApp env overrides
-        if let Ok(dir) = std::env::var("WHATSAPP_SESSION_DIR") {
-            config.channels.whatsapp.session_dir = dir;
+        if let Ok(token) = std::env::var("WHATSAPP_ACCESS_TOKEN") {
+            config.channels.whatsapp.access_token = token;
             config.channels.whatsapp.enabled = true;
         }
-        if let Ok(bridge) = std::env::var("WHATSAPP_BRIDGE_PATH") {
-            config.channels.whatsapp.bridge_path = Some(bridge);
+        if let Ok(verify) = std::env::var("WHATSAPP_VERIFY_TOKEN") {
+            config.channels.whatsapp.verify_token = verify;
+        }
+        if let Ok(phone) = std::env::var("WHATSAPP_PHONE_NUMBER_ID") {
+            config.channels.whatsapp.phone_number_id = phone;
+        }
+        if let Ok(secret) = std::env::var("WHATSAPP_APP_SECRET") {
+            config.channels.whatsapp.app_secret = secret;
         }
         // Web adapter env overrides
         if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {
@@ -790,16 +803,6 @@ impl Config {
             config.channels.web.port = p;
         }
 
-        if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {
-            config.channels.web.token = token;
-            config.channels.web.enabled = true;
-        }
-        if let Ok(port) = std::env::var("openpista_WEB_PORT")
-            && let Ok(p) = port.parse()
-        {
-            config.channels.web.port = p;
-        }
-
         debug!(
             provider = %config.agent.provider.name(),
             model = %config.agent.effective_model(),
@@ -807,6 +810,17 @@ impl Config {
             "Config loaded"
         );
         Ok(config)
+    }
+
+    /// Persist the current configuration to `~/.openpista/config.toml`.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let path = PathBuf::from(home).join(".openpista").join("config.toml");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(&path, content)
     }
 
     /// Resolves the API key to use for the configured provider.

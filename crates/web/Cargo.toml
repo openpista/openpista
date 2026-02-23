@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
@@ -40,3 +40,6 @@ web-sys = { version = "0.3", features = [
     "RequestMode",
     "Response",
 ] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

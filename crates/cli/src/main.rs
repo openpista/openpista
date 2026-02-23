@@ -576,18 +576,25 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     let mut whatsapp_resp_adapter: Option<WhatsAppAdapter> = None;
     if config.channels.whatsapp.enabled {
         let wa_config = channels::whatsapp::WhatsAppAdapterConfig {
-            session_dir: config.channels.whatsapp.session_dir.clone(),
-            bridge_path: config.channels.whatsapp.bridge_path.clone(),
+            phone_number_id: config.channels.whatsapp.phone_number_id.clone(),
+            access_token: config.channels.whatsapp.access_token.clone(),
+            verify_token: config.channels.whatsapp.verify_token.clone(),
+            app_secret: config.channels.whatsapp.app_secret.clone(),
+            webhook_port: config.channels.whatsapp.webhook_port,
         };
-        let tx = event_tx.clone();
-        let (qr_tx, _qr_rx) = tokio::sync::mpsc::channel::<String>(8);
-        let adapter = WhatsAppAdapter::new(wa_config.clone(), resp_tx.clone(), qr_tx.clone());
-        whatsapp_resp_adapter = Some(WhatsAppAdapter::new(wa_config, resp_tx.clone(), qr_tx));
-        tokio::spawn(async move {
-            if let Err(e) = adapter.run(tx).await {
-                error!("WhatsApp adapter error: {e}");
-            }
-        });
+        if wa_config.access_token.is_empty() {
+            warn!("WhatsApp enabled but no access token configured");
+        } else {
+            let tx = event_tx.clone();
+            let adapter = WhatsAppAdapter::new(wa_config.clone(), resp_tx.clone());
+            whatsapp_resp_adapter = Some(WhatsAppAdapter::new(wa_config, resp_tx.clone()));
+
+            tokio::spawn(async move {
+                if let Err(e) = adapter.run(tx).await {
+                    error!("WhatsApp adapter error: {e}");
+                }
+            });
+        }
     }
 
     let mut web_resp_adapter: Option<WebAdapter> = None;

@@ -290,21 +290,59 @@ pub(crate) fn render_qr_text(url: &str) -> Option<String> {
 }
 fn format_whatsapp_status(config: &Config) -> String {
     let wa = &config.channels.whatsapp;
+fn format_whatsapp_status(config: &Config) -> String {
+    let wa = &config.channels.whatsapp;
+    let mask = |s: &str| -> String {
+        if s.len() <= 4 {
+            "****".to_string()
+        } else {
+            format!("{}****", &s[..4])
+        }
+    };
+
     let mut lines = vec!["WhatsApp Configuration Status".to_string(), "".to_string()];
     lines.push(format!(
         "  Enabled:         {}",
         if wa.enabled { "Yes" } else { "No" }
     ));
-    lines.push(format!("  Session Dir:     {}", wa.session_dir));
     lines.push(format!(
-        "  Bridge Path:     {}",
-        wa.bridge_path.as_deref().unwrap_or("(bundled default)")
+        "  Phone Number ID: {}",
+        if wa.phone_number_id.is_empty() {
+            "(not set)".to_string()
+        } else {
+            wa.phone_number_id.clone()
+        }
     ));
+    lines.push(format!(
+        "  Access Token:    {}",
+        if wa.access_token.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.access_token)
+        }
+    ));
+    lines.push(format!(
+        "  Verify Token:    {}",
+        if wa.verify_token.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.verify_token)
+        }
+    ));
+    lines.push(format!(
+        "  App Secret:      {}",
+        if wa.app_secret.is_empty() {
+            "(not set)".to_string()
+        } else {
+            mask(&wa.app_secret)
+        }
+    ));
+    lines.push(format!("  Webhook Port:    {}", wa.webhook_port));
     lines.push("".to_string());
     if wa.is_configured() {
-        lines.push("  Status: Ready (session directory set)".to_string());
+        lines.push("  Status: Ready (all fields configured)".to_string());
     } else {
-        lines.push("  Status: Incomplete \u{2014} run /whatsapp to configure".to_string());
+        lines.push("  Status: Incomplete — run /whatsapp to configure".to_string());
     }
     lines.join("\n")
 }
@@ -1264,147 +1302,6 @@ pub async fn run_tui(
                                 }
                                 app.update(Action::ScrollToBottom);
                             }
-                            Command::CheckWhatsAppPrereqs => {
-                                // Check Node.js and bridge deps
-                                let node_ok = tokio::process::Command::new("node")
-                                    .arg("--version")
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .status()
-                                    .await
-                                    .map(|s| s.success())
-                                    .unwrap_or(false);
-                                let bridge_installed = std::path::Path::new("whatsapp-bridge/node_modules").exists();
-                                let cmd = app.update(Action::WhatsAppPrereqsChecked { node_ok, bridge_installed });
-                                // Handle the returned command (may be InstallWhatsAppBridge or SpawnWhatsAppBridge)
-                                match cmd {
-                                    Command::InstallWhatsAppBridge => {
-                                        let handle = tokio::process::Command::new("npm")
-                                            .arg("install")
-                                            .current_dir("whatsapp-bridge")
-                                            .stdout(std::process::Stdio::null())
-                                            .stderr(std::process::Stdio::piped())
-                                            .status()
-                                            .await;
-                                        let result = match handle {
-                                            Ok(status) if status.success() => Ok(()),
-                                            Ok(status) => Err(format!("npm install exited with {status}")),
-                                            Err(e) => Err(format!("Failed to run npm install: {e}")),
-                                        };
-                                        let cmd2 = app.update(Action::WhatsAppBridgeInstalled(result));
-                                        if !matches!(cmd2, Command::SpawnWhatsAppBridge) {
-                                            continue;
-                                        }
-                                    }
-                                    Command::SpawnWhatsAppBridge => {}
-                                    _ => continue,
-                                }
-                                // Spawn the WhatsApp bridge subprocess
-                                let bridge_path = config.channels.whatsapp.bridge_path.clone()
-                                    .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
-                                let session_dir = config.channels.whatsapp.session_dir.clone();
-                                match tokio::process::Command::new("node")
-                                    .arg(&bridge_path)
-                                    .arg(&session_dir)
-                                    .stdout(std::process::Stdio::piped())
-                                    .stderr(std::process::Stdio::piped())
-                                    .stdin(std::process::Stdio::piped())
-                                    .kill_on_drop(true)
-                                    .spawn()
-                                {
-                                    Ok(mut child) => {
-                                        let stdout = child.stdout.take().expect("bridge stdout");
-                                        let (qr_tx, qr_rx) = mpsc::channel::<String>(4);
-                                        let (conn_tx, conn_rx) = mpsc::channel::<(String, String)>(1);
-                                        whatsapp_bridge_child = Some(child);
-                                        whatsapp_qr_rx = Some(qr_rx);
-                                        whatsapp_connected_rx = Some(conn_rx);
-                                        // Spawn a task to read bridge stdout JSON lines
-                                        tokio::spawn(async move {
-                                            let reader = tokio::io::BufReader::new(stdout);
-                                            let mut lines = reader.lines();
-                                            while let Ok(Some(line)) = lines.next_line().await {
-                                                if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
-                                                    match event {
-                                                        channels::whatsapp::BridgeEvent::Qr { data } => {
-                                                            let _ = qr_tx.send(data).await;
-                                                        }
-                                                        channels::whatsapp::BridgeEvent::Connected { phone, name } => {
-                                                            let _ = conn_tx.send((phone, name.unwrap_or_default())).await;
-                                                            break;
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                    Err(e) => {
-                                        app.update(Action::PushError(format!("Failed to spawn WhatsApp bridge: {e}")));
-                                        app.update(Action::SetIdle);
-                                    }
-                                }
-                            }
-                            Command::InstallWhatsAppBridge => {
-                                let handle = tokio::process::Command::new("npm")
-                                    .arg("install")
-                                    .current_dir("whatsapp-bridge")
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::piped())
-                                    .status()
-                                    .await;
-                                let result = match handle {
-                                    Ok(status) if status.success() => Ok(()),
-                                    Ok(status) => Err(format!("npm install exited with {status}")),
-                                    Err(e) => Err(format!("Failed to run npm install: {e}")),
-                                };
-                                app.update(Action::WhatsAppBridgeInstalled(result));
-                            }
-                            Command::SpawnWhatsAppBridge => {
-                                let bridge_path = config.channels.whatsapp.bridge_path.clone()
-                                    .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
-                                let session_dir = config.channels.whatsapp.session_dir.clone();
-                                match tokio::process::Command::new("node")
-                                    .arg(&bridge_path)
-                                    .arg(&session_dir)
-                                    .stdout(std::process::Stdio::piped())
-                                    .stderr(std::process::Stdio::piped())
-                                    .stdin(std::process::Stdio::piped())
-                                    .kill_on_drop(true)
-                                    .spawn()
-                                {
-                                    Ok(mut child) => {
-                                        let stdout = child.stdout.take().expect("bridge stdout");
-                                        let (qr_tx, qr_rx) = mpsc::channel::<String>(4);
-                                        let (conn_tx, conn_rx) = mpsc::channel::<(String, String)>(1);
-                                        whatsapp_bridge_child = Some(child);
-                                        whatsapp_qr_rx = Some(qr_rx);
-                                        whatsapp_connected_rx = Some(conn_rx);
-                                        tokio::spawn(async move {
-                                            let reader = tokio::io::BufReader::new(stdout);
-                                            let mut lines = reader.lines();
-                                            while let Ok(Some(line)) = lines.next_line().await {
-                                                if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
-                                                    match event {
-                                                        channels::whatsapp::BridgeEvent::Qr { data } => {
-                                                            let _ = qr_tx.send(data).await;
-                                                        }
-                                                        channels::whatsapp::BridgeEvent::Connected { phone, name } => {
-                                                            let _ = conn_tx.send((phone, name.unwrap_or_default())).await;
-                                                            break;
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                    Err(e) => {
-                                        app.update(Action::PushError(format!("Failed to spawn WhatsApp bridge: {e}")));
-                                        app.update(Action::SetIdle);
-                                    }
-                                }
-                            }
                             _ => {
                                 // Other commands (CopyToClipboard, Batch) already handled
                                 // by execute_command; StartAuthFlow, LoadModelCatalog
@@ -2060,13 +1957,12 @@ mod tests {
     }
 
     #[test]
-    fn format_whatsapp_status_shows_defaults() {
+    fn format_whatsapp_status_shows_masked_secrets() {
         let config = Config::default();
         let status = format_whatsapp_status(&config);
         assert!(status.contains("WhatsApp Configuration Status"));
-        assert!(status.contains("No"));
-        assert!(status.contains("(bundled default)"));
-        assert!(status.contains("Ready"));
+        assert!(status.contains("(not set)"));
+        assert!(status.contains("Incomplete"));
     }
 
     #[test]
@@ -2101,5 +1997,16 @@ mod tests {
         // Even an empty string should produce a valid QR code
         let qr = render_qr_text("");
         assert!(qr.is_some());
+    }
+        config.channels.whatsapp.phone_number_id = "123456789".to_string();
+        config.channels.whatsapp.access_token = "EAAtoken123456".to_string();
+        config.channels.whatsapp.verify_token = "my-verify-token".to_string();
+        config.channels.whatsapp.app_secret = "abc123secret".to_string();
+        let status = format_whatsapp_status(&config);
+        assert!(status.contains("123456789")); // phone ID not masked
+        assert!(status.contains("EAAt****")); // access token masked
+        assert!(status.contains("my-v****")); // verify token masked
+        assert!(status.contains("abc1****")); // app secret masked
+        assert!(status.contains("Ready"));
     }
 }
