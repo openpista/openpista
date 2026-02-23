@@ -70,22 +70,20 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 ### WhatsApp Channel Adapter
 
-> WhatsApp follows the same HTTP-to-mpsc bridge pattern as Telegram. The adapter receives webhook events over HTTP (via `axum`), converts them to `ChannelEvent`, and forwards through `tokio::mpsc`.
+> WhatsApp uses a subprocess bridge pattern: openpista spawns a Node.js process (Baileys) that connects to WhatsApp Web. Communication is via JSON lines over stdin/stdout. Users pair by scanning a QR code — no API keys needed.
 
-- [x] `WhatsAppAdapter` — WhatsApp Business Cloud API integration via `reqwest`
-- [x] Webhook HTTP server (via `axum`) for incoming messages: GET verification challenge + POST message handler
-- [x] HMAC-SHA256 webhook payload signature verification (`X-Hub-Signature-256` header)
-- [x] Text message sending via Meta Graph API (`POST /v21.0/{phone_number_id}/messages`)
-- [x] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
-- [x] `WhatsAppConfig` — `[channels.whatsapp]` config section: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
-- [x] Environment variable overrides: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
-- [x] Incoming message parsing: text (image, audio, video, document, location, contacts — future)
-- [x] Message status webhook callback handling (sent → delivered → read)
+ [x] `WhatsAppAdapter` — WhatsApp Web multi-device protocol via Node.js Baileys bridge subprocess
+ [x] QR code pairing flow in TUI (`/whatsapp` command) — no API keys needed
+ [x] Subprocess bridge protocol (JSON lines over stdin/stdout) for Rust ↔ Node.js communication
+ [x] Session persistence (`session_dir/auth/`) — reconnects automatically after restart
+ [x] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
+ [x] `WhatsAppConfig` — `[channels.whatsapp]` config section: `enabled`, `session_dir`, `bridge_path`
+ [x] Environment variable overrides: `WHATSAPP_SESSION_DIR`, `WHATSAPP_BRIDGE_PATH`
+ [x] Incoming message parsing: text (image, audio, video, document — future)
+ [x] `/whatsapp status` TUI command — shows pairing status and config
  - [ ] Media message download and forwarding (incoming media → base64 or local path for agent context)
  - [ ] Interactive message support: reply buttons, list messages, quick replies
- - [ ] Message template rendering for outbound notifications (HSM templates required by WhatsApp 24h policy)
- - [ ] Rate limiting compliance with WhatsApp Business API tiers (messaging limits, throughput)
- - [ ] Retry logic with exponential backoff for transient API failures (429, 500)
+ - [ ] Retry logic with exponential backoff for transient connection failures
 - [x] Error responses clearly surfaced to the user (consistent with other adapters)
 - [x] Response routing integration: WhatsApp responses → Graph API `send_message`
  - [ ] Multi-number support: configurable phone number IDs for business accounts with multiple numbers

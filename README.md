@@ -62,7 +62,7 @@ openpista is a lightweight daemon written in Rust that bridges **messaging chann
 | OpenAI Responses API (SSE) | ✅ v0.1.0 |
 | Anthropic Claude provider | ✅ v0.1.0 |
 | Web adapter (Rust→WASM + WebSocket) | ✅ v0.1.0 |
-| WhatsApp channel (Business Cloud API) | ✅ v0.1.0 |
+| WhatsApp channel (WhatsApp Web / QR pairing) | ✅ v0.1.0 |
 | Discord / Slack adapters | 🔜 v0.2.0 |
 
 ---
@@ -223,9 +223,8 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number = ""
-access_token = ""
-webhook_port = 8443
+session_dir = "~/.openpista/whatsapp-session"
+# bridge_path = "whatsapp-bridge/index.js"
 
 [channels.web]
 enabled = false
@@ -247,8 +246,8 @@ Environment variables override config file values. They are intended for CI pipe
 | `openpista_WEB_TOKEN` | Web adapter auth token |
 | `openpista_WEB_PORT` | Web adapter HTTP/WS port (default: 3210) |
 | `openpista_WORKSPACE` | Custom skills workspace path |
-| `WHATSAPP_ACCESS_TOKEN` | WhatsApp access token |
-| `WHATSAPP_PHONE_NUMBER` | WhatsApp phone number |
+| `WHATSAPP_SESSION_DIR` | WhatsApp Web session directory |
+| `WHATSAPP_BRIDGE_PATH` | WhatsApp bridge script path |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (auto-enables Telegram) |
 | `OPENCODE_API_KEY` | OpenCode Zen API key |
 ---
@@ -323,13 +322,11 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```
 
 Enable WhatsApp in `config.toml` (see [WHATSAPP.md](./WHATSAPP.md) for full setup guide):
-
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number = "15551234567"
-# access_token = "EAA..."
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
+# session_dir = "~/.openpista/whatsapp-session"
+WHATSAPP_SESSION_DIR=~/.openpista/whatsapp-session openpista start
 ```
 
 Enable the Web UI adapter:

@@ -1,19 +1,52 @@
-//! WhatsApp access-token-based channel adapter implementation.
+//! WhatsApp Web multi-device channel adapter (Baileys bridge subprocess).
+//!
+//! Communicates with a Node.js bridge process over JSON lines on stdin/stdout.
+//! Users pair by scanning a QR code — no API keys or webhooks needed.
 
 use async_trait::async_trait;
-use axum::{
-    Router,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::{get, post},
-};
 use proto::{AgentResponse, ChannelError, ChannelEvent, ChannelId, SessionId};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::ChannelAdapter;
+
+// ─── Bridge protocol types ─────────────────────────────────
+
+/// Commands sent from Rust → Bridge (JSON lines on stdin).
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum BridgeCommand {
+    /// Send a text message to a WhatsApp number.
+    Send { to: String, text: String },
+    /// Gracefully disconnect the bridge.
+    Disconnect,
+}
+
+/// Events received from Bridge → Rust (JSON lines on stdout).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum BridgeEvent {
+    /// QR code data for pairing.
+    Qr { data: String },
+    /// Successfully connected / paired.
+    Connected { phone: String, name: Option<String> },
+    /// Incoming text message.
+    Message {
+        from: String,
+        text: String,
+        #[allow(dead_code)]
+        timestamp: Option<u64>,
+    },
+    /// Disconnected from WhatsApp Web.
+    Disconnected { reason: Option<String> },
+    /// Bridge-level error.
+    Error { message: String },
+}
+
+// ─── Adapter config ────────────────────────────────────────
 
 /// Configuration for the WhatsApp adapter.
 ///
@@ -21,114 +54,69 @@ use crate::adapter::ChannelAdapter;
 /// reverse dependency from channels → cli.
 #[derive(Debug, Clone)]
 pub struct WhatsAppAdapterConfig {
-    /// WhatsApp phone number (e.g. `15551234567`).
-    pub phone_number: String,
-    /// Access token for the WhatsApp gateway.
-    pub access_token: String,
-    /// HTTP port for the webhook server.
-    pub webhook_port: u16,
+    /// Directory for WhatsApp Web session auth state.
+    pub session_dir: String,
+    /// Path to the Node.js bridge script. `None` = bundled default.
+    pub bridge_path: Option<String>,
 }
 
-/// WhatsApp access-token-based adapter.
+// ─── Adapter ───────────────────────────────────────────────
+
+/// WhatsApp Web multi-device adapter.
 ///
-/// Receives inbound messages via a webhook and sends
-/// outbound messages via the Graph API using Bearer auth.
+/// Spawns a Node.js bridge subprocess that uses Baileys to connect to
+/// WhatsApp Web. Communication is via JSON lines over stdin/stdout.
 pub struct WhatsAppAdapter {
-    access_token: String,
-    phone_number: String,
-    webhook_port: u16,
-    http: reqwest::Client,
+    config: WhatsAppAdapterConfig,
+    /// Channel for sending commands to the bridge stdin writer task.
+    cmd_tx: mpsc::Sender<BridgeCommand>,
+    /// Receiver end — moved into `run()`.
+    cmd_rx: Option<mpsc::Receiver<BridgeCommand>>,
+    /// Channel for forwarding QR codes to the TUI.
+    #[allow(dead_code)]
+    qr_tx: mpsc::Sender<String>,
     #[allow(dead_code)]
     resp_tx: mpsc::Sender<AgentResponse>,
 }
 
 impl WhatsAppAdapter {
-    /// Creates a new WhatsApp adapter from config and response channel.
-    pub fn new(config: WhatsAppAdapterConfig, resp_tx: mpsc::Sender<AgentResponse>) -> Self {
+    /// Creates a new WhatsApp adapter.
+    ///
+    /// * `config` — session directory and bridge path
+    /// * `resp_tx` — channel for sending agent responses back
+    /// * `qr_tx` — channel for forwarding QR code data to the TUI
+    pub fn new(
+        config: WhatsAppAdapterConfig,
+        resp_tx: mpsc::Sender<AgentResponse>,
+        qr_tx: mpsc::Sender<String>,
+    ) -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
-            access_token: config.access_token,
-            phone_number: config.phone_number,
-            webhook_port: config.webhook_port,
-            http: reqwest::Client::new(),
+            config,
+            cmd_tx,
+            cmd_rx: Some(cmd_rx),
+            qr_tx,
             resp_tx,
         }
+    }
+
+    /// Returns a sender that can be used to send commands to the bridge.
+    pub fn command_sender(&self) -> mpsc::Sender<BridgeCommand> {
+        self.cmd_tx.clone()
     }
 
     /// Creates a stable session id for a WhatsApp phone number.
     fn make_session_id(phone: &str) -> SessionId {
         SessionId::from(format!("whatsapp:{phone}"))
     }
-}
 
-// ─── Axum shared state ─────────────────────────────────────
-
-#[derive(Clone)]
-struct WhatsAppState {
-    access_token: String,
-    event_tx: mpsc::Sender<ChannelEvent>,
-}
-
-// ─── Webhook verification query params ─────────────────────
-
-#[derive(Deserialize)]
-struct VerifyQuery {
-    #[serde(rename = "hub.mode")]
-    hub_mode: Option<String>,
-    #[serde(rename = "hub.challenge")]
-    hub_challenge: Option<String>,
-}
-
-// ─── WhatsApp webhook payload types ────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct WebhookPayload {
-    #[allow(dead_code)]
-    object: Option<String>,
-    entry: Option<Vec<WebhookEntry>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookEntry {
-    changes: Option<Vec<WebhookChange>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookChange {
-    value: Option<WebhookValue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookValue {
-    messages: Option<Vec<WebhookMessage>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookMessage {
-    from: Option<String>,
-    #[serde(rename = "type")]
-    msg_type: Option<String>,
-    text: Option<WebhookText>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebhookText {
-    body: Option<String>,
-}
-
-// ─── Graph API send body ───────────────────────────────────
-
-#[derive(Serialize)]
-struct SendMessageBody {
-    messaging_product: String,
-    to: String,
-    #[serde(rename = "type")]
-    msg_type: String,
-    text: SendText,
-}
-
-#[derive(Serialize)]
-struct SendText {
-    body: String,
+    /// Resolves the bridge script path.
+    fn bridge_script(&self) -> String {
+        self.config
+            .bridge_path
+            .clone()
+            .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string())
+    }
 }
 
 // ─── ChannelAdapter impl ───────────────────────────────────
@@ -136,31 +124,160 @@ struct SendText {
 #[async_trait]
 impl ChannelAdapter for WhatsAppAdapter {
     fn channel_id(&self) -> ChannelId {
-        ChannelId::new("whatsapp", "webhook")
+        ChannelId::new("whatsapp", "bridge")
     }
 
-    async fn run(self, tx: mpsc::Sender<ChannelEvent>) -> Result<(), ChannelError> {
-        info!("WhatsApp adapter starting on port {}", self.webhook_port);
+    async fn run(mut self, tx: mpsc::Sender<ChannelEvent>) -> Result<(), ChannelError> {
+        let bridge_script = self.bridge_script();
+        info!(
+            bridge = %bridge_script,
+            session_dir = %self.config.session_dir,
+            "WhatsApp bridge adapter starting"
+        );
 
-        let state = WhatsAppState {
-            access_token: self.access_token.clone(),
-            event_tx: tx,
-        };
-
-        let app = Router::new()
-            .route("/webhook", get(webhook_verify))
-            .route("/webhook", post(webhook_receive))
-            .with_state(state);
-
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.webhook_port));
-        let listener = tokio::net::TcpListener::bind(addr)
+        // Ensure session directory exists
+        tokio::fs::create_dir_all(&self.config.session_dir)
             .await
-            .map_err(|e| ChannelError::ConnectionFailed(format!("bind failed: {e}")))?;
+            .map_err(|e| {
+                ChannelError::ConnectionFailed(format!("failed to create session dir: {e}"))
+            })?;
 
-        info!("WhatsApp webhook listening on {addr}");
-        axum::serve(listener, app)
-            .await
-            .map_err(|e| ChannelError::ConnectionFailed(format!("server error: {e}")))?;
+        // Spawn the Node.js bridge subprocess
+        let mut child = TokioCommand::new("node")
+            .arg(&bridge_script)
+            .arg(&self.config.session_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| ChannelError::ConnectionFailed(format!("failed to spawn bridge: {e}")))?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ChannelError::ConnectionFailed("bridge stdin not available".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ChannelError::ConnectionFailed("bridge stdout not available".to_string())
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ChannelError::ConnectionFailed("bridge stderr not available".to_string())
+        })?;
+
+        // Take the command receiver (only available once)
+        let mut cmd_rx = self.cmd_rx.take().ok_or_else(|| {
+            ChannelError::ConnectionFailed("command receiver already consumed".to_string())
+        })?;
+
+        let qr_tx = self.qr_tx.clone();
+
+        // Task: read bridge stdout (JSON lines → events)
+        let event_tx = tx.clone();
+        let stdout_task = tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+
+                match serde_json::from_str::<BridgeEvent>(&line) {
+                    Ok(BridgeEvent::Qr { data }) => {
+                        info!("WhatsApp QR code received");
+                        if let Err(e) = qr_tx.send(data).await {
+                            warn!("Failed to forward QR code: {e}");
+                        }
+                    }
+                    Ok(BridgeEvent::Connected { phone, name }) => {
+                        info!(
+                            phone = %phone,
+                            name = ?name,
+                            "WhatsApp Web connected"
+                        );
+                        // Send a synthetic event so the gateway knows we're connected
+                        let channel_id = ChannelId::new("whatsapp", &phone);
+                        let session_id = WhatsAppAdapter::make_session_id(&phone);
+                        let event = ChannelEvent::new(
+                            channel_id,
+                            session_id,
+                            format!(
+                                "[WhatsApp connected: {} ({})]",
+                                phone,
+                                name.unwrap_or_default()
+                            ),
+                        );
+                        let _ = event_tx.send(event).await;
+                    }
+                    Ok(BridgeEvent::Message { from, text, .. }) => {
+                        debug!(from = %from, "WhatsApp message received");
+                        let channel_id = ChannelId::new("whatsapp", &from);
+                        let session_id = WhatsAppAdapter::make_session_id(&from);
+                        let event = ChannelEvent::new(channel_id, session_id, text);
+                        if let Err(e) = event_tx.send(event).await {
+                            error!("Failed to forward WhatsApp event: {e}");
+                        }
+                    }
+                    Ok(BridgeEvent::Disconnected { reason }) => {
+                        warn!(reason = ?reason, "WhatsApp Web disconnected");
+                        break;
+                    }
+                    Ok(BridgeEvent::Error { message }) => {
+                        error!(message = %message, "WhatsApp bridge error");
+                    }
+                    Err(e) => {
+                        warn!(line = %line, error = %e, "Failed to parse bridge event");
+                    }
+                }
+            }
+        });
+
+        // Task: read bridge stderr (log to tracing)
+        let stderr_task = tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                debug!(target: "whatsapp_bridge", "{}", line);
+            }
+        });
+
+        // Task: write commands to bridge stdin
+        let stdin_task = tokio::spawn(async move {
+            let mut writer = stdin;
+            while let Some(cmd) = cmd_rx.recv().await {
+                match serde_json::to_string(&cmd) {
+                    Ok(json) => {
+                        let line = format!("{json}\n");
+                        if let Err(e) = writer.write_all(line.as_bytes()).await {
+                            error!("Failed to write to bridge stdin: {e}");
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            error!("Failed to flush bridge stdin: {e}");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to serialize bridge command: {e}");
+                    }
+                }
+            }
+        });
+
+        // Wait for stdout reader to finish (bridge exited or disconnected)
+        let _ = stdout_task.await;
+        stderr_task.abort();
+        stdin_task.abort();
+
+        // Wait for the child process to exit
+        match child.wait().await {
+            Ok(status) => {
+                info!(status = %status, "WhatsApp bridge process exited");
+            }
+            Err(e) => {
+                warn!("Failed to wait for bridge process: {e}");
+            }
+        }
 
         info!("WhatsApp adapter stopped");
         Ok(())
@@ -170,121 +287,16 @@ impl ChannelAdapter for WhatsAppAdapter {
         let phone = parse_phone_from_channel_id(resp.channel_id.as_str())?;
         let text = format_response_text(&resp);
 
-        let body = SendMessageBody {
-            messaging_product: "whatsapp".to_string(),
-            to: phone,
-            msg_type: "text".to_string(),
-            text: SendText { body: text },
-        };
-
-        let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number
-        );
-
-        self.http
-            .post(&url)
-            .bearer_auth(&self.access_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ChannelError::SendFailed(format!("Graph API error: {e}")))?;
+        let cmd = BridgeCommand::Send { to: phone, text };
+        self.cmd_tx.send(cmd).await.map_err(|e| {
+            ChannelError::SendFailed(format!("failed to send command to bridge: {e}"))
+        })?;
 
         Ok(())
     }
 }
 
-// ─── Axum handlers ─────────────────────────────────────────
-
-/// GET /webhook — simple verification challenge (no verify_token needed).
-async fn webhook_verify(
-    State(_state): State<WhatsAppState>,
-    Query(params): Query<VerifyQuery>,
-) -> impl IntoResponse {
-    if let (Some(mode), Some(challenge)) = (&params.hub_mode, &params.hub_challenge)
-        && mode == "subscribe"
-    {
-        debug!("WhatsApp webhook verified");
-        return (StatusCode::OK, challenge.clone());
-    }
-    (StatusCode::FORBIDDEN, "Verification failed".to_string())
-}
-
-/// POST /webhook — incoming message with Bearer access_token verification.
-async fn webhook_receive(
-    State(state): State<WhatsAppState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    // Bearer token verification
-    if !state.access_token.is_empty() {
-        let auth_ok = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|token| token == state.access_token);
-        if !auth_ok {
-            warn!("WhatsApp webhook: invalid or missing Bearer token");
-            return StatusCode::UNAUTHORIZED;
-        }
-    }
-
-    // Parse payload
-    let payload: WebhookPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Failed to parse WhatsApp webhook payload: {e}");
-            return StatusCode::BAD_REQUEST;
-        }
-    };
-
-    // Extract text messages (ignore status updates)
-    let messages = extract_messages(&payload);
-    for (phone, text) in messages {
-        let channel_id = ChannelId::new("whatsapp", &phone);
-        let session_id = WhatsAppAdapter::make_session_id(&phone);
-        let event = ChannelEvent::new(channel_id, session_id, text);
-
-        if let Err(e) = state.event_tx.send(event).await {
-            error!("Failed to forward WhatsApp event: {e}");
-        }
-    }
-
-    StatusCode::OK
-}
-
 // ─── Helpers ───────────────────────────────────────────────
-
-/// Extracts `(phone, text)` pairs from a WhatsApp webhook payload.
-/// Ignores status updates (entries without `messages`).
-fn extract_messages(payload: &WebhookPayload) -> Vec<(String, String)> {
-    let mut messages = Vec::new();
-    let Some(entries) = &payload.entry else {
-        return messages;
-    };
-    for entry in entries {
-        let Some(changes) = &entry.changes else {
-            continue;
-        };
-        for change in changes {
-            let Some(value) = &change.value else {
-                continue;
-            };
-            let Some(msgs) = &value.messages else {
-                continue;
-            };
-            for msg in msgs {
-                if let (Some(from), Some("text"), Some(text)) =
-                    (&msg.from, msg.msg_type.as_deref(), &msg.text)
-                    && let Some(body) = &text.body
-                {
-                    messages.push((from.clone(), body.clone()));
-                }
-            }
-        }
-    }
-    messages
-}
 
 /// Parses a phone number from `whatsapp:<phone>` or raw string.
 fn parse_phone_from_channel_id(channel_str: &str) -> Result<String, ChannelError> {
@@ -345,92 +357,63 @@ mod tests {
     }
 
     #[test]
-    fn extract_messages_parses_valid_payload() {
-        let json = r#"{
-            "object": "whatsapp_business_account",
-            "entry": [{
-                "id": "123",
-                "changes": [{
-                    "value": {
-                        "messaging_product": "whatsapp",
-                        "messages": [{
-                            "from": "15551234567",
-                            "id": "wamid.xxx",
-                            "timestamp": "1234567890",
-                            "type": "text",
-                            "text": {"body": "Hello"}
-                        }]
-                    },
-                    "field": "messages"
-                }]
-            }]
-        }"#;
-
-        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
-        let messages = extract_messages(&payload);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].0, "15551234567");
-        assert_eq!(messages[0].1, "Hello");
+    fn bridge_command_serializes_correctly() {
+        let cmd = BridgeCommand::Send {
+            to: "15551234567".to_string(),
+            text: "Hello".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"send"#));
+        assert!(json.contains(r#""to":"15551234567"#));
+        assert!(json.contains(r#""text":"Hello"#));
     }
 
     #[test]
-    fn extract_messages_ignores_status_updates() {
-        let json = r#"{
-            "object": "whatsapp_business_account",
-            "entry": [{
-                "changes": [{
-                    "value": {},
-                    "field": "messages"
-                }]
-            }]
-        }"#;
-
-        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
-        let messages = extract_messages(&payload);
-        assert!(messages.is_empty());
+    fn bridge_command_disconnect_serializes() {
+        let cmd = BridgeCommand::Disconnect;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"disconnect"#));
     }
 
     #[test]
-    fn extract_messages_ignores_non_text_messages() {
-        let json = r#"{
-            "object": "whatsapp_business_account",
-            "entry": [{
-                "changes": [{
-                    "value": {
-                        "messages": [{
-                            "from": "15551234567",
-                            "type": "image"
-                        }]
-                    }
-                }]
-            }]
-        }"#;
-
-        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
-        let messages = extract_messages(&payload);
-        assert!(messages.is_empty());
+    fn bridge_event_qr_deserializes() {
+        let json = r#"{"type":"qr","data":"2@ABC123"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, BridgeEvent::Qr { data } if data == "2@ABC123"));
     }
 
     #[test]
-    fn extract_messages_handles_multiple_messages() {
-        let json = r#"{
-            "object": "whatsapp_business_account",
-            "entry": [{
-                "changes": [{
-                    "value": {
-                        "messages": [
-                            {"from": "111", "type": "text", "text": {"body": "A"}},
-                            {"from": "222", "type": "text", "text": {"body": "B"}}
-                        ]
-                    }
-                }]
-            }]
-        }"#;
+    fn bridge_event_connected_deserializes() {
+        let json = r#"{"type":"connected","phone":"15551234567","name":"John"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Connected { phone, name } if phone == "15551234567" && name.as_deref() == Some("John"))
+        );
+    }
 
-        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
-        let messages = extract_messages(&payload);
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0], ("111".to_string(), "A".to_string()));
-        assert_eq!(messages[1], ("222".to_string(), "B".to_string()));
+    #[test]
+    fn bridge_event_message_deserializes() {
+        let json =
+            r#"{"type":"message","from":"15551234567","text":"Hello!","timestamp":1234567890}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Message { from, text, .. } if from == "15551234567" && text == "Hello!")
+        );
+    }
+
+    #[test]
+    fn bridge_event_disconnected_deserializes() {
+        let json = r#"{"type":"disconnected","reason":"logged out"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Disconnected { reason } if reason.as_deref() == Some("logged out"))
+        );
+    }
+
+    #[test]
+    fn bridge_event_error_deserializes() {
+        let json = r#"{"type":"error","message":"connection failed"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, BridgeEvent::Error { message } if message == "connection failed"));
     }
 }

@@ -24,6 +24,9 @@ logs/
 # skills
 skills/hello-wasm/target
 
+# WhatsApp bridge
+whatsapp-bridge/node_modules/
+
 # OS / local tooling
 .DS_Store
 .sisyphus/

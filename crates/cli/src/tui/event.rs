@@ -290,47 +290,21 @@ pub(crate) fn render_qr_text(url: &str) -> Option<String> {
 }
 fn format_whatsapp_status(config: &Config) -> String {
     let wa = &config.channels.whatsapp;
-    let mask = |s: &str| -> String {
-        if s.len() <= 4 {
-            "****".to_string()
-        } else {
-            format!("{}****", &s[..4])
-        }
-    };
     let mut lines = vec!["WhatsApp Configuration Status".to_string(), "".to_string()];
     lines.push(format!(
         "  Enabled:         {}",
         if wa.enabled { "Yes" } else { "No" }
     ));
+    lines.push(format!("  Session Dir:     {}", wa.session_dir));
     lines.push(format!(
-        "  Phone Number:    {}",
-        wa.phone_number
-            .as_deref()
-            .map_or("(not set)".to_string(), |s| s.to_string())
+        "  Bridge Path:     {}",
+        wa.bridge_path.as_deref().unwrap_or("(bundled default)")
     ));
-    lines.push(format!(
-        "  Access Token:    {}",
-        wa.access_token
-            .as_deref()
-            .map_or("(not set)".to_string(), mask)
-    ));
-    lines.push(format!("  Webhook Port:    {}", wa.webhook_port));
     lines.push("".to_string());
     if wa.is_configured() {
-        lines.push("  Status: Ready (all fields configured)".to_string());
-        let phone = wa.phone_number.as_deref().unwrap_or_default();
-        let wa_me_url = format!("https://wa.me/{phone}");
-        lines.push("".to_string());
-        lines.push(format!("  QR Code ({})", wa_me_url));
-        lines.push("".to_string());
-        if let Some(qr) = render_qr_text(&wa_me_url) {
-            lines.push(qr);
-        }
-        lines.push("".to_string());
-        lines.push("  Scan with your phone to start a conversation.".to_string());
+        lines.push("  Status: Ready (session directory set)".to_string());
     } else {
         lines.push("  Status: Incomplete \u{2014} run /whatsapp to configure".to_string());
-        lines.push("  See WHATSAPP.md for token setup guide.".to_string());
     }
     lines.join("\n")
 }
@@ -1854,34 +1828,26 @@ mod tests {
     }
 
     #[test]
-    fn format_whatsapp_status_shows_masked_secrets() {
+    fn format_whatsapp_status_shows_defaults() {
         let config = Config::default();
         let status = format_whatsapp_status(&config);
         assert!(status.contains("WhatsApp Configuration Status"));
-        assert!(status.contains("(not set)"));
-        assert!(status.contains("Incomplete"));
+        assert!(status.contains("No"));
+        assert!(status.contains("(bundled default)"));
+        assert!(status.contains("Ready"));
     }
 
     #[test]
     fn format_whatsapp_status_configured() {
         let mut config = Config::default();
         config.channels.whatsapp.enabled = true;
-        config.channels.whatsapp.phone_number = Some("123456789".to_string());
-        config.channels.whatsapp.access_token = Some("EAAtoken123456".to_string());
+        config.channels.whatsapp.session_dir = "/tmp/wa-session".to_string();
+        config.channels.whatsapp.bridge_path = Some("/opt/bridge/index.js".to_string());
         let status = format_whatsapp_status(&config);
-        assert!(status.contains("123456789")); // phone number not masked
-        assert!(status.contains("EAAt****")); // access token masked
+        assert!(status.contains("Yes"));
+        assert!(status.contains("/tmp/wa-session"));
+        assert!(status.contains("/opt/bridge/index.js"));
         assert!(status.contains("Ready"));
-        // QR code should be present for configured WhatsApp
-        assert!(status.contains("QR Code"));
-        assert!(status.contains("https://wa.me/123456789"));
-        assert!(status.contains("Scan with your phone"));
-        // QR should contain block characters
-        assert!(
-            status.contains('\u{2588}')
-                || status.contains('\u{2580}')
-                || status.contains('\u{2584}')
-        );
     }
 
     #[test]
