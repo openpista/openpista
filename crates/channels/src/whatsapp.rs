@@ -1,4 +1,4 @@
-//! WhatsApp Business Cloud API channel adapter implementation.
+//! WhatsApp access-token-based channel adapter implementation.
 
 use async_trait::async_trait;
 use axum::{
@@ -8,16 +8,12 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hmac::{Hmac, Mac};
 use proto::{AgentResponse, ChannelError, ChannelEvent, ChannelId, SessionId};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::ChannelAdapter;
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Configuration for the WhatsApp adapter.
 ///
@@ -25,27 +21,21 @@ type HmacSha256 = Hmac<Sha256>;
 /// reverse dependency from channels → cli.
 #[derive(Debug, Clone)]
 pub struct WhatsAppAdapterConfig {
-    /// WhatsApp Business phone number ID.
-    pub phone_number_id: String,
-    /// Meta Graph API access token.
+    /// WhatsApp phone number (e.g. `15551234567`).
+    pub phone_number: String,
+    /// Access token for the WhatsApp gateway.
     pub access_token: String,
-    /// Webhook verification token (shared secret).
-    pub verify_token: String,
-    /// App secret for HMAC-SHA256 webhook signature verification.
-    pub app_secret: String,
     /// HTTP port for the webhook server.
     pub webhook_port: u16,
 }
 
-/// WhatsApp Business Cloud API adapter.
+/// WhatsApp access-token-based adapter.
 ///
-/// Receives inbound messages via a webhook (Meta POST) and sends
-/// outbound messages via the Graph API.
+/// Receives inbound messages via a webhook and sends
+/// outbound messages via the Graph API using Bearer auth.
 pub struct WhatsAppAdapter {
     access_token: String,
-    phone_number_id: String,
-    verify_token: String,
-    app_secret: String,
+    phone_number: String,
     webhook_port: u16,
     http: reqwest::Client,
     #[allow(dead_code)]
@@ -57,9 +47,7 @@ impl WhatsAppAdapter {
     pub fn new(config: WhatsAppAdapterConfig, resp_tx: mpsc::Sender<AgentResponse>) -> Self {
         Self {
             access_token: config.access_token,
-            phone_number_id: config.phone_number_id,
-            verify_token: config.verify_token,
-            app_secret: config.app_secret,
+            phone_number: config.phone_number,
             webhook_port: config.webhook_port,
             http: reqwest::Client::new(),
             resp_tx,
@@ -76,8 +64,7 @@ impl WhatsAppAdapter {
 
 #[derive(Clone)]
 struct WhatsAppState {
-    verify_token: String,
-    app_secret: String,
+    access_token: String,
     event_tx: mpsc::Sender<ChannelEvent>,
 }
 
@@ -87,8 +74,6 @@ struct WhatsAppState {
 struct VerifyQuery {
     #[serde(rename = "hub.mode")]
     hub_mode: Option<String>,
-    #[serde(rename = "hub.verify_token")]
-    hub_verify_token: Option<String>,
     #[serde(rename = "hub.challenge")]
     hub_challenge: Option<String>,
 }
@@ -158,8 +143,7 @@ impl ChannelAdapter for WhatsAppAdapter {
         info!("WhatsApp adapter starting on port {}", self.webhook_port);
 
         let state = WhatsAppState {
-            verify_token: self.verify_token.clone(),
-            app_secret: self.app_secret.clone(),
+            access_token: self.access_token.clone(),
             event_tx: tx,
         };
 
@@ -195,7 +179,7 @@ impl ChannelAdapter for WhatsAppAdapter {
 
         let url = format!(
             "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            self.phone_number
         );
 
         self.http
@@ -212,17 +196,13 @@ impl ChannelAdapter for WhatsAppAdapter {
 
 // ─── Axum handlers ─────────────────────────────────────────
 
-/// GET /webhook — Meta verification challenge.
+/// GET /webhook — simple verification challenge (no verify_token needed).
 async fn webhook_verify(
-    State(state): State<WhatsAppState>,
+    State(_state): State<WhatsAppState>,
     Query(params): Query<VerifyQuery>,
 ) -> impl IntoResponse {
-    if let (Some(mode), Some(token), Some(challenge)) = (
-        &params.hub_mode,
-        &params.hub_verify_token,
-        &params.hub_challenge,
-    ) && mode == "subscribe"
-        && token == &state.verify_token
+    if let (Some(mode), Some(challenge)) = (&params.hub_mode, &params.hub_challenge)
+        && mode == "subscribe"
     {
         debug!("WhatsApp webhook verified");
         return (StatusCode::OK, challenge.clone());
@@ -230,18 +210,23 @@ async fn webhook_verify(
     (StatusCode::FORBIDDEN, "Verification failed".to_string())
 }
 
-/// POST /webhook — incoming message with HMAC-SHA256 verification.
+/// POST /webhook — incoming message with Bearer access_token verification.
 async fn webhook_receive(
     State(state): State<WhatsAppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // HMAC-SHA256 verification
-    if !state.app_secret.is_empty()
-        && let Err(e) = verify_hmac_signature(&headers, &body, &state.app_secret)
-    {
-        warn!("WhatsApp HMAC verification failed: {e}");
-        return StatusCode::UNAUTHORIZED;
+    // Bearer token verification
+    if !state.access_token.is_empty() {
+        let auth_ok = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|token| token == state.access_token);
+        if !auth_ok {
+            warn!("WhatsApp webhook: invalid or missing Bearer token");
+            return StatusCode::UNAUTHORIZED;
+        }
     }
 
     // Parse payload
@@ -269,29 +254,6 @@ async fn webhook_receive(
 }
 
 // ─── Helpers ───────────────────────────────────────────────
-
-/// Verifies HMAC-SHA256 signature from the `X-Hub-Signature-256` header.
-fn verify_hmac_signature(headers: &HeaderMap, body: &[u8], secret: &str) -> Result<(), String> {
-    let sig_header = headers
-        .get("x-hub-signature-256")
-        .and_then(|v| v.to_str().ok())
-        .ok_or("Missing X-Hub-Signature-256 header")?;
-
-    let hex_sig = sig_header
-        .strip_prefix("sha256=")
-        .ok_or("Signature does not start with sha256=")?;
-
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|e| format!("HMAC init: {e}"))?;
-    mac.update(body);
-    let computed = hex::encode(mac.finalize().into_bytes());
-
-    if computed == hex_sig {
-        Ok(())
-    } else {
-        Err("HMAC mismatch".to_string())
-    }
-}
 
 /// Extracts `(phone, text)` pairs from a WhatsApp webhook payload.
 /// Ignores status updates (entries without `messages`).
@@ -380,37 +342,6 @@ mod tests {
         let err =
             AgentResponse::error(ChannelId::from("whatsapp:1"), SessionId::from("s1"), "boom");
         assert!(format_response_text(&err).starts_with("❌ Error: "));
-    }
-
-    #[test]
-    fn verify_hmac_accepts_valid_signature() {
-        let secret = "test_secret";
-        let body = b"test body";
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        let sig = hex::encode(mac.finalize().into_bytes());
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-hub-signature-256",
-            format!("sha256={sig}").parse().unwrap(),
-        );
-
-        assert!(verify_hmac_signature(&headers, body, secret).is_ok());
-    }
-
-    #[test]
-    fn verify_hmac_rejects_invalid_signature() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-hub-signature-256", "sha256=invalid".parse().unwrap());
-        assert!(verify_hmac_signature(&headers, b"body", "secret").is_err());
-    }
-
-    #[test]
-    fn verify_hmac_rejects_missing_header() {
-        let headers = HeaderMap::new();
-        assert!(verify_hmac_signature(&headers, b"body", "secret").is_err());
     }
 
     #[test]

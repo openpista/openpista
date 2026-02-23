@@ -10,7 +10,7 @@
 Docs: [ROADMAP](./ROADMAP.md) · [CHANGELOG (v0.1.0+)](./CHANGELOG.md)
 
 **Rust→WASM 브라우저 접속을 지원하는 OS 게이트웨이 AI 에이전트.** LLM이 메신저를 통해 여러분의 머신을 제어할 수 있게 합니다.
-> WebSocket 기반 에이전트 아키텍처인 [OpenClaw](https://github.com/openpista/openclaw)에서 영감을 받아,
+> WebSocket 기반 에이전트 아키텍처인 [OpenClaw](https://github.com/openclaw/openclaw)에서 영감을 받아,
 > Rust와 Rust→WASM 브라우저 클라이언트로 완전히 새롭게 작성되었습니다 —
 > 런타임 의존성 없는 단일 정적 바이너리.
 
@@ -221,11 +221,9 @@ workspace = "~/.openpista/workspace"
 
 [channels.whatsapp]
 enabled = false
-phone_number_id = ""
+phone_number = ""
 access_token = ""
-verify_token = ""
-app_secret = ""
-webhook_port = 8080
+webhook_port = 8443
 
 [channels.web]
 enabled = false
@@ -247,10 +245,8 @@ static_dir = "~/.openpista/web"
 | `openpista_WEB_TOKEN` | 웹 어댑터 인증 토큰 |
 | `openpista_WEB_PORT` | 웹 어댑터 HTTP/WS 포트 (기본값: 3210) |
 | `openpista_WORKSPACE` | 커스텀 Skills 워크스페이스 경로 |
-| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 Business API 액세스 토큰 |
-| `WHATSAPP_VERIFY_TOKEN` | 왓츠앱 웹훅 검증 토큰 |
-| `WHATSAPP_PHONE_NUMBER_ID` | 왓츠앱 Business 전화번호 ID |
-| `WHATSAPP_APP_SECRET` | 왓츠앱 앱 시크릿 (HMAC 검증용) |
+| `WHATSAPP_ACCESS_TOKEN` | 왓츠앱 액세스 토큰 |
+| `WHATSAPP_PHONE_NUMBER` | 왓츠앱 전화번호 |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 (자동 활성화) |
 | `OPENCODE_API_KEY` | OpenCode Zen API 키 |
 ---
@@ -329,13 +325,9 @@ TELEGRAM_BOT_TOKEN=123456:ABC... openpista start
 ```bash
 # [channels.whatsapp]
 # enabled = true
-# phone_number_id = "123456789"
+# phone_number = "15551234567"
 # access_token = "EAA..."
-# verify_token = "my-verify-token"
-# app_secret = "abc123..."
-
-# 또는 환경 변수로
-WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER_ID=123456789 openpista start
+WHATSAPP_ACCESS_TOKEN=EAA... WHATSAPP_PHONE_NUMBER=15551234567 openpista start
 ```
 
 웹 UI 어댑터를 활성화하세요:

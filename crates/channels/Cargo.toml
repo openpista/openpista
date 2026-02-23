@@ -18,8 +18,5 @@ axum = { workspace = true }
 axum-extra = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
-hex = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
