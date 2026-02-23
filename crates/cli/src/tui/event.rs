@@ -1280,7 +1280,7 @@ pub async fn run_tui(
                                 let session_dir = config.channels.whatsapp.session_dir.clone();
                                 match tokio::process::Command::new("node")
                                     .arg(&bridge_path)
-                                    .env("SESSION_DIR", &session_dir)
+                                    .arg(&session_dir)
                                     .stdout(std::process::Stdio::piped())
                                     .stderr(std::process::Stdio::piped())
                                     .stdin(std::process::Stdio::piped())
@@ -1341,7 +1341,7 @@ pub async fn run_tui(
                                 let session_dir = config.channels.whatsapp.session_dir.clone();
                                 match tokio::process::Command::new("node")
                                     .arg(&bridge_path)
-                                    .env("SESSION_DIR", &session_dir)
+                                    .arg(&session_dir)
                                     .stdout(std::process::Stdio::piped())
                                     .stderr(std::process::Stdio::piped())
                                     .stdin(std::process::Stdio::piped())
