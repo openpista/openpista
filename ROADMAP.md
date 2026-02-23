@@ -96,6 +96,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Environment variable override for all secrets
 - [x] PID file written on start, removed on exit
 - [x] `SIGTERM` + `Ctrl-C` graceful shutdown
+- [x] Elm Architecture (TEA) reactive TUI — unidirectional data flow (`Action → update() → State → view()`)
 
 ### Quality & CI
 

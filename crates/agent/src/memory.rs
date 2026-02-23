@@ -204,8 +204,36 @@ impl SqliteMemory {
             .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
         Ok(())
     }
-}
 
+    /// Deletes a session and all its messages from the database.
+    /// Uses a transaction for atomicity.
+    pub async fn delete_session(&self, session_id: &SessionId) -> Result<(), DatabaseError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        sqlx::query("DELETE FROM messages WHERE session_id = ?")
+            .bind(session_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(session_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
+
+        info!(session = %session_id, "Session deleted");
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -359,5 +387,42 @@ mod tests {
             .find(|(id, _, _, _)| id.as_str() == "session-no-msgs")
             .expect("session should be found");
         assert_eq!(preview, "");
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_session_and_messages() {
+        let (memory, _tmp, _path) = open_temp_memory().await;
+        let session_id = SessionId::from("session-del");
+        memory
+            .ensure_session(&session_id, "cli:local")
+            .await
+            .expect("ensure session");
+
+        let msg = AgentMessage::new(session_id.clone(), Role::User, "hello");
+        memory.save_message(&msg).await.expect("save message");
+
+        // Verify session exists
+        let sessions = memory.list_sessions().await.expect("list sessions");
+        assert!(sessions.iter().any(|(id, _)| id.as_str() == "session-del"));
+
+        // Delete
+        memory
+            .delete_session(&session_id)
+            .await
+            .expect("delete session");
+
+        // Verify session is gone
+        let sessions = memory
+            .list_sessions()
+            .await
+            .expect("list sessions after delete");
+        assert!(!sessions.iter().any(|(id, _)| id.as_str() == "session-del"));
+
+        // Verify messages are gone
+        let loaded = memory
+            .load_session(&session_id)
+            .await
+            .expect("load deleted session");
+        assert!(loaded.is_empty());
     }
 }
