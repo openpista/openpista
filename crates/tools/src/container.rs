@@ -2336,4 +2336,70 @@ mod tests {
         let ts = unix_now_secs().expect("unix_now");
         assert!(ts > 1_700_000_000);
     }
+
+    #[test]
+    fn format_output_empty_stdout() {
+        let out = format_output("", "err msg\n", 1);
+        assert!(!out.contains("stdout:"));
+        assert!(out.contains("stderr:\nerr msg"));
+        assert!(out.contains("exit_code: 1"));
+    }
+
+    #[test]
+    fn format_output_empty_stderr() {
+        let out = format_output("hello\n", "", 0);
+        assert!(out.contains("stdout:\nhello"));
+        assert!(!out.contains("stderr:"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn format_output_both_empty() {
+        let out = format_output("", "", 0);
+        assert!(!out.contains("stdout:"));
+        assert!(!out.contains("stderr:"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn format_output_appends_newline_when_missing() {
+        let out = format_output("no-newline", "also-no-newline", 2);
+        assert!(out.contains("stdout:\nno-newline\n"));
+        assert!(out.contains("stderr:\nalso-no-newline\n"));
+    }
+
+    #[test]
+    fn truncate_str_short_string() {
+        assert_eq!(truncate_str("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_str_exact_boundary() {
+        assert_eq!(truncate_str("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_str_over_limit() {
+        let result = truncate_str("abcdef", 3);
+        assert!(result.starts_with("abc"));
+        assert!(result.contains("truncated at 3 chars"));
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(truncate_str("", 10), "");
+    }
+
+    #[test]
+    fn non_empty_with_content() {
+        assert_eq!(non_empty("hello"), Some("hello"));
+        assert_eq!(non_empty("  hello  "), Some("hello"));
+    }
+
+    #[test]
+    fn non_empty_with_empty() {
+        assert_eq!(non_empty(""), None);
+        assert_eq!(non_empty("   "), None);
+        assert_eq!(non_empty("\t\n"), None);
+    }
 }

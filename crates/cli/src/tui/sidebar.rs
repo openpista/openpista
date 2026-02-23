@@ -210,4 +210,157 @@ mod tests {
         let past = chrono::Utc::now() - chrono::Duration::days(2);
         assert_eq!(format_relative_time(&past), "2d ago");
     }
+
+    #[test]
+    fn format_relative_time_weeks_ago() {
+        let past = chrono::Utc::now() - chrono::Duration::days(10);
+        let result = format_relative_time(&past);
+        assert!(!result.contains("ago"));
+    }
+
+    #[test]
+    fn truncate_str_zero_max_len() {
+        assert_eq!(truncate_str("hello", 0), "");
+    }
+
+    use crate::tui::app::{Screen, SessionEntry, TuiApp};
+    use proto::{ChannelId, SessionId};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn make_sidebar_app() -> TuiApp {
+        let mut app = TuiApp::new(
+            "gpt-4o",
+            SessionId::new(),
+            ChannelId::from("cli:tui"),
+            "openai",
+        );
+        app.screen = Screen::Chat;
+        app.sidebar_visible = true;
+        app
+    }
+
+    fn make_test_session(id: &str, preview: &str) -> SessionEntry {
+        SessionEntry {
+            id: SessionId::from(id),
+            channel_id: "cli:tui".to_string(),
+            updated_at: chrono::Utc::now(),
+            preview: preview.to_string(),
+        }
+    }
+
+    #[test]
+    fn render_sidebar_with_sessions() {
+        let mut app = make_sidebar_app();
+        app.session_list = vec![
+            make_test_session("s1", "first session"),
+            make_test_session("s2", "second session"),
+            make_test_session("s3", "third session"),
+        ];
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_empty() {
+        let app = make_sidebar_app();
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_with_active_session() {
+        let mut app = make_sidebar_app();
+        let sid = app.session_id.clone();
+        app.session_list = vec![
+            make_test_session(sid.as_str(), "active session"),
+            make_test_session("other", "other session"),
+        ];
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_with_hover() {
+        let mut app = make_sidebar_app();
+        app.session_list = vec![
+            make_test_session("s1", "first"),
+            make_test_session("s2", "second"),
+        ];
+        app.sidebar_hover = Some(1);
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_focused() {
+        let mut app = make_sidebar_app();
+        app.sidebar_focused = true;
+        app.session_list = vec![
+            make_test_session("s1", "first"),
+            make_test_session("s2", "second"),
+        ];
+        app.sidebar_hover = Some(0);
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_focused_with_hover() {
+        let mut app = make_sidebar_app();
+        app.sidebar_focused = true;
+        app.session_list = vec![
+            make_test_session("s1", "first"),
+            make_test_session("s2", "second"),
+        ];
+        app.sidebar_hover = Some(1);
+        let backend = TestBackend::new(30, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_sidebar_with_scroll() {
+        let mut app = make_sidebar_app();
+        for i in 0..20 {
+            app.session_list
+                .push(make_test_session(&format!("s{i}"), &format!("session {i}")));
+        }
+        app.sidebar_scroll = 5;
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame, frame.area());
+            })
+            .unwrap();
+    }
 }

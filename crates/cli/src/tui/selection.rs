@@ -322,4 +322,86 @@ mod tests {
         assert_eq!(start, (1, 2));
         assert_eq!(end, (1, 5));
     }
+
+    // ── TextSelection::clear ──
+
+    #[test]
+    fn clear_resets_all_fields() {
+        let mut sel = TextSelection::new();
+        sel.anchor = Some((1, 2));
+        sel.endpoint = Some((3, 4));
+        sel.dragging = true;
+        sel.clear();
+        assert!(sel.anchor.is_none());
+        assert!(sel.endpoint.is_none());
+        assert!(!sel.dragging);
+    }
+
+    // ── TextSelection::is_active ──
+
+    #[test]
+    fn is_active_true_when_anchor_differs_from_endpoint() {
+        let mut sel = TextSelection::new();
+        sel.anchor = Some((0, 0));
+        sel.endpoint = Some((1, 5));
+        assert!(sel.is_active());
+    }
+
+    #[test]
+    fn is_active_false_when_anchor_equals_endpoint() {
+        let mut sel = TextSelection::new();
+        sel.anchor = Some((2, 3));
+        sel.endpoint = Some((2, 3));
+        assert!(!sel.is_active());
+    }
+
+    // ── extract_selected_text edge cases ──
+
+    #[test]
+    fn extract_returns_none_when_start_grid_beyond_last_row() {
+        // Grid has 1 row (index 0). Scroll=10 maps screen row 0 to grid row 10,
+        // which is out of range.
+        let grid = vec![vec!['a', 'b']];
+        assert!(extract_selected_text(&grid, (0, 0), (0, 2), 10).is_none());
+    }
+
+    #[test]
+    fn extract_returns_none_for_empty_grid() {
+        let grid: Vec<Vec<char>> = vec![];
+        assert!(extract_selected_text(&grid, (0, 0), (0, 5), 0).is_none());
+    }
+
+    #[test]
+    fn extract_filters_double_width_placeholder() {
+        // '中' occupies 2 columns: ['中', '\u{FFFF}', 'a']
+        let grid = vec![vec!['中', '\u{FFFF}', 'a']];
+        let result = extract_selected_text(&grid, (0, 0), (0, 3), 0);
+        // The \u{FFFF} placeholder should be stripped
+        assert_eq!(result, Some("中a".to_string()));
+    }
+
+    #[test]
+    fn extract_returns_none_for_zero_length_slice() {
+        // Selecting from col 3..3 on a 2-char row yields nothing after clamping.
+        let grid = vec![vec!['a', 'b']];
+        let result = extract_selected_text(&grid, (0, 3), (0, 5), 0);
+        // start_col clamped to 2, end_col clamped to 2 → empty slice → None
+        assert!(result.is_none());
+    }
+
+    // ── compute_text_grid: wrap with padding ──
+
+    #[test]
+    fn grid_wrap_pads_short_row_before_new_row() {
+        // Width = 4. A double-width char ('中', w=2) at col 3 doesn't fit,
+        // so the current row (3 chars) is padded to width 4 before wrapping.
+        let lines = vec![Line::from("abc中")];
+        let grid = compute_text_grid(&lines, 4);
+        // Row 0: ['a','b','c',' '] (padded to width 4 because '中' didn't fit)
+        // Row 1: ['中','\u{FFFF}']
+        assert_eq!(grid.len(), 2);
+        assert_eq!(grid[0].len(), 4);
+        assert_eq!(grid[0][3], ' '); // padding space
+        assert_eq!(grid[1][0], '中');
+    }
 }

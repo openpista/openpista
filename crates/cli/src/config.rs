@@ -1222,4 +1222,247 @@ api_key = "tg-key"
         assert_eq!(loaded.last_model, "gpt-4o");
         assert_eq!(loaded.last_provider, "openai");
     }
+
+    #[test]
+    fn effective_client_id_prefers_configured_over_default() {
+        let ep = OAuthEndpoints {
+            auth_url: "https://example.com/auth",
+            token_url: "https://example.com/token",
+            scope: "read",
+            default_client_id: Some("builtin-id"),
+            default_callback_port: None,
+            redirect_path: "/cb",
+        };
+        assert_eq!(ep.effective_client_id("user-id"), Some("user-id"));
+        assert_eq!(ep.effective_client_id(""), Some("builtin-id"));
+        assert_eq!(ep.effective_client_id("  "), Some("builtin-id"));
+    }
+
+    #[test]
+    fn effective_client_id_returns_none_when_no_default() {
+        let ep = OAuthEndpoints {
+            auth_url: "https://example.com/auth",
+            token_url: "https://example.com/token",
+            scope: "",
+            default_client_id: None,
+            default_callback_port: None,
+            redirect_path: "",
+        };
+        assert_eq!(ep.effective_client_id(""), None);
+        assert_eq!(ep.effective_client_id("custom"), Some("custom"));
+    }
+
+    #[test]
+    fn oauth_available_for_with_custom_client_id() {
+        assert!(oauth_available_for("together", "my-client-id"));
+        assert!(oauth_available_for("unknown-provider", "my-client-id"));
+    }
+
+    #[test]
+    fn oauth_available_for_provider_without_oauth() {
+        assert!(!oauth_available_for("together", ""));
+        assert!(!oauth_available_for("ollama", ""));
+    }
+
+    #[test]
+    fn auth_requirements_for_each_preset() {
+        assert_eq!(
+            ProviderPreset::OpenAi.auth_requirements(),
+            AuthRequirement::OAuth
+        );
+        assert_eq!(
+            ProviderPreset::Anthropic.auth_requirements(),
+            AuthRequirement::OAuth
+        );
+        assert_eq!(
+            ProviderPreset::OpenRouter.auth_requirements(),
+            AuthRequirement::OAuth
+        );
+        assert_eq!(
+            ProviderPreset::Together.auth_requirements(),
+            AuthRequirement::ApiKey
+        );
+        assert_eq!(
+            ProviderPreset::Ollama.auth_requirements(),
+            AuthRequirement::None
+        );
+        assert_eq!(
+            ProviderPreset::Custom.auth_requirements(),
+            AuthRequirement::ApiKey
+        );
+    }
+
+    #[test]
+    fn provider_registry_names_returns_comma_separated() {
+        let names = provider_registry_names();
+        assert!(names.contains("openai"));
+        assert!(names.contains("anthropic"));
+        assert!(names.contains(", "));
+    }
+
+    #[test]
+    fn openrouter_oauth_endpoints_configured() {
+        let ep = ProviderPreset::OpenRouter
+            .oauth_endpoints()
+            .expect("openrouter oauth");
+        assert!(ep.auth_url.contains("openrouter.ai"));
+        assert!(ep.default_client_id.is_none());
+        assert!(ep.default_callback_port.is_none());
+    }
+
+    #[test]
+    fn together_and_ollama_have_no_oauth_endpoints() {
+        assert!(ProviderPreset::Together.oauth_endpoints().is_none());
+        assert!(ProviderPreset::Ollama.oauth_endpoints().is_none());
+        assert!(ProviderPreset::Custom.oauth_endpoints().is_none());
+    }
+
+    #[test]
+    fn tui_state_load_from_missing_file_returns_default() {
+        let loaded = TuiState::load_from(Path::new("/nonexistent/state.toml"));
+        assert!(loaded.last_model.is_empty());
+        assert!(loaded.last_provider.is_empty());
+    }
+
+    #[test]
+    fn tui_state_load_from_invalid_toml_returns_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("state.toml");
+        std::fs::write(&path, "not valid toml {{{").expect("write");
+        let loaded = TuiState::load_from(&path);
+        assert!(loaded.last_model.is_empty());
+    }
+
+    #[test]
+    fn provider_preset_custom_defaults() {
+        assert_eq!(ProviderPreset::Custom.default_model(), "");
+        assert_eq!(ProviderPreset::Custom.base_url(), None);
+        assert_eq!(ProviderPreset::Custom.api_key_env(), "OPENAI_API_KEY");
+        assert_eq!(ProviderPreset::Custom.name(), "custom");
+    }
+
+    #[test]
+    fn provider_preset_from_str_claude_alias() {
+        assert_eq!(
+            "claude".parse::<ProviderPreset>().ok(),
+            Some(ProviderPreset::Anthropic)
+        );
+    }
+
+    #[test]
+    fn provider_registry_entry_returns_none_for_unknown() {
+        assert!(provider_registry_entry("nonexistent").is_none());
+    }
+
+    #[test]
+    fn resolve_credential_for_configured_provider_with_key() {
+        with_locked_env(|| {
+            let mut cfg = Config::default();
+            cfg.agent.api_key = "test-key".to_string();
+            cfg.agent.provider = ProviderPreset::OpenAi;
+            let cred = cfg
+                .resolve_credential_for("openai")
+                .expect("should resolve");
+            assert_eq!(cred.api_key, "test-key");
+        });
+    }
+
+    #[test]
+    fn resolve_credential_for_configured_provider_empty_key() {
+        with_locked_env(|| {
+            remove_env_var("openpista_API_KEY");
+            remove_env_var("OPENAI_API_KEY");
+            let mut cfg = Config::default();
+            cfg.agent.api_key.clear();
+            cfg.agent.provider = ProviderPreset::OpenAi;
+            let result = cfg.resolve_credential_for("openai");
+            if let Some(cred) = result {
+                let _ = cred.api_key;
+            }
+        });
+    }
+
+    #[test]
+    fn resolve_credential_for_different_provider_with_env() {
+        with_locked_env(|| {
+            set_env_var("TOGETHER_API_KEY", "together-env-key");
+            let mut cfg = Config::default();
+            cfg.agent.provider = ProviderPreset::OpenAi;
+            cfg.agent.api_key = "openai-key".to_string();
+            let cred = cfg
+                .resolve_credential_for("together")
+                .expect("should resolve");
+            assert_eq!(cred.api_key, "together-env-key");
+            assert_eq!(
+                cred.base_url.as_deref(),
+                Some("https://api.together.xyz/v1")
+            );
+            remove_env_var("TOGETHER_API_KEY");
+        });
+    }
+
+    #[test]
+    fn resolve_credential_for_unknown_provider_returns_none() {
+        with_locked_env(|| {
+            let cfg = Config::default();
+            assert!(cfg.resolve_credential_for("nonexistent-provider").is_none());
+        });
+    }
+
+    #[test]
+    fn effective_base_url_empty_string_falls_back_to_preset() {
+        let cfg = AgentConfig {
+            provider: ProviderPreset::Ollama,
+            base_url: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_base_url(), Some("http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn mobile_config_defaults() {
+        let mc = MobileConfig::default();
+        assert!(!mc.enabled);
+        assert_eq!(mc.port, 4434);
+        assert!(mc.api_token.is_empty());
+    }
+
+    #[test]
+    fn gateway_config_defaults() {
+        let gc = GatewayConfig::default();
+        assert_eq!(gc.port, 4433);
+        assert!(gc.report_host.is_none());
+        assert!(gc.tls_cert.is_empty());
+    }
+
+    #[test]
+    fn provider_preset_all_returns_six_presets() {
+        assert_eq!(ProviderPreset::all().len(), 6);
+    }
+
+    #[test]
+    fn registry_entry_custom_has_endpoint_env() {
+        let entry = ProviderPreset::Custom.registry_entry();
+        assert_eq!(entry.endpoint_env, Some("openpista_BASE_URL"));
+        assert_eq!(entry.auth_mode, LoginAuthMode::EndpointAndKey);
+    }
+
+    #[test]
+    fn registry_entry_ollama_has_none_auth_mode() {
+        let entry = ProviderPreset::Ollama.registry_entry();
+        assert_eq!(entry.auth_mode, LoginAuthMode::None);
+        assert!(entry.endpoint_env.is_none());
+    }
+
+    #[test]
+    fn tui_state_path_contains_state_toml() {
+        let p = TuiState::path();
+        assert!(p.to_string_lossy().contains("state.toml"));
+        assert!(p.to_string_lossy().contains(".openpista"));
+    }
+
+    #[test]
+    fn openrouter_default_model_is_set() {
+        assert_eq!(ProviderPreset::OpenRouter.default_model(), "openai/gpt-4o");
+    }
 }

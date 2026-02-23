@@ -1610,6 +1610,615 @@ impl TuiApp {
         }
     }
 
+    // ── TEA: update (central state transition) ─────────────────
+
+    pub fn update(&mut self, action: super::action::Action) -> super::action::Command {
+        use super::action::{Action, Command};
+        match action {
+            // ── Input ────────────────────────────────────────────
+            Action::InsertChar(c) => {
+                let is_input_active =
+                    matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+                if is_input_active {
+                    self.input.insert(self.cursor_pos, c);
+                    self.cursor_pos += c.len_utf8();
+                    self.command_palette_cursor = 0;
+                }
+                Command::None
+            }
+            Action::DeleteChar => {
+                let is_input_active =
+                    matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+                if is_input_active && self.cursor_pos > 0 {
+                    let prev = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.input.drain(prev..self.cursor_pos);
+                    self.cursor_pos = prev;
+                    self.command_palette_cursor = 0;
+                }
+                Command::None
+            }
+            Action::MoveCursorLeft => {
+                let is_input_active =
+                    matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+                if is_input_active && self.cursor_pos > 0 {
+                    self.cursor_pos = self.input[..self.cursor_pos]
+                        .char_indices()
+                        .last()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
+                Command::None
+            }
+            Action::MoveCursorRight => {
+                let is_input_active =
+                    matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+                if is_input_active && self.cursor_pos < self.input.len() {
+                    self.cursor_pos = self.input[self.cursor_pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.cursor_pos + i)
+                        .unwrap_or(self.input.len());
+                }
+                Command::None
+            }
+            Action::SubmitInput => {
+                if self.screen == Screen::Home {
+                    self.screen = Screen::Chat;
+                }
+                Command::None
+            }
+
+            // ── Navigation ──────────────────────────────────────
+            Action::ScrollUp(n) => {
+                self.history_scroll = self.history_scroll.saturating_sub(n);
+                Command::None
+            }
+            Action::ScrollDown(n) => {
+                self.history_scroll = self.history_scroll.saturating_add(n);
+                Command::None
+            }
+            Action::ScrollToBottom => {
+                self.scroll_to_bottom();
+                Command::None
+            }
+            Action::SwitchScreen(screen) => {
+                self.screen = screen;
+                Command::None
+            }
+            Action::ToggleSidebarFocus => {
+                self.toggle_sidebar_focus();
+                Command::None
+            }
+
+            // ── Chat / agent lifecycle ──────────────────────────
+            Action::PushUserMessage(text) => {
+                self.push_user(text);
+                Command::None
+            }
+            Action::PushAssistantMessage(text) => {
+                self.push_assistant(text);
+                Command::None
+            }
+            Action::PushError(err) => {
+                self.push_error(err);
+                Command::None
+            }
+            Action::ApplyProgress(event) => {
+                self.apply_progress(event);
+                self.scroll_to_bottom();
+                Command::None
+            }
+            Action::ApplyCompletion(result) => {
+                match result {
+                    Ok(text) => self.push_assistant(text),
+                    Err(e) => self.push_error(e),
+                }
+                self.state = AppState::Idle;
+                self.scroll_to_bottom();
+                Command::None
+            }
+
+            // ── Sidebar ─────────────────────────────────────────
+            Action::SidebarHover(idx) => {
+                self.sidebar_hover = idx;
+                Command::None
+            }
+            Action::SidebarScroll(delta) => {
+                if delta > 0 {
+                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(delta as u16);
+                } else {
+                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub((-delta) as u16);
+                }
+                Command::None
+            }
+            Action::SelectSidebarSession => {
+                let sid = self.select_sidebar_session();
+                match sid {
+                    Some(id) => Command::LoadSessionFromDb(id),
+                    None => Command::None,
+                }
+            }
+            Action::RequestDeleteSession => {
+                self.request_delete_session();
+                Command::None
+            }
+            Action::ConfirmDelete => {
+                if let AppState::ConfirmDelete { session_id, .. } = &self.state {
+                    let id = SessionId::from(session_id.clone());
+                    self.confirmed_delete = Some(id.clone());
+                    self.state = AppState::Idle;
+                    Command::DeleteSession(id)
+                } else {
+                    Command::None
+                }
+            }
+            Action::CancelDelete => {
+                self.state = AppState::Idle;
+                Command::None
+            }
+
+            // ── Auth / login browser ────────────────────────────
+            Action::OpenLoginBrowser(seed) => {
+                self.open_login_browser(seed);
+                Command::None
+            }
+            Action::CancelAuth => {
+                self.cancel_auth_prompt();
+                Command::None
+            }
+            Action::LoginBrowserKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
+            Action::SetOAuthCodeDisplayState { provider } => {
+                self.state = AppState::LoginBrowsing {
+                    query: provider.clone(),
+                    cursor: 0,
+                    scroll: 0,
+                    step: LoginBrowseStep::InputApiKey,
+                    selected_provider: Some(provider),
+                    selected_method: Some(AuthMethodChoice::OAuth),
+                    input_buffer: String::new(),
+                    masked_buffer: String::new(),
+                    last_error: None,
+                    endpoint: None,
+                };
+                Command::None
+            }
+            Action::SetAuthValidating(provider) => {
+                self.state = AppState::AuthValidating { provider };
+                Command::None
+            }
+
+            // ── Model browser ───────────────────────────────────
+            Action::OpenModelBrowser {
+                provider,
+                entries,
+                query,
+                sync_status,
+            } => {
+                self.open_model_browser(provider, entries, query, sync_status);
+                Command::None
+            }
+            Action::CloseModelBrowser => {
+                self.state = AppState::Idle;
+                Command::None
+            }
+            Action::ModelBrowserKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
+            Action::MarkModelRefreshing => {
+                self.mark_model_refreshing();
+                Command::None
+            }
+            Action::UpdateModelCatalog {
+                provider,
+                entries,
+                sync_status,
+            } => {
+                self.update_model_browser_catalog(provider, entries, sync_status);
+                Command::None
+            }
+
+            // ── Session browser ─────────────────────────────────
+            Action::OpenSessionBrowser => {
+                self.open_session_browser();
+                Command::None
+            }
+            Action::CloseSessionBrowser => {
+                self.state = AppState::Idle;
+                Command::None
+            }
+            Action::SessionBrowserKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
+
+            // ── Command palette ─────────────────────────────────
+            Action::PaletteMoveUp => {
+                self.command_palette_cursor = self.command_palette_cursor.saturating_sub(1);
+                Command::None
+            }
+            Action::PaletteMoveDown => {
+                let max = self.palette_filtered_commands().len().saturating_sub(1);
+                self.command_palette_cursor = (self.command_palette_cursor + 1).min(max);
+                Command::None
+            }
+            Action::PaletteSelect => {
+                self.take_palette_command();
+                Command::None
+            }
+            Action::PaletteClose => {
+                self.input.clear();
+                self.cursor_pos = 0;
+                self.command_palette_cursor = 0;
+                Command::None
+            }
+            Action::PaletteTabComplete => {
+                let cmd_name = self
+                    .palette_filtered_commands()
+                    .get(self.command_palette_cursor)
+                    .map(|c| c.name.to_string());
+                if let Some(name) = cmd_name {
+                    self.input = name.clone();
+                    self.cursor_pos = name.len();
+                    self.command_palette_cursor = 0;
+                }
+                Command::None
+            }
+
+            // ── Text selection ──────────────────────────────────
+            Action::TextSelectionStart { row, col } => {
+                self.text_selection.anchor = Some((row, col));
+                self.text_selection.endpoint = Some((row, col));
+                self.text_selection.dragging = true;
+                Command::None
+            }
+            Action::TextSelectionDrag { row, col } => {
+                if self.text_selection.dragging {
+                    self.text_selection.endpoint = Some((row, col));
+                }
+                Command::None
+            }
+            Action::TextSelectionEnd { row, col } => {
+                if self.text_selection.dragging {
+                    self.text_selection.endpoint = Some((row, col));
+                    self.text_selection.dragging = false;
+                    if self.text_selection.is_active()
+                        && let Some((start, end)) = self.text_selection.ordered_range()
+                    {
+                        let grid = self.chat_text_grid.clone();
+                        let scroll = self.chat_scroll_clamped;
+                        if let Some(text) =
+                            crate::tui::selection::extract_selected_text(&grid, start, end, scroll)
+                        {
+                            return Command::CopyToClipboard(text);
+                        }
+                    }
+                }
+                Command::None
+            }
+            Action::TextSelectionCopy => {
+                if let Some((start, end)) = self.text_selection.ordered_range() {
+                    let grid = self.chat_text_grid.clone();
+                    let scroll = self.chat_scroll_clamped;
+                    if let Some(text) =
+                        super::selection::extract_selected_text(&grid, start, end, scroll)
+                    {
+                        self.text_selection.clear();
+                        return Command::CopyToClipboard(text);
+                    }
+                }
+                self.text_selection.clear();
+                Command::None
+            }
+            Action::TextSelectionClear => {
+                self.text_selection.clear();
+                Command::None
+            }
+
+            // ── System ──────────────────────────────────────────
+            Action::Tick => {
+                self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                Command::None
+            }
+            Action::Quit => {
+                self.should_quit = true;
+                Command::None
+            }
+            Action::Resize => Command::None,
+
+            Action::SetThinking => {
+                self.state = AppState::Thinking { round: 0 };
+                Command::None
+            }
+            Action::SetIdle => {
+                self.state = AppState::Idle;
+                Command::None
+            }
+
+            // ── Session management ──────────────────────────────
+            Action::LoadSession {
+                session_id,
+                messages,
+            } => {
+                self.load_session_messages(session_id, messages);
+                Command::None
+            }
+            Action::RefreshSessionList(sessions) => {
+                self.refresh_session_list(sessions);
+                Command::None
+            }
+            Action::NewSession(sid) => {
+                self.load_session_messages(sid.clone(), Vec::new());
+                self.push_assistant(format!("New session created: `{}`", sid.as_str()));
+                Command::None
+            }
+            Action::RemoveSession(sid) => {
+                self.remove_session_from_list(&sid);
+                Command::None
+            }
+
+            // ── Model / provider ────────────────────────────────
+            Action::SetModel(model) => {
+                self.model_name = model;
+                Command::None
+            }
+            Action::SetProviderName(name) => {
+                self.provider_name = name;
+                Command::None
+            }
+
+            // ── Slash commands ──────────────────────────────────
+            Action::SlashCommand(raw) => {
+                self.handle_slash_command(&raw);
+                self.scroll_to_bottom();
+                Command::None
+            }
+        }
+    }
+
+    // ── TEA: map_key_event (pure key→action mapping) ────────
+
+    pub fn map_key_event(&self, key: crossterm::event::KeyEvent) -> Vec<super::action::Action> {
+        use super::action::Action;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if let AppState::ConfirmDelete { .. } = &self.state {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => vec![Action::ConfirmDelete],
+                KeyCode::Char('n') | KeyCode::Esc => vec![Action::CancelDelete],
+                _ => vec![],
+            };
+        }
+
+        if self.sidebar_focused && self.state == AppState::Idle {
+            return match (key.modifiers, key.code) {
+                (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+                    let max = self.session_list.len().saturating_sub(1);
+                    let current = self.sidebar_hover.unwrap_or(0);
+                    vec![Action::SidebarHover(Some((current + 1).min(max)))]
+                }
+                (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+                    let current = self.sidebar_hover.unwrap_or(0);
+                    vec![Action::SidebarHover(Some(current.saturating_sub(1)))]
+                }
+                (_, KeyCode::Enter) => vec![Action::SelectSidebarSession],
+                (_, KeyCode::Char('d')) | (_, KeyCode::Delete) => {
+                    vec![Action::RequestDeleteSession]
+                }
+                (_, KeyCode::Esc) | (_, KeyCode::Tab) => {
+                    vec![
+                        Action::SidebarHover(self.sidebar_hover),
+                        Action::ToggleSidebarFocus,
+                    ]
+                }
+                _ => vec![],
+            };
+        }
+
+        if matches!(self.state, AppState::LoginBrowsing { .. }) {
+            return vec![Action::LoginBrowserKey(key)];
+        }
+
+        if matches!(self.state, AppState::ModelBrowsing { .. }) {
+            return vec![Action::ModelBrowserKey(key)];
+        }
+
+        if matches!(self.state, AppState::SessionBrowsing { .. }) {
+            return vec![Action::SessionBrowserKey(key)];
+        }
+
+        let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
+
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+                if self.text_selection.is_active() {
+                    vec![Action::TextSelectionCopy]
+                } else if self.is_palette_active() {
+                    vec![Action::PaletteClose]
+                } else if self.state == AppState::Idle {
+                    vec![Action::Quit]
+                } else if matches!(self.state, AppState::AuthPrompting { .. }) {
+                    vec![Action::CancelAuth]
+                } else {
+                    vec![]
+                }
+            }
+            (_, KeyCode::Tab) if self.is_palette_active() => {
+                vec![Action::PaletteTabComplete]
+            }
+            (_, KeyCode::Tab) if self.state == AppState::Idle && self.sidebar_visible => {
+                vec![Action::ToggleSidebarFocus]
+            }
+            (_, KeyCode::Enter) if self.state == AppState::Idle => {
+                vec![Action::SubmitInput]
+            }
+            (_, KeyCode::Char(c)) if is_input_active => {
+                vec![Action::InsertChar(c)]
+            }
+            (_, KeyCode::Backspace) if is_input_active => {
+                vec![Action::DeleteChar]
+            }
+            (_, KeyCode::Left) if is_input_active => {
+                vec![Action::MoveCursorLeft]
+            }
+            (_, KeyCode::Right) if is_input_active => {
+                vec![Action::MoveCursorRight]
+            }
+            (_, KeyCode::Up) if self.is_palette_active() => {
+                vec![Action::PaletteMoveUp]
+            }
+            (_, KeyCode::Down) if self.is_palette_active() => {
+                vec![Action::PaletteMoveDown]
+            }
+            (_, KeyCode::Up) => vec![Action::ScrollUp(1)],
+            (_, KeyCode::Down) => vec![Action::ScrollDown(1)],
+            (_, KeyCode::PageUp) => vec![Action::ScrollUp(10)],
+            (_, KeyCode::PageDown) => vec![Action::ScrollDown(10)],
+            _ => vec![],
+        }
+    }
+
+    // ── TEA: map_mouse_event (pure mouse→action mapping) ────
+
+    pub fn map_mouse_event(
+        &self,
+        mouse: crossterm::event::MouseEvent,
+        frame_area: ratatui::layout::Rect,
+    ) -> Vec<super::action::Action> {
+        use super::action::Action;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::layout::Position;
+
+        let mut actions = Vec::new();
+        let pos = Position::new(mouse.column, mouse.row);
+
+        if let Some(sb_area) = self.compute_sidebar_area(frame_area) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if sb_area.contains(pos) {
+                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
+                        let entry_height = 3u16;
+                        let scrolled_y = inner_y + self.sidebar_scroll * entry_height;
+                        let idx = (scrolled_y / entry_height) as usize;
+                        if idx < self.session_list.len() {
+                            actions.push(Action::SidebarHover(Some(idx)));
+                            actions.push(Action::SelectSidebarSession);
+                        }
+                        return actions;
+                    }
+                }
+                MouseEventKind::Moved => {
+                    if sb_area.contains(pos) {
+                        let inner_y = mouse.row.saturating_sub(sb_area.y + 1);
+                        let entry_height = 3u16;
+                        let scrolled_y = inner_y + self.sidebar_scroll * entry_height;
+                        let idx = (scrolled_y / entry_height) as usize;
+                        if idx < self.session_list.len() {
+                            actions.push(Action::SidebarHover(Some(idx)));
+                        } else {
+                            actions.push(Action::SidebarHover(None));
+                        }
+                        return actions;
+                    } else {
+                        actions.push(Action::SidebarHover(None));
+                        return actions;
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if sb_area.contains(pos) {
+                        actions.push(Action::SidebarScroll(1));
+                        return actions;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if sb_area.contains(pos) {
+                        actions.push(Action::SidebarScroll(-1));
+                        return actions;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(chat_area) = self.chat_area {
+            let inner = ratatui::layout::Rect {
+                x: chat_area.x + 1,
+                y: chat_area.y + 1,
+                width: chat_area.width.saturating_sub(2),
+                height: chat_area.height.saturating_sub(2),
+            };
+
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if inner.contains(pos) {
+                        let rel_col = mouse.column - inner.x;
+                        let rel_row = mouse.row - inner.y;
+                        actions.push(Action::TextSelectionStart {
+                            row: rel_row,
+                            col: rel_col,
+                        });
+                    } else {
+                        actions.push(Action::TextSelectionClear);
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if self.text_selection.dragging {
+                        let rel_col = mouse
+                            .column
+                            .saturating_sub(inner.x)
+                            .min(inner.width.saturating_sub(1));
+                        let rel_row = mouse
+                            .row
+                            .saturating_sub(inner.y)
+                            .min(inner.height.saturating_sub(1));
+                        actions.push(Action::TextSelectionDrag {
+                            row: rel_row,
+                            col: rel_col,
+                        });
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if self.text_selection.dragging {
+                        let rel_col = mouse
+                            .column
+                            .saturating_sub(inner.x)
+                            .min(inner.width.saturating_sub(1));
+                        let rel_row = mouse
+                            .row
+                            .saturating_sub(inner.y)
+                            .min(inner.height.saturating_sub(1));
+                        actions.push(Action::TextSelectionEnd {
+                            row: rel_row,
+                            col: rel_col,
+                        });
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if chat_area.contains(pos) {
+                        actions.push(Action::ScrollDown(3));
+                        actions.push(Action::TextSelectionClear);
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if chat_area.contains(pos) {
+                        actions.push(Action::ScrollUp(3));
+                        actions.push(Action::TextSelectionClear);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        actions
+    }
+
     // ── Rendering ────────────────────────────────────────────
 
     /// Render the entire TUI into the given frame.
@@ -2434,6 +3043,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::action::{Action, Command};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn make_app() -> TuiApp {
@@ -3589,5 +4199,2486 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
 
         assert!(matches!(app.state, AppState::SessionBrowsing { .. }));
+    }
+
+    // ── Model browser extended tests ──────────────────────
+
+    #[test]
+    fn render_model_browser_no_panic() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        assert!(matches!(app.state, AppState::ModelBrowsing { .. }));
+    }
+
+    #[test]
+    fn render_model_browser_with_search_active() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced from remote".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        if let AppState::ModelBrowsing {
+            query,
+            search_active,
+            ..
+        } = &app.state
+        {
+            assert!(query.contains("gpt"));
+            assert!(*search_active);
+        } else {
+            panic!("expected ModelBrowsing");
+        }
+    }
+
+    #[test]
+    fn render_model_browser_empty_entries() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            vec![],
+            String::new(),
+            "Offline (no cache)".to_string(),
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_model_browser_empty_with_query() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            "nonexistent_xyz".to_string(),
+            "Synced".to_string(),
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn model_browser_navigation_j_k_up_down_page() {
+        let mut app = make_app();
+        let mut models = sample_models();
+        for i in 0..15 {
+            models.push(model_catalog::ModelCatalogEntry {
+                id: format!("extra-model-{i}"),
+                provider: "openai".to_string(),
+                recommended_for_coding: true,
+                status: model_catalog::ModelStatus::Stable,
+                source: model_catalog::ModelSource::Docs,
+                available: true,
+            });
+        }
+        app.open_model_browser(
+            "openai".to_string(),
+            models,
+            String::new(),
+            "Synced".to_string(),
+        );
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert!(*cursor > 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn model_browser_search_type_and_backspace() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced".to_string(),
+        );
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "gp");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        if let AppState::ModelBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "g");
+        }
+    }
+
+    #[test]
+    fn model_browser_ctrl_c_closes() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced".to_string(),
+        );
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn model_browser_enter_with_empty_entries() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            vec![],
+            String::new(),
+            "Synced".to_string(),
+        );
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.take_pending_model_change().is_none());
+    }
+
+    #[test]
+    fn update_model_browser_catalog_preserves_browsing() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced".to_string(),
+        );
+        app.update_model_browser_catalog(
+            "openai".to_string(),
+            sample_models(),
+            "Refreshed".to_string(),
+        );
+        if let AppState::ModelBrowsing {
+            last_sync_status,
+            cursor,
+            ..
+        } = &app.state
+        {
+            assert_eq!(last_sync_status, "Refreshed");
+            assert_eq!(*cursor, 0);
+        } else {
+            panic!("expected ModelBrowsing");
+        }
+    }
+
+    #[test]
+    fn model_browser_query_returns_none_when_not_browsing() {
+        let app = make_app();
+        assert!(app.model_browser_query().is_none());
+    }
+
+    #[test]
+    fn model_browser_query_returns_query_when_browsing() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            "test-query".to_string(),
+            "Synced".to_string(),
+        );
+        assert_eq!(app.model_browser_query(), Some("test-query".to_string()));
+    }
+
+    #[test]
+    fn mark_model_refreshing_updates_sync_status() {
+        let mut app = make_app();
+        app.open_model_browser(
+            "openai".to_string(),
+            sample_models(),
+            String::new(),
+            "Synced".to_string(),
+        );
+        app.mark_model_refreshing();
+        if let AppState::ModelBrowsing {
+            last_sync_status, ..
+        } = &app.state
+        {
+            assert_eq!(last_sync_status, "Refreshing model...");
+        }
+    }
+
+    // ── Login browser extended tests ──────────────────────
+
+    #[test]
+    fn render_login_browser_provider_step_no_panic() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(matches!(app.state, AppState::LoginBrowsing { .. }));
+    }
+
+    #[test]
+    fn render_login_browser_method_step_no_panic() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectMethod,
+                ..
+            }
+        ));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_login_browser_api_key_step_no_panic() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::InputApiKey,
+                ..
+            }
+        ));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn login_browser_provider_navigation_and_search() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "op");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "o");
+        }
+    }
+
+    #[test]
+    fn login_browser_provider_j_k_navigation() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn login_browser_provider_page_navigation() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert!(*cursor > 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn login_browser_ctrl_c_closes_from_provider() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+        assert!(
+            matches!(app.messages.last(), Some(TuiMessage::Assistant(t)) if t.contains("cancelled"))
+        );
+    }
+
+    #[test]
+    fn login_browser_esc_from_provider_closes() {
+        let mut app = make_app();
+        app.open_login_browser(None);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn login_browser_enter_no_match_shows_error() {
+        let mut app = make_app();
+        app.open_login_browser(Some("zzz_nonexistent_provider".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { last_error, .. } = &app.state {
+            assert!(last_error.is_some());
+        } else {
+            panic!("expected LoginBrowsing with error");
+        }
+    }
+
+    #[test]
+    fn login_browser_method_step_esc_goes_back() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectMethod,
+                ..
+            }
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectProvider,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn login_browser_method_j_k_navigation() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn login_browser_method_ctrl_c_closes() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn login_browser_oauth_triggers_intent() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::AuthValidating { .. }));
+        let intent = app.take_pending_auth_intent();
+        assert!(intent.is_some());
+        assert_eq!(intent.unwrap().auth_method, AuthMethodChoice::OAuth);
+    }
+
+    #[test]
+    fn login_browser_api_key_type_and_submit() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for c in "sk-test123".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        if let AppState::LoginBrowsing {
+            masked_buffer,
+            input_buffer,
+            ..
+        } = &app.state
+        {
+            assert_eq!(input_buffer, "sk-test123");
+            assert_eq!(masked_buffer.len(), 10);
+            assert!(masked_buffer.chars().all(|c| c == '*'));
+        } else {
+            panic!("expected LoginBrowsing at InputApiKey");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing {
+            input_buffer,
+            masked_buffer,
+            ..
+        } = &app.state
+        {
+            assert_eq!(input_buffer, "sk-test12");
+            assert_eq!(masked_buffer.len(), 9);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::AuthValidating { .. }));
+        let intent = app.take_pending_auth_intent();
+        assert!(intent.is_some());
+        assert_eq!(intent.unwrap().api_key.as_deref(), Some("sk-test12"));
+    }
+
+    #[test]
+    fn login_browser_api_key_empty_shows_error() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { last_error, .. } = &app.state {
+            assert!(last_error.as_deref().unwrap_or("").contains("required"));
+        }
+    }
+
+    #[test]
+    fn login_browser_api_key_esc_goes_back() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::InputApiKey,
+                ..
+            }
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectMethod,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn login_browser_api_key_ctrl_c_closes() {
+        let mut app = make_app();
+        app.open_login_browser(Some("openai".to_string()));
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn render_login_browser_with_error_no_panic() {
+        let mut app = make_app();
+        app.reopen_provider_selection_with_error("Something went wrong".to_string());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let AppState::LoginBrowsing { last_error, .. } = &app.state {
+            assert_eq!(last_error.as_deref(), Some("Something went wrong"));
+        }
+    }
+
+    #[test]
+    fn render_login_browser_endpoint_step_no_panic() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: "custom".to_string(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputEndpoint,
+            selected_provider: Some("custom".to_string()),
+            selected_method: None,
+            input_buffer: "https://api.example.com".to_string(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_login_browser_api_key_with_endpoint_no_panic() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: "custom".to_string(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputApiKey,
+            selected_provider: Some("custom".to_string()),
+            selected_method: Some(AuthMethodChoice::ApiKey),
+            input_buffer: "sk-test".to_string(),
+            masked_buffer: "*******".to_string(),
+            last_error: None,
+            endpoint: Some("https://api.example.com".to_string()),
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_login_browser_oauth_code_step_no_panic() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: "openai".to_string(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputApiKey,
+            selected_provider: Some("openai".to_string()),
+            selected_method: Some(AuthMethodChoice::OAuth),
+            input_buffer: "auth-code-123".to_string(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn login_browser_endpoint_type_backspace_submit() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputEndpoint,
+            selected_provider: Some("custom".to_string()),
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for c in "https://test.com".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { input_buffer, .. } = &app.state {
+            assert_eq!(input_buffer, "https://test.co");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::InputApiKey,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn login_browser_endpoint_empty_shows_error() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputEndpoint,
+            selected_provider: Some("custom".to_string()),
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        if let AppState::LoginBrowsing { last_error, .. } = &app.state {
+            assert!(last_error.as_deref().unwrap_or("").contains("required"));
+        }
+    }
+
+    #[test]
+    fn login_browser_endpoint_esc_goes_back() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputEndpoint,
+            selected_provider: Some("custom".to_string()),
+            selected_method: None,
+            input_buffer: "test".to_string(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectProvider,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn login_browser_endpoint_ctrl_c_closes() {
+        let mut app = make_app();
+        app.state = AppState::LoginBrowsing {
+            query: String::new(),
+            cursor: 0,
+            scroll: 0,
+            step: LoginBrowseStep::InputEndpoint,
+            selected_provider: Some("custom".to_string()),
+            selected_method: None,
+            input_buffer: String::new(),
+            masked_buffer: String::new(),
+            last_error: None,
+            endpoint: None,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    // ── Render tests for Chat screen states ──────────────────
+
+    #[test]
+    fn render_chat_screen_with_messages() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.push_user("hello".into());
+        app.push_assistant("world".into());
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_chat_screen_with_sidebar() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = true;
+        app.session_list = vec![
+            make_session_entry("s1", "session one"),
+            make_session_entry("s2", "session two"),
+        ];
+        app.push_user("test".into());
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_chat_screen_without_sidebar() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_chat_with_confirm_delete_overlay() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.session_list = vec![make_session_entry("s1", "session one")];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_home_screen() {
+        let mut app = make_app();
+        app.screen = Screen::Home;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert_eq!(app.screen, Screen::Home);
+    }
+
+    #[test]
+    fn render_thinking_state() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.state = AppState::Thinking { round: 2 };
+        app.spinner_tick = 5;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_auth_prompting_state() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.state = AppState::AuthPrompting {
+            provider: "together".to_string(),
+            env_name: "TOGETHER_API_KEY".to_string(),
+            endpoint: None,
+            endpoint_env: None,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_auth_prompting_with_endpoint() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.state = AppState::AuthPrompting {
+            provider: "custom".to_string(),
+            env_name: "CUSTOM_API_KEY".to_string(),
+            endpoint: Some("https://api.example.com".to_string()),
+            endpoint_env: Some("CUSTOM_ENDPOINT".to_string()),
+        };
+        app.input = "sk-secret".to_string();
+        app.cursor_pos = 9;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_auth_validating_state() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.state = AppState::AuthValidating {
+            provider: "openai".to_string(),
+        };
+        app.spinner_tick = 2;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_executing_tool_state() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.state = AppState::ExecutingTool {
+            tool_name: "system.run".to_string(),
+        };
+        app.spinner_tick = 4;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    // ── Command palette render tests ──────────────────
+
+    #[test]
+    fn render_command_palette() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.input = "/".to_string();
+        app.cursor_pos = 1;
+        assert!(app.is_palette_active());
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn command_palette_tab_auto_completes() {
+        let mut app = make_app();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input, "/help");
+    }
+
+    #[test]
+    fn tab_toggles_sidebar_when_not_palette() {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.sidebar_focused = false;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.sidebar_focused);
+    }
+
+    #[test]
+    fn enter_on_home_screen_switches_to_chat() {
+        let mut app = make_app();
+        app.screen = Screen::Home;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.screen, Screen::Chat);
+    }
+
+    // ── Auth flow tests ────────────────────────────────
+
+    #[test]
+    fn complete_auth_validation_success() {
+        let mut app = make_app();
+        app.state = AppState::AuthValidating {
+            provider: "openai".to_string(),
+        };
+        app.complete_auth_validation("openai".to_string(), "OPENAI_API_KEY".to_string(), Ok(()));
+        assert_eq!(app.state, AppState::Idle);
+        assert!(
+            matches!(app.messages.last(), Some(TuiMessage::Assistant(t)) if t.contains("Saved"))
+        );
+    }
+
+    #[test]
+    fn complete_auth_validation_failure() {
+        let mut app = make_app();
+        app.state = AppState::AuthValidating {
+            provider: "openai".to_string(),
+        };
+        app.complete_auth_validation(
+            "openai".to_string(),
+            "OPENAI_API_KEY".to_string(),
+            Err("invalid key".to_string()),
+        );
+        assert_eq!(app.state, AppState::Idle);
+        assert!(matches!(app.messages.last(), Some(TuiMessage::Error(t)) if t.contains("Failed")));
+    }
+
+    #[test]
+    fn reopen_method_selector_with_error_sets_state() {
+        let mut app = make_app();
+        app.reopen_method_selector_with_error("openai", "something failed".to_string());
+        if let AppState::LoginBrowsing {
+            step,
+            last_error,
+            selected_provider,
+            ..
+        } = &app.state
+        {
+            assert_eq!(*step, LoginBrowseStep::SelectMethod);
+            assert_eq!(last_error.as_deref(), Some("something failed"));
+            assert_eq!(selected_provider.as_deref(), Some("openai"));
+        } else {
+            panic!("expected LoginBrowsing");
+        }
+    }
+
+    #[test]
+    fn reopen_openai_method_with_error_delegates() {
+        let mut app = make_app();
+        app.reopen_openai_method_with_error("test error".to_string());
+        assert!(matches!(
+            app.state,
+            AppState::LoginBrowsing {
+                step: LoginBrowseStep::SelectMethod,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn take_auth_submission_returns_none_when_idle() {
+        let mut app = make_app();
+        assert!(app.take_auth_submission().is_none());
+    }
+
+    #[test]
+    fn take_auth_submission_returns_none_when_input_empty() {
+        let mut app = make_app();
+        app.state = AppState::AuthPrompting {
+            provider: "openai".to_string(),
+            env_name: "OPENAI_API_KEY".to_string(),
+            endpoint: None,
+            endpoint_env: None,
+        };
+        app.input = "   ".to_string();
+        assert!(app.take_auth_submission().is_none());
+    }
+
+    #[test]
+    fn take_pending_auth_intent_consume() {
+        let mut app = make_app();
+        app.pending_auth_intent = Some(AuthLoginIntent {
+            provider: "openai".to_string(),
+            auth_method: AuthMethodChoice::OAuth,
+            endpoint: None,
+            api_key: None,
+        });
+        assert!(app.take_pending_auth_intent().is_some());
+        assert!(app.take_pending_auth_intent().is_none());
+    }
+
+    #[test]
+    fn take_pending_model_change_consume() {
+        let mut app = make_app();
+        app.pending_model_change = Some(("gpt-4o".to_string(), "openai".to_string()));
+        let change = app.take_pending_model_change();
+        assert_eq!(change, Some(("gpt-4o".to_string(), "openai".to_string())));
+        assert!(app.take_pending_model_change().is_none());
+    }
+
+    #[test]
+    fn compute_sidebar_area_none_when_hidden() {
+        let mut app = make_app();
+        app.sidebar_visible = false;
+        assert!(app.compute_sidebar_area(Rect::new(0, 0, 120, 40)).is_none());
+    }
+
+    #[test]
+    fn compute_sidebar_area_none_on_home() {
+        let mut app = make_app();
+        app.screen = Screen::Home;
+        app.sidebar_visible = true;
+        assert!(app.compute_sidebar_area(Rect::new(0, 0, 120, 40)).is_none());
+    }
+
+    #[test]
+    fn compute_sidebar_area_some_on_chat() {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = true;
+        let sidebar = app.compute_sidebar_area(Rect::new(0, 0, 120, 40));
+        assert!(sidebar.is_some());
+        assert!(sidebar.unwrap().width > 0);
+    }
+
+    #[test]
+    fn conversation_count_counts_user_and_assistant() {
+        let mut app = make_app();
+        app.push_user("hi".into());
+        app.push_assistant("hello".into());
+        app.messages.push(TuiMessage::ToolCall {
+            tool_name: "t".into(),
+            args_preview: "{}".into(),
+            done: false,
+        });
+        app.push_error("err".into());
+        assert_eq!(app.conversation_count(), 2);
+    }
+
+    #[test]
+    fn set_pending_sidebar_selection_works() {
+        let mut app = make_app();
+        app.set_pending_sidebar_selection(SessionId::from("test-sid"));
+        assert_eq!(
+            app.take_pending_sidebar_selection()
+                .as_ref()
+                .map(|s| s.as_str()),
+            Some("test-sid")
+        );
+    }
+
+    #[test]
+    fn session_browser_up_down_arrows() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "a"),
+            make_session_entry("s2", "b"),
+            make_session_entry("s3", "c"),
+        ];
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 1);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn session_browser_page_up_down() {
+        let mut app = make_app();
+        for i in 0..20 {
+            app.session_list.push(make_session_entry(
+                &format!("s{i}"),
+                &format!("session {i}"),
+            ));
+        }
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert!(*cursor > 0);
+        }
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { cursor, .. } = &app.state {
+            assert_eq!(*cursor, 0);
+        }
+    }
+
+    #[test]
+    fn session_browser_search_backspace() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "hi");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        if let AppState::SessionBrowsing { query, .. } = &app.state {
+            assert_eq!(query, "h");
+        }
+    }
+
+    #[test]
+    fn session_browser_enter_with_empty_sessions() {
+        let mut app = make_app();
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.take_pending_sidebar_selection().is_none());
+    }
+
+    #[test]
+    fn session_browser_d_with_empty_sessions() {
+        let mut app = make_app();
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::SessionBrowsing { .. }));
+    }
+
+    #[test]
+    fn session_browser_delete_key_triggers_delete() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+    }
+
+    #[test]
+    fn render_session_browser_with_search_active() {
+        let mut app = make_app();
+        app.session_list = vec![
+            make_session_entry("s1", "deploy script"),
+            make_session_entry("s2", "test runner"),
+        ];
+        app.open_session_browser();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn render_session_browser_no_match_query() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.state = AppState::SessionBrowsing {
+            query: "nonexistent_xyz".to_string(),
+            cursor: 0,
+            scroll: 0,
+            search_active: true,
+        };
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+    }
+
+    #[test]
+    fn confirm_delete_enter_confirms() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+        assert_eq!(
+            app.take_confirmed_delete().as_ref().map(|s| s.as_str()),
+            Some("s1")
+        );
+    }
+
+    #[test]
+    fn confirm_delete_esc_cancels() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.take_confirmed_delete().is_none());
+    }
+
+    #[test]
+    fn confirm_delete_ignores_other_keys() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+    }
+
+    #[test]
+    fn sidebar_focused_esc_unfocuses() {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_tab_unfocuses() {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_delete_triggers_confirm() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "a")];
+        app.sidebar_visible = true;
+        app.sidebar_focused = true;
+        app.sidebar_hover = Some(0);
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(matches!(app.state, AppState::ConfirmDelete { .. }));
+    }
+
+    #[test]
+    fn request_delete_session_with_empty_preview() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "")];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        if let AppState::ConfirmDelete {
+            session_preview, ..
+        } = &app.state
+        {
+            assert_eq!(session_preview, "(empty session)");
+        }
+    }
+
+    #[test]
+    fn request_delete_session_with_long_preview_truncates() {
+        let mut app = make_app();
+        let long_preview = "A".repeat(60);
+        app.session_list = vec![make_session_entry("s1", &long_preview)];
+        app.sidebar_hover = Some(0);
+        app.request_delete_session();
+        if let AppState::ConfirmDelete {
+            session_preview, ..
+        } = &app.state
+        {
+            assert!(session_preview.ends_with('\u{2026}'));
+            assert!(session_preview.chars().count() <= 40);
+        }
+    }
+
+    #[test]
+    fn toggle_sidebar_focus_initializes_hover() {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.sidebar_focused = false;
+        app.sidebar_hover = None;
+        app.session_list = vec![make_session_entry("s1", "a")];
+        app.toggle_sidebar_focus();
+        assert!(app.sidebar_focused);
+        assert_eq!(app.sidebar_hover, Some(0));
+    }
+
+    #[test]
+    fn load_session_messages_skips_system() {
+        let mut app = make_app();
+        let sid = SessionId::from("test");
+        let sys = proto::AgentMessage::new(sid.clone(), proto::Role::System, "system prompt");
+        app.load_session_messages(sid, vec![sys]);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn handle_slash_command_exit_sets_quit() {
+        let mut app = make_app();
+        assert!(app.handle_slash_command("/exit"));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn handle_slash_command_model_pushes_loading() {
+        let mut app = make_app();
+        assert!(app.handle_slash_command("/model"));
+        assert!(
+            matches!(app.messages.last(), Some(TuiMessage::Assistant(t)) if t.contains("Loading"))
+        );
+    }
+
+    #[test]
+    fn visible_model_entries_filters_and_sorts() {
+        let mut app = make_app();
+        app.model_entries = sample_models();
+        assert!(!app.visible_model_entries("").is_empty());
+        let filtered = app.visible_model_entries("gpt");
+        assert!(filtered.iter().all(|e| e.id.to_lowercase().contains("gpt")));
+        assert!(app.visible_model_entries("nonexistent_xyz").is_empty());
+    }
+
+    #[test]
+    fn apply_progress_tool_error_result() {
+        let mut app = make_app();
+        app.apply_progress(ProgressEvent::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            args: serde_json::json!({"command": "bad"}),
+        });
+        app.apply_progress(ProgressEvent::ToolCallFinished {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            output: "error: not found".into(),
+            is_error: true,
+        });
+        assert!(matches!(
+            &app.messages[1],
+            TuiMessage::ToolResult { is_error: true, .. }
+        ));
+    }
+
+    #[test]
+    fn apply_progress_long_args_truncated() {
+        let mut app = make_app();
+        let long_args = serde_json::json!({ "command": "x".repeat(200) });
+        app.apply_progress(ProgressEvent::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            args: long_args,
+        });
+        if let TuiMessage::ToolCall { args_preview, .. } = &app.messages[0] {
+            assert!(args_preview.ends_with('\u{2026}'));
+            assert!(args_preview.len() <= 83);
+        }
+    }
+
+    #[test]
+    fn apply_progress_long_output_truncated() {
+        let mut app = make_app();
+        app.apply_progress(ProgressEvent::ToolCallStarted {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            args: serde_json::json!({}),
+        });
+        app.apply_progress(ProgressEvent::ToolCallFinished {
+            call_id: "c1".into(),
+            tool_name: "system.run".into(),
+            output: "x".repeat(200),
+            is_error: false,
+        });
+        if let TuiMessage::ToolResult { output_preview, .. } = &app.messages[1] {
+            assert!(output_preview.ends_with('\u{2026}'));
+            assert!(output_preview.len() <= 123);
+        }
+    }
+
+    // ═══ Reactive TEA tests: update() ═══════════════════════════
+
+    #[test]
+    fn update_insert_char_idle() {
+        let mut app = make_app();
+        let cmd = app.update(Action::InsertChar('a'));
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(app.input, "a");
+        assert_eq!(app.cursor_pos, 1);
+    }
+
+    #[test]
+    fn update_insert_char_non_idle_ignored() {
+        let mut app = make_app();
+        app.state = AppState::Thinking { round: 0 };
+        let cmd = app.update(Action::InsertChar('x'));
+        assert!(matches!(cmd, Command::None));
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn update_delete_char() {
+        let mut app = make_app();
+        app.update(Action::InsertChar('h'));
+        app.update(Action::InsertChar('i'));
+        assert_eq!(app.input, "hi");
+        assert_eq!(app.cursor_pos, 2);
+        let cmd = app.update(Action::DeleteChar);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(app.input, "h");
+        assert_eq!(app.cursor_pos, 1);
+    }
+
+    #[test]
+    fn update_move_cursor_left_right() {
+        let mut app = make_app();
+        app.update(Action::InsertChar('a'));
+        app.update(Action::InsertChar('b'));
+        assert_eq!(app.cursor_pos, 2);
+        app.update(Action::MoveCursorLeft);
+        assert_eq!(app.cursor_pos, 1);
+        app.update(Action::MoveCursorRight);
+        assert_eq!(app.cursor_pos, 2);
+        // Left at 0 stays at 0
+        app.update(Action::MoveCursorLeft);
+        app.update(Action::MoveCursorLeft);
+        let cmd = app.update(Action::MoveCursorLeft);
+        assert!(matches!(cmd, Command::None));
+        assert_eq!(app.cursor_pos, 0);
+    }
+
+    #[test]
+    fn update_submit_input_on_home_screen() {
+        let mut app = make_app();
+        app.screen = Screen::Home;
+        app.update(Action::SubmitInput);
+        assert_eq!(app.screen, Screen::Chat);
+    }
+
+    #[test]
+    fn update_scroll_up_down() {
+        let mut app = make_app();
+        app.history_scroll = 10;
+        app.update(Action::ScrollUp(3));
+        assert_eq!(app.history_scroll, 7);
+        app.update(Action::ScrollDown(5));
+        assert_eq!(app.history_scroll, 12);
+        // ScrollUp saturates at 0
+        app.update(Action::ScrollUp(100));
+        assert_eq!(app.history_scroll, 0);
+    }
+
+    #[test]
+    fn update_switch_screen() {
+        let mut app = make_app();
+        assert_eq!(app.screen, Screen::Home);
+        app.update(Action::SwitchScreen(Screen::Chat));
+        assert_eq!(app.screen, Screen::Chat);
+    }
+
+    #[test]
+    fn update_push_user_message() {
+        let mut app = make_app();
+        app.update(Action::PushUserMessage("hello".to_string()));
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], TuiMessage::User(t) if t == "hello"));
+    }
+
+    #[test]
+    fn update_push_assistant_message() {
+        let mut app = make_app();
+        app.update(Action::PushAssistantMessage("world".to_string()));
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], TuiMessage::Assistant(t) if t == "world"));
+    }
+
+    #[test]
+    fn update_push_error() {
+        let mut app = make_app();
+        app.update(Action::PushError("oops".to_string()));
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], TuiMessage::Error(t) if t == "oops"));
+    }
+
+    #[test]
+    fn update_apply_completion_ok_via_action() {
+        let mut app = make_app();
+        app.state = AppState::Thinking { round: 0 };
+        app.update(Action::ApplyCompletion(Ok("done".to_string())));
+        assert_eq!(app.state, AppState::Idle);
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], TuiMessage::Assistant(t) if t == "done"));
+    }
+
+    #[test]
+    fn update_apply_completion_err_via_action() {
+        let mut app = make_app();
+        app.state = AppState::Thinking { round: 0 };
+        app.update(Action::ApplyCompletion(Err("fail".to_string())));
+        assert_eq!(app.state, AppState::Idle);
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], TuiMessage::Error(t) if t == "fail"));
+    }
+
+    #[test]
+    fn update_sidebar_hover() {
+        let mut app = make_app();
+        assert_eq!(app.sidebar_hover, None);
+        app.update(Action::SidebarHover(Some(3)));
+        assert_eq!(app.sidebar_hover, Some(3));
+        app.update(Action::SidebarHover(None));
+        assert_eq!(app.sidebar_hover, None);
+    }
+
+    #[test]
+    fn update_sidebar_scroll() {
+        let mut app = make_app();
+        app.update(Action::SidebarScroll(5));
+        assert_eq!(app.sidebar_scroll, 5);
+        app.update(Action::SidebarScroll(-2));
+        assert_eq!(app.sidebar_scroll, 3);
+        // Saturates at 0
+        app.update(Action::SidebarScroll(-100));
+        assert_eq!(app.sidebar_scroll, 0);
+    }
+
+    #[test]
+    fn update_confirm_delete_in_confirm_state() {
+        let mut app = make_app();
+        app.state = AppState::ConfirmDelete {
+            session_id: "ses_test".to_string(),
+            session_preview: "preview".to_string(),
+        };
+        app.update(Action::ConfirmDelete);
+        assert!(app.confirmed_delete.is_some());
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn update_cancel_delete() {
+        let mut app = make_app();
+        app.state = AppState::ConfirmDelete {
+            session_id: "ses_test".to_string(),
+            session_preview: "preview".to_string(),
+        };
+        app.update(Action::CancelDelete);
+        assert_eq!(app.state, AppState::Idle);
+        assert!(app.confirmed_delete.is_none());
+    }
+
+    #[test]
+    fn update_palette_move_up_down() {
+        let mut app = make_app();
+        app.command_palette_cursor = 5;
+        app.update(Action::PaletteMoveUp);
+        assert_eq!(app.command_palette_cursor, 4);
+        // Saturates at 0
+        app.command_palette_cursor = 0;
+        app.update(Action::PaletteMoveUp);
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn update_palette_close() {
+        let mut app = make_app();
+        app.input = "/help".to_string();
+        app.cursor_pos = 5;
+        app.command_palette_cursor = 2;
+        app.update(Action::PaletteClose);
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor_pos, 0);
+        assert_eq!(app.command_palette_cursor, 0);
+    }
+
+    #[test]
+    fn update_tick() {
+        let mut app = make_app();
+        let before = app.spinner_tick;
+        app.update(Action::Tick);
+        assert_eq!(app.spinner_tick, before.wrapping_add(1));
+    }
+
+    #[test]
+    fn update_quit() {
+        let mut app = make_app();
+        assert!(!app.should_quit);
+        app.update(Action::Quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn update_resize_returns_none() {
+        let mut app = make_app();
+        let cmd = app.update(Action::Resize);
+        assert!(matches!(cmd, Command::None));
+    }
+
+    #[test]
+    fn update_set_model() {
+        let mut app = make_app();
+        app.update(Action::SetModel("claude-4".to_string()));
+        assert_eq!(app.model_name, "claude-4");
+    }
+
+    #[test]
+    fn update_set_provider_name() {
+        let mut app = make_app();
+        app.update(Action::SetProviderName("anthropic".to_string()));
+        assert_eq!(app.provider_name, "anthropic");
+    }
+
+    #[test]
+    fn update_new_session() {
+        let mut app = make_app();
+        let sid = SessionId::new();
+        app.update(Action::NewSession(sid.clone()));
+        assert_eq!(app.session_id, sid);
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, TuiMessage::Assistant(t) if t.contains("New session")))
+        );
+    }
+
+    #[test]
+    fn update_set_thinking() {
+        let mut app = make_app();
+        assert_eq!(app.state, AppState::Idle);
+        app.update(Action::SetThinking);
+        assert_eq!(app.state, AppState::Thinking { round: 0 });
+    }
+
+    #[test]
+    fn update_text_selection_start() {
+        let mut app = make_app();
+        app.update(Action::TextSelectionStart { row: 5, col: 10 });
+        assert_eq!(app.text_selection.anchor, Some((5, 10)));
+        assert_eq!(app.text_selection.endpoint, Some((5, 10)));
+        assert!(app.text_selection.dragging);
+    }
+
+    #[test]
+    fn update_text_selection_drag() {
+        let mut app = make_app();
+        app.text_selection.dragging = true;
+        app.update(Action::TextSelectionDrag { row: 7, col: 15 });
+        assert_eq!(app.text_selection.endpoint, Some((7, 15)));
+    }
+
+    #[test]
+    fn update_text_selection_drag_not_dragging() {
+        let mut app = make_app();
+        assert!(!app.text_selection.dragging);
+        app.update(Action::TextSelectionDrag { row: 7, col: 15 });
+        assert_eq!(app.text_selection.endpoint, None);
+    }
+
+    #[test]
+    fn update_text_selection_clear() {
+        let mut app = make_app();
+        app.text_selection.anchor = Some((0, 0));
+        app.text_selection.endpoint = Some((5, 10));
+        app.text_selection.dragging = true;
+        app.update(Action::TextSelectionClear);
+        assert_eq!(app.text_selection.anchor, None);
+        assert_eq!(app.text_selection.endpoint, None);
+        assert!(!app.text_selection.dragging);
+    }
+
+    // ═══ Reactive TEA tests: map_key_event() ════════════════════
+
+    #[test]
+    fn map_key_confirm_delete_y() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_app();
+        app.state = AppState::ConfirmDelete {
+            session_id: "s1".to_string(),
+            session_preview: "p".to_string(),
+        };
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::ConfirmDelete));
+    }
+
+    #[test]
+    fn map_key_confirm_delete_esc() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_app();
+        app.state = AppState::ConfirmDelete {
+            session_id: "s1".to_string(),
+            session_preview: "p".to_string(),
+        };
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::CancelDelete));
+    }
+
+    #[test]
+    fn map_key_idle_char() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::InsertChar('z')));
+    }
+
+    #[test]
+    fn map_key_idle_backspace() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::DeleteChar));
+    }
+
+    #[test]
+    fn map_key_idle_left_right() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let left = app.map_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(left.len(), 1);
+        assert!(matches!(left[0], Action::MoveCursorLeft));
+        let right = app.map_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(right.len(), 1);
+        assert!(matches!(right[0], Action::MoveCursorRight));
+    }
+
+    #[test]
+    fn map_key_ctrl_c_quits_in_idle() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Quit));
+    }
+
+    #[test]
+    fn map_key_esc_quits_in_idle() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Quit));
+    }
+
+    #[test]
+    fn map_key_scroll_up_down() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_app();
+        // Up arrow maps to ScrollUp(1) when not in palette and not input-active for nav
+        // In Idle state, Up maps to ScrollUp since palette is not active
+        app.state = AppState::Thinking { round: 0 };
+        let up = app.map_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(up.len(), 1);
+        assert!(matches!(up[0], Action::ScrollUp(1)));
+        let down = app.map_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(down.len(), 1);
+        assert!(matches!(down[0], Action::ScrollDown(1)));
+    }
+
+    #[test]
+    fn map_key_page_up_down() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_app();
+        app.state = AppState::Thinking { round: 0 };
+        let pup = app.map_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(pup.len(), 1);
+        assert!(matches!(pup[0], Action::ScrollUp(10)));
+        let pdown = app.map_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(pdown.len(), 1);
+        assert!(matches!(pdown[0], Action::ScrollDown(10)));
+    }
+
+    #[test]
+    fn map_key_enter_idle_returns_submit() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = make_app();
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SubmitInput));
+    }
+
+    #[test]
+    fn map_key_thinking_non_enter_ignored() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_app();
+        app.state = AppState::Thinking { round: 0 };
+        // Char keys are not input-active in Thinking state
+        let actions = app.map_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(actions.is_empty());
+    }
+
+    // ── map_mouse_event tests ─────────────────────────────────
+
+    fn mouse_event(
+        kind: crossterm::event::MouseEventKind,
+        col: u16,
+        row: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn setup_sidebar_app() -> TuiApp {
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = true;
+        app.session_list = vec![
+            make_session_entry("s1", "hello"),
+            make_session_entry("s2", "world"),
+        ];
+        app
+    }
+
+    #[test]
+    fn mouse_left_click_sidebar_selects_session() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = setup_sidebar_app();
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let sb = app.compute_sidebar_area(frame_area).unwrap();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), sb.x + 2, sb.y + 2),
+            frame_area,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SidebarHover(Some(_))))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SelectSidebarSession))
+        );
+    }
+
+    #[test]
+    fn mouse_move_sidebar_sets_hover() {
+        use crossterm::event::MouseEventKind;
+        let app = setup_sidebar_app();
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let sb = app.compute_sidebar_area(frame_area).unwrap();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Moved, sb.x + 2, sb.y + 2),
+            frame_area,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SidebarHover(Some(_))))
+        );
+    }
+
+    #[test]
+    fn mouse_move_outside_sidebar_clears_hover() {
+        use crossterm::event::MouseEventKind;
+        let app = setup_sidebar_app();
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let actions = app.map_mouse_event(mouse_event(MouseEventKind::Moved, 5, 5), frame_area);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarHover(None)));
+    }
+
+    #[test]
+    fn mouse_scroll_sidebar() {
+        use crossterm::event::MouseEventKind;
+        let app = setup_sidebar_app();
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let sb = app.compute_sidebar_area(frame_area).unwrap();
+        let down = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, sb.x + 2, sb.y + 2),
+            frame_area,
+        );
+        assert_eq!(down.len(), 1);
+        assert!(matches!(down[0], Action::SidebarScroll(1)));
+        let up = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollUp, sb.x + 2, sb.y + 2),
+            frame_area,
+        );
+        assert_eq!(up.len(), 1);
+        assert!(matches!(up[0], Action::SidebarScroll(-1)));
+    }
+
+    #[test]
+    fn mouse_left_click_chat_starts_selection() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.chat_area = Some(Rect::new(0, 0, 80, 30));
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::TextSelectionStart { .. }));
+    }
+
+    #[test]
+    fn mouse_left_click_outside_chat_clears_selection() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = Some(Rect::new(10, 10, 60, 20));
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::TextSelectionClear));
+    }
+
+    #[test]
+    fn mouse_drag_chat_when_dragging() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = Some(Rect::new(0, 0, 80, 30));
+        app.text_selection.dragging = true;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::TextSelectionDrag { .. }));
+    }
+
+    #[test]
+    fn mouse_drag_chat_not_dragging_ignored() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = Some(Rect::new(0, 0, 80, 30));
+        app.text_selection.dragging = false;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_release_chat_when_dragging() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = Some(Rect::new(0, 0, 80, 30));
+        app.text_selection.dragging = true;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::TextSelectionEnd { .. }));
+    }
+
+    #[test]
+    fn mouse_scroll_chat() {
+        use crossterm::event::MouseEventKind;
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = Some(Rect::new(0, 0, 80, 30));
+        let down = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(down.len(), 2);
+        assert!(matches!(down[0], Action::ScrollDown(3)));
+        assert!(matches!(down[1], Action::TextSelectionClear));
+        let up = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollUp, 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(up.len(), 2);
+        assert!(matches!(up[0], Action::ScrollUp(3)));
+    }
+
+    #[test]
+    fn mouse_no_sidebar_no_chat_returns_empty() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.screen = Screen::Chat;
+        app.sidebar_visible = false;
+        app.chat_area = None;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 120, 40),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_hover_sidebar_out_of_range_clears() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_sidebar_app();
+        app.session_list = vec![make_session_entry("s1", "hello")];
+        let frame_area = Rect::new(0, 0, 120, 40);
+        let sb = app.compute_sidebar_area(frame_area).unwrap();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Moved, sb.x + 2, sb.y + 38),
+            frame_area,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SidebarHover(None)))
+        );
+    }
+
+    // ── update() action variant tests ─────────────────────────
+
+    #[test]
+    fn update_toggle_sidebar_focus() {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.screen = Screen::Chat;
+        app.session_list = vec![make_session_entry("s1", "hi")];
+        assert!(!app.sidebar_focused);
+        app.update(Action::ToggleSidebarFocus);
+        assert!(app.sidebar_focused);
+        app.update(Action::ToggleSidebarFocus);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn update_close_model_browser() {
+        let mut app = make_app();
+        app.open_model_browser("openai".into(), sample_models(), String::new(), "ok".into());
+        assert!(matches!(app.state, AppState::ModelBrowsing { .. }));
+        app.update(Action::CloseModelBrowser);
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn update_close_session_browser() {
+        let mut app = make_app();
+        app.open_session_browser();
+        assert!(matches!(app.state, AppState::SessionBrowsing { .. }));
+        app.update(Action::CloseSessionBrowser);
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn update_mark_model_refreshing() {
+        let mut app = make_app();
+        app.open_model_browser("openai".into(), sample_models(), String::new(), "ok".into());
+        app.update(Action::MarkModelRefreshing);
+        if let AppState::ModelBrowsing {
+            last_sync_status, ..
+        } = &app.state
+        {
+            assert!(last_sync_status.contains("efresh"));
+        }
+    }
+
+    #[test]
+    fn update_model_catalog() {
+        let mut app = make_app();
+        app.open_model_browser("openai".into(), Vec::new(), String::new(), "loading".into());
+        let new_entries = sample_models();
+        app.update(Action::UpdateModelCatalog {
+            provider: "openai".into(),
+            entries: new_entries.clone(),
+            sync_status: "synced".into(),
+        });
+        if let AppState::ModelBrowsing {
+            last_sync_status, ..
+        } = &app.state
+        {
+            assert_eq!(app.model_entries.len(), new_entries.len());
+            assert_eq!(last_sync_status, "synced");
+        } else {
+            panic!("expected ModelBrowsing state");
+        }
+    }
+
+    #[test]
+    fn update_remove_session() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("s1", "a"), make_session_entry("s2", "b")];
+        app.update(Action::RemoveSession(SessionId::from("s1")));
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].id.as_str(), "s2");
+    }
+
+    #[test]
+    fn update_refresh_session_list() {
+        let mut app = make_app();
+        app.session_list = vec![make_session_entry("old", "x")];
+        let new_list = vec![make_session_entry("n1", "a"), make_session_entry("n2", "b")];
+        app.update(Action::RefreshSessionList(new_list));
+        assert_eq!(app.session_list.len(), 2);
+        assert_eq!(app.session_list[0].id.as_str(), "n1");
+    }
+
+    #[test]
+    fn update_load_session() {
+        use proto::AgentMessage;
+        let mut app = make_app();
+        let sid = SessionId::from("test-session");
+        let msgs = vec![AgentMessage::new(sid.clone(), proto::Role::User, "hi")];
+        app.update(Action::LoadSession {
+            session_id: sid.clone(),
+            messages: msgs,
+        });
+        assert_eq!(app.session_id, sid);
+        assert!(!app.messages.is_empty());
+    }
+
+    #[test]
+    fn update_slash_command_clear() {
+        let mut app = make_app();
+        app.push_user("hello".into());
+        app.push_assistant("world".into());
+        assert!(!app.messages.is_empty());
+        app.update(Action::SlashCommand("/clear".into()));
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn update_slash_command_quit() {
+        let mut app = make_app();
+        assert!(!app.should_quit);
+        app.update(Action::SlashCommand("/quit".into()));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn update_palette_move_down() {
+        let mut app = make_app();
+        app.input = "/".to_string();
+        app.command_palette_cursor = 0;
+        app.update(Action::PaletteMoveDown);
+        assert!(app.command_palette_cursor >= 1 || app.palette_filtered_commands().len() <= 1);
+    }
+
+    #[test]
+    fn update_palette_tab_complete() {
+        let mut app = make_app();
+        app.input = "/".to_string();
+        app.command_palette_cursor = 0;
+        app.update(Action::PaletteTabComplete);
+        assert!(app.input.starts_with('/'));
+        assert!(app.input.len() > 1);
+    }
+
+    #[test]
+    fn update_palette_select() {
+        let mut app = make_app();
+        app.input = "/".to_string();
+        app.command_palette_cursor = 0;
+        app.update(Action::PaletteSelect);
+    }
+
+    #[test]
+    fn update_open_login_browser() {
+        let mut app = make_app();
+        app.update(Action::OpenLoginBrowser(None));
+        assert!(matches!(app.state, AppState::LoginBrowsing { .. }));
+    }
+
+    #[test]
+    fn update_cancel_auth() {
+        let mut app = make_app();
+        app.update(Action::OpenLoginBrowser(None));
+        assert!(matches!(app.state, AppState::LoginBrowsing { .. }));
+        app.update(Action::CancelAuth);
+        assert_eq!(app.state, AppState::Idle);
+    }
+
+    #[test]
+    fn update_text_selection_end_clears_dragging() {
+        let mut app = make_app();
+        app.update(Action::TextSelectionStart { row: 0, col: 0 });
+        assert!(app.text_selection.dragging);
+        app.update(Action::TextSelectionEnd { row: 1, col: 5 });
+        assert!(!app.text_selection.dragging);
+    }
+
+    #[test]
+    fn update_apply_progress_via_update() {
+        let mut app = make_app();
+        app.update(Action::ApplyProgress(
+            proto::ProgressEvent::ToolCallStarted {
+                call_id: "c1".into(),
+                tool_name: "bash".into(),
+                args: serde_json::json!({}),
+            },
+        ));
+        assert!(!app.messages.is_empty());
+    }
+
+    // ═══ Reactive TEA tests: map_mouse_event() ════════════════════
+
+    fn make_sidebar_app() -> TuiApp {
+        let mut app = make_app();
+        app.sidebar_visible = true;
+        app.screen = Screen::Chat;
+        app.session_list = vec![
+            SessionEntry {
+                id: SessionId::from("s1".to_string()),
+                channel_id: "cli:tui".to_string(),
+                updated_at: chrono::Utc::now(),
+                preview: "Hello world".to_string(),
+            },
+            SessionEntry {
+                id: SessionId::from("s2".to_string()),
+                channel_id: "cli:tui".to_string(),
+                updated_at: chrono::Utc::now(),
+                preview: "Goodbye world".to_string(),
+            },
+        ];
+        app
+    }
+
+    fn sidebar_frame() -> Rect {
+        // 100 wide × 50 tall; sidebar_width()=30 → sidebar at x=70
+        Rect::new(0, 0, 100, 50)
+    }
+
+    // ── Sidebar mouse tests ──────────────────────────────────
+
+    #[test]
+    fn mouse_sidebar_click_selects_first_session() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_sidebar_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 75, 2),
+            sidebar_frame(),
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::SidebarHover(Some(0))));
+        assert!(matches!(actions[1], Action::SelectSidebarSession));
+    }
+
+    #[test]
+    fn mouse_sidebar_click_selects_second_session() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_sidebar_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 75, 5),
+            sidebar_frame(),
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::SidebarHover(Some(1))));
+        assert!(matches!(actions[1], Action::SelectSidebarSession));
+    }
+
+    #[test]
+    fn mouse_sidebar_click_beyond_entries_returns_empty() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_sidebar_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 75, 8),
+            sidebar_frame(),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_sidebar_moved_hovers_session() {
+        use crossterm::event::MouseEventKind;
+        let app = make_sidebar_app();
+        let actions =
+            app.map_mouse_event(mouse_event(MouseEventKind::Moved, 75, 2), sidebar_frame());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarHover(Some(0))));
+    }
+
+    #[test]
+    fn mouse_sidebar_moved_beyond_entries_clears_hover() {
+        use crossterm::event::MouseEventKind;
+        let app = make_sidebar_app();
+        let actions =
+            app.map_mouse_event(mouse_event(MouseEventKind::Moved, 75, 8), sidebar_frame());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarHover(None)));
+    }
+
+    #[test]
+    fn mouse_sidebar_moved_outside_clears_hover() {
+        use crossterm::event::MouseEventKind;
+        let app = make_sidebar_app();
+        let actions =
+            app.map_mouse_event(mouse_event(MouseEventKind::Moved, 30, 5), sidebar_frame());
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarHover(None)));
+    }
+
+    #[test]
+    fn mouse_sidebar_scroll_down() {
+        use crossterm::event::MouseEventKind;
+        let app = make_sidebar_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, 75, 5),
+            sidebar_frame(),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarScroll(1)));
+    }
+
+    #[test]
+    fn mouse_sidebar_scroll_up() {
+        use crossterm::event::MouseEventKind;
+        let app = make_sidebar_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollUp, 75, 5),
+            sidebar_frame(),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::SidebarScroll(-1)));
+    }
+
+    #[test]
+    fn mouse_sidebar_hidden_returns_empty_for_click() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_sidebar_app();
+        app.sidebar_visible = false;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 75, 5),
+            sidebar_frame(),
+        );
+        assert!(actions.is_empty());
+    }
+
+    // ── Chat area mouse tests ───────────────────────────────
+
+    fn make_chat_app() -> TuiApp {
+        let mut app = make_app();
+        app.sidebar_visible = false;
+        app.screen = Screen::Chat;
+        app.chat_area = Some(Rect::new(0, 0, 80, 24));
+        app
+    }
+
+    #[test]
+    fn mouse_chat_left_down_in_inner_starts_selection() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            Action::TextSelectionStart { row: 4, col: 4 }
+        ));
+    }
+
+    #[test]
+    fn mouse_chat_left_down_outside_inner_clears_selection() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::TextSelectionClear));
+    }
+
+    #[test]
+    fn mouse_chat_drag_while_dragging() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_chat_app();
+        app.text_selection.dragging = true;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            Action::TextSelectionDrag { row: 9, col: 9 }
+        ));
+    }
+
+    #[test]
+    fn mouse_chat_drag_not_dragging_is_empty() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_chat_up_while_dragging() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_chat_app();
+        app.text_selection.dragging = true;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            Action::TextSelectionEnd { row: 9, col: 9 }
+        ));
+    }
+
+    #[test]
+    fn mouse_chat_up_not_dragging_is_empty() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 10, 10),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_chat_scroll_down() {
+        use crossterm::event::MouseEventKind;
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, 5, 5),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::ScrollDown(3)));
+        assert!(matches!(actions[1], Action::TextSelectionClear));
+    }
+
+    #[test]
+    fn mouse_chat_scroll_up() {
+        use crossterm::event::MouseEventKind;
+        let app = make_chat_app();
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollUp, 5, 5),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::ScrollUp(3)));
+        assert!(matches!(actions[1], Action::TextSelectionClear));
+    }
+
+    #[test]
+    fn mouse_chat_scroll_outside_chat_area_is_empty() {
+        use crossterm::event::MouseEventKind;
+        let mut app = make_chat_app();
+        app.chat_area = Some(Rect::new(10, 10, 40, 10));
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, 5, 5),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert!(actions.is_empty());
+    }
+
+    // ── Edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn mouse_no_sidebar_no_chat_click_returns_empty() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_app();
+        app.sidebar_visible = false;
+        app.chat_area = None;
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 40, 20),
+            Rect::new(0, 0, 100, 50),
+        );
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn mouse_sidebar_scroll_outside_sidebar_falls_through() {
+        use crossterm::event::MouseEventKind;
+        let mut app = make_sidebar_app();
+        app.chat_area = Some(Rect::new(0, 0, 70, 50));
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::ScrollDown, 30, 25),
+            sidebar_frame(),
+        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], Action::ScrollDown(3)));
+        assert!(matches!(actions[1], Action::TextSelectionClear));
+    }
+
+    #[test]
+    fn mouse_chat_drag_clamps_to_inner_bounds() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = make_chat_app();
+        app.text_selection.dragging = true;
+        // inner = Rect(1, 1, 78, 22); max col = 77, max row = 21
+        let actions = app.map_mouse_event(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 200, 100),
+            Rect::new(0, 0, 80, 24),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            Action::TextSelectionDrag { row: 21, col: 77 }
+        ));
     }
 }
