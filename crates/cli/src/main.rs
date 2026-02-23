@@ -729,8 +729,12 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
                         }
                         channels::whatsapp::BridgeEvent::Disconnected { reason } => {
                             let reason = reason.unwrap_or_else(|| "unknown".to_string());
-                            eprintln!("Bridge disconnected: {reason}");
-                            break;
+                            if reason == "logged out" {
+                                eprintln!("WhatsApp logged out. Session cleared.");
+                                break;
+                            }
+                            // Transient disconnect — bridge will auto-reconnect
+                            eprintln!("Bridge disconnected: {reason} (reconnecting...)");
                         }
                         _ => {}
                     }
