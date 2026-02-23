@@ -13,8 +13,3 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 teloxide = { workspace = true }
 futures-util = { workspace = true }
-quinn = { workspace = true }
-rustls = { workspace = true }
-rcgen = { workspace = true }
-dashmap = { workspace = true }
-uuid = { workspace = true }

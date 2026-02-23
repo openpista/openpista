@@ -418,9 +418,7 @@ pub fn provider_registry_names() -> String {
 /// Top-level CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    /// Gateway networking configuration.
-    #[serde(default)]
-    pub gateway: GatewayConfig,
+    /// Agent provider/model configuration.
 
     /// Agent provider/model configuration.
     #[serde(default)]
@@ -437,28 +435,6 @@ pub struct Config {
     /// Skills workspace configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
-}
-
-/// QUIC gateway config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayConfig {
-    /// QUIC listening port.
-    pub port: u16,
-    /// Optional host/IP advertised to worker containers for QUIC report callbacks.
-    /// Defaults to loopback when omitted.
-    pub report_host: Option<String>,
-    /// Optional TLS cert path/content setting.
-    pub tls_cert: String,
-}
-
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            port: 4433,
-            report_host: None,
-            tls_cert: String::new(),
-        }
-    }
 }
 
 fn default_max_tool_rounds() -> usize {
@@ -587,9 +563,6 @@ pub struct ChannelsConfig {
     pub telegram: TelegramConfig,
     /// Local CLI adapter config.
     pub cli: CliConfig,
-    /// Mobile QUIC adapter config.
-    #[serde(default)]
-    pub mobile: MobileConfig,
 }
 
 /// Telegram adapter config.
@@ -599,27 +572,6 @@ pub struct TelegramConfig {
     pub enabled: bool,
     /// Telegram bot token.
     pub token: String,
-}
-
-/// Mobile QUIC channel config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MobileConfig {
-    /// Whether the mobile QUIC adapter is enabled.
-    pub enabled: bool,
-    /// QUIC listen port for mobile clients.
-    pub port: u16,
-    /// Bearer token that mobile clients must present on authentication.
-    pub api_token: String,
-}
-
-impl Default for MobileConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            port: 4434,
-            api_token: String::new(),
-        }
-    }
 }
 
 /// Local CLI channel config.
@@ -705,10 +657,6 @@ impl Config {
         }
         if let Ok(client_id) = std::env::var("openpista_OAUTH_CLIENT_ID") {
             config.agent.oauth_client_id = client_id;
-        }
-        if let Ok(token) = std::env::var("openpista_MOBILE_TOKEN") {
-            config.channels.mobile.api_token = token;
-            config.channels.mobile.enabled = true;
         }
         if let Ok(workspace) = std::env::var("openpista_WORKSPACE") {
             config.skills.workspace = workspace;
@@ -1049,7 +997,6 @@ mod tests {
     #[test]
     fn default_config_has_expected_values() {
         let cfg = Config::default();
-        assert_eq!(cfg.gateway.port, 4433);
         assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
         assert_eq!(cfg.agent.effective_model(), "gpt-4o");
         assert_eq!(cfg.agent.max_tool_rounds, 10);
@@ -1196,11 +1143,6 @@ mod tests {
             write_file(
                 &config_path,
                 r#"
-[gateway]
-port = 5555
-report_host = "host.docker.internal"
-tls_cert = "inline"
-
 [agent]
 provider = "openai"
 model = "gpt-4.1-mini"
@@ -1223,11 +1165,6 @@ workspace = "/tmp/workspace"
 "#,
             );
             let cfg = Config::load(Some(&config_path)).expect("config should parse");
-            assert_eq!(cfg.gateway.port, 5555);
-            assert_eq!(
-                cfg.gateway.report_host.as_deref(),
-                Some("host.docker.internal")
-            );
             assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
             assert_eq!(cfg.agent.model, "gpt-4.1-mini");
             assert_eq!(cfg.agent.effective_model(), "gpt-4.1-mini");
@@ -1317,7 +1254,6 @@ api_key = "tg-key"
             set_env_var("openpista_MODEL", "env-model");
             set_env_var("TELEGRAM_BOT_TOKEN", "env-tg-token");
             set_env_var("openpista_OAUTH_CLIENT_ID", "env-client-id");
-            set_env_var("openpista_MOBILE_TOKEN", "env-mobile-token");
             set_env_var("openpista_WORKSPACE", "/tmp/env-workspace");
 
             let cfg = Config::load(None).expect("config load");
@@ -1326,15 +1262,12 @@ api_key = "tg-key"
             assert_eq!(cfg.agent.oauth_client_id, "env-client-id");
             assert!(cfg.channels.telegram.enabled);
             assert_eq!(cfg.channels.telegram.token, "env-tg-token");
-            assert!(cfg.channels.mobile.enabled);
-            assert_eq!(cfg.channels.mobile.api_token, "env-mobile-token");
             assert_eq!(cfg.skills.workspace, "/tmp/env-workspace");
 
             remove_env_var("openpista_API_KEY");
             remove_env_var("openpista_MODEL");
             remove_env_var("TELEGRAM_BOT_TOKEN");
             remove_env_var("openpista_OAUTH_CLIENT_ID");
-            remove_env_var("openpista_MOBILE_TOKEN");
             remove_env_var("openpista_WORKSPACE");
         });
     }
@@ -1630,22 +1563,6 @@ api_key = "tg-key"
             ..Default::default()
         };
         assert_eq!(cfg.effective_base_url(), Some("http://localhost:11434/v1"));
-    }
-
-    #[test]
-    fn mobile_config_defaults() {
-        let mc = MobileConfig::default();
-        assert!(!mc.enabled);
-        assert_eq!(mc.port, 4434);
-        assert!(mc.api_token.is_empty());
-    }
-
-    #[test]
-    fn gateway_config_defaults() {
-        let gc = GatewayConfig::default();
-        assert_eq!(gc.port, 4433);
-        assert!(gc.report_host.is_none());
-        assert!(gc.tls_cert.is_empty());
     }
 
     #[test]
