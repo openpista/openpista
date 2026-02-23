@@ -156,7 +156,8 @@ async fn main() -> anyhow::Result<()> {
     let is_tui = matches!(command, Commands::Tui { .. });
 
     // Initialize tracing — suppress console output in TUI mode to avoid corrupting the display.
-    // When --debug is passed, also write debug-level logs to ~/.openpista/debug.log.
+    // When --debug is passed, write debug-level logs to ~/.openpista/logs/debug.YYYY-MM-DD.log
+    // using daily rotation so logs accumulate across sessions.
     let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
@@ -165,9 +166,11 @@ async fn main() -> anyhow::Result<()> {
 
     let debug_writer = if cli.debug {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let log_dir = std::path::PathBuf::from(home).join(".openpista");
+        let log_dir = std::path::PathBuf::from(home)
+            .join(".openpista")
+            .join("logs");
         std::fs::create_dir_all(&log_dir).ok();
-        let appender = tracing_appender::rolling::never(&log_dir, "debug.log");
+        let appender = tracing_appender::rolling::daily(&log_dir, "debug.log");
         let (writer, guard) = tracing_appender::non_blocking(appender);
         _file_guard = Some(guard);
         Some(writer)
@@ -221,6 +224,23 @@ async fn main() -> anyhow::Result<()> {
                 .with_target(false)
                 .init();
         }
+    }
+
+    // Emit session-start marker when --debug is active so each run is easily identifiable.
+    if cli.debug {
+        let cmd_label = match &command {
+            Commands::Tui { .. } => "tui",
+            Commands::Start => "start",
+            Commands::Run { .. } => "run",
+            Commands::Model { .. } => "model",
+            Commands::Auth { .. } => "auth",
+        };
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            command = cmd_label,
+            log_level = %cli.log_level,
+            "========== openpista session start =========="
+        );
     }
 
     // Load config
