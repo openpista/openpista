@@ -114,6 +114,9 @@ enum Commands {
         #[command(subcommand)]
         command: WebCommands,
     },
+
+    /// Set up WhatsApp channel (check prerequisites, install bridge, pair via QR)
+    Whatsapp,
 }
 
 /// `auth` sub-subcommands.
@@ -311,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
             Commands::Model { .. } => "model",
             Commands::Auth { .. } => "auth",
             Commands::Web { .. } => "web",
+            Commands::Whatsapp => "whatsapp",
         };
         info!(
             version = env!("CARGO_PKG_VERSION"),
@@ -396,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
             WebCommands::Start => cmd_web_start(config).await,
             WebCommands::Status => cmd_web_status(config).await,
         },
+        Commands::Whatsapp => cmd_whatsapp(config).await,
     }
 }
 
@@ -2102,6 +2107,152 @@ fn build_agent_response(
 /// Formats run mode header text.
 fn format_run_header(exec: &str) -> String {
     format!("Running: {exec}")
+}
+
+#[cfg(not(test))]
+/// Non-TUI WhatsApp setup: check prerequisites, install bridge deps, spawn bridge,
+/// display QR in terminal, and save config on successful connection.
+async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
+    use tokio::io::AsyncBufReadExt;
+
+    println!("WhatsApp Setup");
+    println!("==============");
+    println!();
+
+    // 1. Check Node.js
+    print!("Checking Node.js... ");
+    let node_ok = tokio::process::Command::new("node")
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_ok {
+        println!("NOT FOUND");
+        anyhow::bail!(
+            "Node.js is required for the WhatsApp bridge. Install it from https://nodejs.org/"
+        );
+    }
+    println!("OK");
+
+    // 2. Check / install bridge dependencies
+    let bridge_installed = std::path::Path::new("whatsapp-bridge/node_modules").exists();
+    if !bridge_installed {
+        println!("Installing bridge dependencies (npm install)...");
+        let status = tokio::process::Command::new("npm")
+            .arg("install")
+            .current_dir("whatsapp-bridge")
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("npm install failed with {status}");
+        }
+        println!("Dependencies installed.");
+    } else {
+        println!("Bridge dependencies: OK");
+    }
+    println!();
+
+    // 3. Spawn bridge subprocess
+    let bridge_path = config
+        .channels
+        .whatsapp
+        .bridge_path
+        .clone()
+        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+    let session_dir = config.channels.whatsapp.session_dir.clone();
+
+    println!("Starting WhatsApp bridge...");
+    println!("Session dir: {session_dir}");
+    println!("Bridge path: {bridge_path}");
+    println!();
+
+    let mut child = tokio::process::Command::new("node")
+        .arg(&bridge_path)
+        .env("SESSION_DIR", &session_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("bridge stdout");
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+
+    // 4. Read bridge events
+    println!("Waiting for QR code... (scan with your phone)");
+    println!();
+
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
+                    match event {
+                        channels::whatsapp::BridgeEvent::Qr { data } => {
+                            if let Some(qr_text) = tui::event::render_qr_text(&data) {
+                                println!("{qr_text}");
+                            } else {
+                                println!("QR data: {data}");
+                            }
+                            println!();
+                            println!("Scan this QR code with WhatsApp on your phone.");
+                            println!(
+                                "(Open WhatsApp > Settings > Linked Devices > Link a Device)"
+                            );
+                            println!();
+                        }
+                        channels::whatsapp::BridgeEvent::Connected { phone, name } => {
+                            let display_name = name.unwrap_or_default();
+                            println!("Connected to WhatsApp!");
+                            println!("  Phone: {phone}");
+                            if !display_name.is_empty() {
+                                println!("  Name:  {display_name}");
+                            }
+                            println!();
+
+                            // 5. Save config
+                            config.channels.whatsapp.enabled = true;
+                            if let Err(e) = config.save() {
+                                eprintln!("Warning: failed to save config: {e}");
+                            } else {
+                                println!("WhatsApp enabled in config.toml.");
+                                println!(
+                                    "Run `openpista start` to keep WhatsApp active in daemon mode."
+                                );
+                            }
+                            break;
+                        }
+                        channels::whatsapp::BridgeEvent::Error { message } => {
+                            eprintln!("Bridge error: {message}");
+                        }
+                        channels::whatsapp::BridgeEvent::Disconnected { reason } => {
+                            let reason = reason.unwrap_or_else(|| "unknown".to_string());
+                            eprintln!("Bridge disconnected: {reason}");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(None) => {
+                eprintln!("Bridge process exited unexpectedly.");
+                break;
+            }
+            Err(e) => {
+                eprintln!("Error reading bridge output: {e}");
+                break;
+            }
+        }
+    }
+
+    // 6. Cleanup — kill_on_drop handles it, but be explicit
+    let _ = child.kill().await;
+    Ok(())
 }
 
 #[cfg(test)]

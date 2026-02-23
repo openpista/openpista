@@ -262,6 +262,10 @@ pub enum AppState {
 /// Steps in the WhatsApp pairing flow.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WhatsAppSetupStep {
+    /// Checking if Node.js and bridge dependencies are available.
+    CheckingPrereqs,
+    /// Installing bridge dependencies (npm install).
+    InstallingBridge,
     /// Waiting for the bridge to produce a QR code.
     WaitingForQr,
     /// Displaying a QR code for the user to scan.
@@ -2338,16 +2342,52 @@ impl TuiApp {
                 self.input.clear();
                 self.cursor_pos = 0;
                 self.state = AppState::WhatsAppSetup {
-                    step: WhatsAppSetupStep::WaitingForQr,
+                    step: WhatsAppSetupStep::CheckingPrereqs,
                 };
                 self.screen = Screen::Chat;
-                Command::None
+                Command::CheckWhatsAppPrereqs
             }
             Action::WhatsAppSetupCancel => {
                 self.state = AppState::Idle;
                 self.push_assistant("WhatsApp pairing cancelled.".to_string());
                 Command::None
             }
+            Action::WhatsAppPrereqsChecked {
+                node_ok,
+                bridge_installed,
+            } => {
+                if !node_ok {
+                    self.state = AppState::Idle;
+                    self.push_error(
+                        "Node.js is required for WhatsApp bridge. Install from https://nodejs.org/"
+                            .to_string(),
+                    );
+                    Command::None
+                } else if !bridge_installed {
+                    self.state = AppState::WhatsAppSetup {
+                        step: WhatsAppSetupStep::InstallingBridge,
+                    };
+                    Command::InstallWhatsAppBridge
+                } else {
+                    self.state = AppState::WhatsAppSetup {
+                        step: WhatsAppSetupStep::WaitingForQr,
+                    };
+                    Command::SpawnWhatsAppBridge
+                }
+            }
+            Action::WhatsAppBridgeInstalled(result) => match result {
+                Ok(()) => {
+                    self.state = AppState::WhatsAppSetup {
+                        step: WhatsAppSetupStep::WaitingForQr,
+                    };
+                    Command::SpawnWhatsAppBridge
+                }
+                Err(msg) => {
+                    self.state = AppState::Idle;
+                    self.push_error(format!("Failed to install WhatsApp bridge: {msg}"));
+                    Command::None
+                }
+            },
             Action::WhatsAppQrReceived(qr_data) => {
                 if let AppState::WhatsAppSetup { step } = &mut self.state {
                     match generate_qr_lines(&qr_data) {
@@ -2379,8 +2419,6 @@ impl TuiApp {
                 self.state = AppState::Idle;
                 Command::None
             }
-            Action::WhatsAppPrereqsChecked { .. } => Command::None,
-            Action::WhatsAppBridgeInstalled(_) => Command::None,
             Action::WhatsAppSetupKey(key) => {
                 self.handle_key(key);
                 Command::None
@@ -3574,9 +3612,11 @@ impl TuiApp {
         };
         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
         let (phase, phase_style) = match step {
-            WhatsAppSetupStep::WaitingForQr => ("Waiting for QR…", THEME.fg_dim),
+            WhatsAppSetupStep::CheckingPrereqs => ("Checking prerequisites\u{2026}", THEME.fg_dim),
+            WhatsAppSetupStep::InstallingBridge => ("Installing bridge\u{2026}", THEME.fg_dim),
+            WhatsAppSetupStep::WaitingForQr => ("Waiting for QR\u{2026}", THEME.fg_dim),
             WhatsAppSetupStep::DisplayQr { .. } => ("Scan QR code", THEME.accent),
-            WhatsAppSetupStep::Connected { .. } => ("Connected ✓", THEME.success),
+            WhatsAppSetupStep::Connected { .. } => ("Connected \u{2713}", THEME.success),
         };
         let title = Line::from(vec![
             Span::styled(
@@ -3589,6 +3629,38 @@ impl TuiApp {
         ]);
         frame.render_widget(Paragraph::new(title), chunks[0]);
         let content_lines: Vec<Line<'_>> = match step {
+            WhatsAppSetupStep::CheckingPrereqs => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Checking prerequisites\u{2026}",
+                    Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    " Verifying Node.js and bridge dependencies.",
+                    Style::default().fg(THEME.fg_dim),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Esc: cancel",
+                    Style::default().fg(THEME.error),
+                )),
+            ],
+            WhatsAppSetupStep::InstallingBridge => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Installing bridge dependencies\u{2026}",
+                    Style::default().fg(THEME.fg).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    " Running npm install in whatsapp-bridge/",
+                    Style::default().fg(THEME.fg_dim),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Esc: cancel",
+                    Style::default().fg(THEME.error),
+                )),
+            ],
             WhatsAppSetupStep::WaitingForQr => vec![
                 Line::from(""),
                 Line::from(Span::styled(
