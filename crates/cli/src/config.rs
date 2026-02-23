@@ -1381,6 +1381,33 @@ api_key = "tg-key"
     }
 
     #[test]
+    fn extension_oauth_endpoints_github_copilot_returns_correct_endpoints() {
+        let ep = extension_oauth_endpoints("github-copilot")
+            .expect("github-copilot should have OAuth endpoints");
+        assert_eq!(ep.auth_url, "https://github.com/login/oauth/authorize");
+        assert_eq!(ep.token_url, "https://github.com/login/oauth/access_token");
+        assert_eq!(ep.scope, "read:user");
+        assert_eq!(ep.default_client_id, Some("Iv1.b507a08c87ecfe98"));
+        assert_eq!(ep.default_callback_port, Some(1456));
+        assert_eq!(ep.redirect_path, "/callback");
+        assert!(ep.redirect_base.is_none());
+    }
+
+    #[test]
+    fn github_copilot_registry_entry_has_oauth_mode() {
+        let entry = provider_registry_entry("github-copilot").expect("github-copilot entry");
+        assert_eq!(entry.auth_mode, LoginAuthMode::OAuth);
+        assert_eq!(entry.category, ProviderCategory::Extension);
+        assert!(!entry.supports_runtime);
+        assert_eq!(entry.api_key_env, "GITHUB_COPILOT_TOKEN");
+    }
+
+    #[test]
+    fn oauth_available_for_github_copilot() {
+        assert!(oauth_available_for("github-copilot", ""));
+    }
+
+    #[test]
     fn oauth_available_for_anthropic_with_default_client_id() {
         assert!(oauth_available_for("anthropic", ""));
     }
