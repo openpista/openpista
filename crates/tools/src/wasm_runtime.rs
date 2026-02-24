@@ -467,8 +467,11 @@ mod tests {
     #[test]
     fn default_constants_are_reasonable() {
         assert_eq!(DEFAULT_TIMEOUT_SECS, 30);
-        assert!(WASM_MEMORY_LIMIT_BYTES > 0);
-        assert!(WASM_FUEL_LIMIT > 0);
-        assert!(PIPE_CAPACITY_BYTES > 0);
+        let wasm_memory_limit_bytes = std::hint::black_box(WASM_MEMORY_LIMIT_BYTES);
+        let wasm_fuel_limit = std::hint::black_box(WASM_FUEL_LIMIT);
+        let pipe_capacity_bytes = std::hint::black_box(PIPE_CAPACITY_BYTES);
+        assert!(wasm_memory_limit_bytes > 0);
+        assert!(wasm_fuel_limit > 0);
+        assert!(pipe_capacity_bytes > 0);
     }
 }
