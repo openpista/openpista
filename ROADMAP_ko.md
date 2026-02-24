@@ -89,6 +89,179 @@
 - [x] 사용자에게 명확히 표시되는 오류 응답
 - [x] `WebAdapter` — Rust→WASM 브라우저 클라이언트 + WebSocket 전송 (웹 채널 어댑터 섹션 참조)
 
+### 텔레그램 채널 어댑터 (Telegram Channel Adapter)
+
+> 텔레그램은 메시지 수신에 long-polling을 사용하는 teloxide 프레임워크를 사용합니다. 어댑터는 MarkdownV2 포맷팅, 긴 응답에 대한 자동 메시지 분할, 보안을 위한 선택적 사용자 화이트리스트를 지원합니다 — openpista가 OS 수준 도구 접근 권한을 가지므로 보안이 매우 중요합니다.
+
+- [x] `TelegramAdapter` — 채팅별 안정적인 세션을 가진 `teloxide` 디스패처
+- [x] 안정적인 세션 매핑: `telegram:{chat_id}` 채널 ID 및 세션 라우팅
+- [x] `TelegramConfig` — `[channels.telegram]` 설정 섹션: `enabled`, `token`, `allowed_users`
+- [x] 환경 변수 재정의: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`
+- [x] 텍스트 메시지 파싱 및 `ChannelEvent` 구성
+- [x] 응답 라우팅: 텔레그램 응답 → Bot API `send_message`
+- [x] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
+- [x] 메시지 수신 시 타이핑 표시기 (`ChatAction::Typing`) 전송
+- [x] MarkdownV2 포맷팅 및 파싱 실패 시 자동 일반 텍스트 폴백
+- [x] 긴 메시지 분할 (4096자 제한) — 문단, 줄, 하드 경계 순으로 분할
+- [x] 사용자 화이트리스트 보안: `allowed_users`로 상호작용 가능 사용자 제한 (비어있으면 모두 허용)
+- [x] 유닛 테스트: 세션 ID, 채팅 ID 파싱, 응답 포맷팅, 메시지 분할, MarkdownV2 이스케이프, 화이트리스트 로직
+
+#### 기반 사전 요구사항 (Baseline Pre-requisites)
+
+> 아래 태스크들의 의존성이 되는 기반 기능으로, 반드시 먼저 구현해야 합니다.
+
+- [ ] `TelegramConfig` 필드 확장: `allowed_users: Vec<i64>`, `webhook_url: Option<String>`, `webhook_port: u16`, `webhook_secret: Option<String>`, `confirm_actions: bool`
+- [ ] `TELEGRAM_ALLOWED_USERS` 환경 변수 파싱 (쉼표 구분 `i64` 목록)
+- [ ] `send_chunked(bot, chat_id, text)` 헬퍼: 분할 → MarkdownV2 시도 → 청크별 일반 텍스트 폴백
+- [ ] 타이핑 표시기 fire-and-forget 패턴 (`warn` 로그만 남기고 에러 전파 없음)
+
+#### 예정된 태스크 (Upcoming Tasks)
+
+- [ ] **봇 명령어 등록** (`/start`, `/help`, `/status`) via `BotCommands` derive
+  - `#[derive(BotCommands, Clone)]` 및 `rename_rule = "lowercase"`를 사용한 `BotCmd` 열거형 추가
+  - 시작 시 `Bot::set_my_commands::<BotCmd>()` 호출 — 텔레그램 "/" 팝업 메뉴 등록
+  - `filter_command::<BotCmd>()`를 통해 텍스트 핸들러와 함께 `dptree`에 명령어 핸들러 브랜치 추가
+  - `/status`는 `bot.get_me()`를 호출하여 봇 사용자명과 ID 표시; 시작 시 `bot_username: Arc<String>` 조회 후 저장 (그룹 채팅 필터에서 재사용)
+  - 유닛 테스트: `/start`, `/help` 정적 응답, `/status`의 `get_me` 응답
+
+- [ ] **재시도 로직**: 일시적 Bot API 장애에 대한 지수 백오프
+  - 임의의 봇 API 호출을 감싸는 제네릭 `send_with_retry<F>(f: F, max_attempts: u32)` 래퍼
+  - `RequestError::RetryAfter(secs)` → 정확한 시간만큼 sleep 후 재시도
+  - 네트워크/5xx 일시적 오류 → 500ms 시작으로 지수 증가, 최대 30초 상한
+  - 재시도 불가 오류 (`BadRequest`, `Unauthorized`)는 즉시 전파
+  - `send_response`의 `send_message` 래핑; `send_chat_action` 타이핑 호출은 최대 1회 재시도
+  - 유닛 테스트: `RetryAfter` 동작 모킹, 백오프 상한 검증
+
+- [ ] **그룹 채팅 지원**: 봇 답장 필터링, 스레드 기반 세션
+  - `is_message_for_bot(msg, bot_username)` — 개인 채팅은 항상 통과; 그룹은 봇 답장 또는 텍스트 내 `@mention` 필요
+  - 시작 시 `bot.get_me()`로 `bot_username` 한 번 조회, `Arc<String>`으로 저장 (봇 명령어 태스크와 공유)
+  - 스레드 인식 세션 ID: 슈퍼그룹 포럼 토픽은 `telegram:{chat_id}:{thread_id}`, 일반 그룹은 `telegram:{chat_id}`로 폴백
+  - `dptree::filter(move |msg: Message| is_message_for_bot(&msg, &bot_username))`로 필터 적용
+  - 유닛 테스트: 개인/그룹 필터, 포럼 스레드 세션 ID 생성, `@mention` 감지
+
+- [ ] **미디어 메시지 처리**: 사진, 문서, 음성, 비디오 노트를 에이전트 컨텍스트로 전달
+  - `msg.photo()`, `msg.document()`, `msg.voice()`, `msg.video_note()`에 대한 `dptree` 브랜치 추가
+  - 소형 파일 (< 5 MB): `bot.get_file(file_id)` → `reqwest`로 다운로드 → base64 인코딩 후 `ChannelEvent.metadata`에 저장
+  - 대형 파일: `user_message`에 에이전트가 읽을 수 있는 설명(파일명, MIME 타입, 바이트 크기)으로 표현
+  - 캡션은 `user_message`로 전달; 구조화된 `MediaInfo` JSON은 `metadata: Option<serde_json::Value>`에 저장
+  - 모든 미디어 핸들러 브랜치에 화이트리스트 + 그룹 봇 멘션 필터 적용
+  - 유닛 테스트: 각 변형의 `format_media_description`, base64 인코딩 왕복
+
+- [ ] **속도 제한**: 텔레그램의 채팅당 30msg/초, 동일 그룹 20msg/분 제한 준수
+  - 어댑터 구조체에 `DashMap<i64, Arc<RateLimiter<...>>>`로 채팅별 `governor::RateLimiter` 저장
+  - 개인 채팅: `Quota::per_second(nonzero!(30u32))`; 그룹 (음수 `chat_id`): 추가로 `Quota::per_minute(nonzero!(20u32))`
+  - 각 청크 전송 전 권한 획득; 제한 시 `tokio::time::sleep`으로 대기
+  - 워크스페이스 `Cargo.toml` 및 `crates/channels/Cargo.toml`에 `governor = "0.6"` 추가
+  - 유닛 테스트: 그룹 vs. 개인 채팅 쿼터 선택; 채팅 ID별 rate state 격리
+
+- [ ] **인라인 키보드 지원**: 인터랙티브 도구 확인 및 메뉴 탐색
+  - `parse_inline_keyboard(text) -> (String, Option<InlineKeyboardMarkup>)` DSL: `[[label|callback_data]]` 마커 → 버튼 행 + 정리된 텍스트
+  - `dptree`에 `Update::filter_callback_query()` 브랜치 → `handle_callback_query` 엔드포인트
+  - `handle_callback_query`: `bot.answer_callback_query(query.id)` 호출, `[callback:{data}]`를 `user_message`로 하는 `ChannelEvent` 발행
+  - `TelegramConfig`의 `confirm_actions: bool` 필드가 `send_response`에서 DSL 파싱을 활성화 (기본값 `false`)
+  - 유닛 테스트: DSL 파서 레이아웃, 다중 행 버튼, 콜백 이벤트 구성
+
+- [ ] **웹훅 모드** (`teloxide::dispatching::update_listeners::webhooks`) — 프로덕션 배포
+  - `TelegramConfig` 필드: `webhook_url: Option<String>`, `webhook_port: u16` (기본값 8443), `webhook_secret: Option<String>`
+  - 환경 변수 재정의: `TELEGRAM_WEBHOOK_URL`, `TELEGRAM_WEBHOOK_PORT`
+  - 워크스페이스 `Cargo.toml`의 teloxide 의존성에 `webhooks-axum` 기능 추가
+  - `run()`에서 `config.webhook_url` 분기: `webhooks::axum(bot, Options::new(addr, url))` vs long-polling 폴백
+  - 생명주기: 시작 시 `set_webhook`, 종료 시 `delete_webhook` — 폴링으로 깔끔하게 전환 가능
+  - long-polling이 기본값; 웹훅은 설정으로 선택 활성화
+  - 서브태스크: 리버스 프록시(nginx/caddy)를 통한 TLS 종단; `TELEGRAM.md`에 배포 패턴 문서화
+
+- [ ] **`/telegram status` TUI 명령** — 봇 정보, 웹훅/폴링 모드, 연결된 채팅 표시
+  - `crates/cli/src/tui/event.rs`의 `/whatsapp status` 패턴을 그대로 따름
+  - `parse_telegram_command(raw) -> Option<TelegramCommand>` 및 `format_telegram_status(config) -> String`
+  - 표시 항목: 활성화 여부, 토큰 존재 여부, 폴링 vs. 웹훅 모드, 웹훅 URL, 허용 사용자 수
+  - `app.rs`의 `SLASH_COMMANDS`에 `"/telegram"`, `"/telegram status"` 항목 추가
+  - `TelegramConfig` 필드가 안정화된 후 구현 (모든 신규 필드 존재 시점)
+
+- [ ] **통합 테스트**: 엔드-투-엔드 메시지 → `ChannelEvent` → `AgentResponse` → 텔레그램 전송 흐름
+  - `Bot::new(token).set_api_url(mock_url)`로 HTTP 호출을 `wiremock` 목 서버로 리다이렉트
+  - 목 엔드포인트: `getMe`, `setMyCommands`, `sendChatAction`, `sendMessage` (준비된 JSON 응답)
+  - 테스트 케이스: 텍스트 → 이벤트, 미디어 → 메타데이터 포함 이벤트, MarkdownV2 폴백, 화이트리스트 거부, 429 재시도, 그룹 `@mention` 필터
+  - `crates/channels/Cargo.toml`에 `wiremock = "0.6"` dev-의존성 추가
+  - 구현이 완료된 후 마지막에 작성
+
+#### 구현 순서 (Implementation Order)
+
+```
+기반 (설정 확장 → send_chunked → 타이핑 표시기)
+    │
+    ├── 봇 명령어 (S) ── 시작 시 bot_username 조회
+    │       │
+    │       └── 그룹 채팅 (M) ── bot_username 재사용; 세션 ID 갱신
+    │               │
+    │               └── 미디어 (M) ── 그룹 필터 클로저 재사용
+    │
+    ├── 재시도 로직 (S) ── send_chunked 래핑
+    │       │
+    │       └── 속도 제한 (M) ── 재시도 래핑된 send 추가 래핑
+    │               │
+    │               └── 인라인 키보드 (M) ── 콜백 쿼리 브랜치 추가
+    │
+    ├── 웹훅 모드 (L) ── 독립적인 디스패치 경로 (그룹/명령어 태스크 이후)
+    │
+    ├── /telegram status TUI (S) ── TelegramConfig 필드 안정화 후
+    │
+    └── 통합 테스트 (M) ── 구현 완료 후 마지막에 작성
+```
+
+#### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
+
+> **teloxide 생태계**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`teloxide`](https://github.com/teloxide/teloxide) | Rust용 주요 텔레그램 봇 프레임워크 — 대화 시스템, `dptree` 디스패처, 명령어 파싱, 인라인 쿼리. openpista의 어댑터가 이것을 기반으로 구축됨. |
+> | [`teloxide-core`](https://github.com/teloxide/teloxide-core) | 저수준 Telegram Bot API 바인딩 — 모든 타입, 메서드, 요청 빌더. teloxide 내부적으로 사용. |
+> | [`teloxide-macros`](https://github.com/teloxide/teloxide/tree/master/crates/teloxide-macros) | `#[derive(BotCommands)]` 매크로 — 강타입 명령어 파싱 및 `bot_commands()` 등록 벡터 자동 생성. 봇 명령어 태스크의 핵심. |
+> | [`dptree`](https://github.com/teloxide/dptree) | 의존성 주입 핸들러 트리 — teloxide의 메시지 라우팅 엔진. 어댑터 확장 시 이해하면 유용. |
+>
+> **teloxide 공식 예제**
+>
+> | 예제 | 설명 |
+> |------|------|
+> | [`dispatching_features.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/dispatching_features.rs) | 고급 `dptree` 브랜칭 — 명령어와 `CallbackQuery`를 하나의 디스패처에서 처리. 인라인 키보드 태스크의 직접 참고자료. |
+> | [`purchase.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/purchase.rs) | 대화 상태 기계 내 인라인 키보드 + 콜백 쿼리 — `InlineKeyboardMarkup`, `answer_callback_query`, 상태 전이 패턴 포함. |
+> | [`ngrok_ping_pong.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/ngrok_ping_pong.rs) | ngrok 터널로 `webhooks::axum`을 사용하는 최소 웹훅 모드 예제 — 웹훅 태스크 참고용. |
+> | [teloxide 예제 모음](https://github.com/teloxide/teloxide/tree/master/crates/teloxide/examples) | 전체 예제: 대화, 인라인 키보드, 웹훅(axum), 구매 봇, 명령어 핸들러. |
+>
+> **그룹 채팅 & 프로덕션 봇 (Rust)**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`grpmr-rs`](https://github.com/dracarys18/grpmr-rs) | Rust + teloxide 프로덕션 그룹 관리 봇 — 그룹 범위 이벤트 처리, 답장 필터링, 중재 액션, MongoDB 영속성 시연. 그룹 채팅 태스크 참고용. |
+> | [`frankenstein`](https://github.com/ayrat555/frankenstein) | 동기/비동기 지원의 타입 안전 Telegram Bot API 클라이언트 — 원시 API 커버리지 참고용. |
+> | [`tbot`](https://github.com/tbot-rs/tbot) | 의견이 반영된 텔레그램 봇 프레임워크 — 이벤트 루프 및 미들웨어 패턴이 흥미로움. |
+>
+> **속도 제한 & 재시도**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`governor`](https://github.com/antifuchs/governor) | 토큰 버킷 / GCRA 속도 제한 크레이트 — 채팅별·그룹별 전송 쿼터 구현에 사용. unsafe 없음, `tokio` 호환. |
+> | [`telegram-rate-limiter`](https://github.com/mediv0/telegram-rate-limiter) | 텔레그램 봇 전용 채팅별 속도 제한기 — 쿼터 모델 참고용 (30/초 전역, 20/분 그룹). |
+>
+> **통합 테스트**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`wiremock`](https://github.com/LukeMathWalker/wiremock-rs) | Rust용 HTTP 목 서버 — `Bot::set_api_url(mock_url)`과 함께 사용하여 실제 서버 없이 통합 테스트에서 Telegram API 호출을 가로챔. |
+>
+> **AI 에이전트 + 텔레그램 패턴**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | trait 기반 `Channel` 패턴이 openpista의 `ChannelAdapter`와 거의 동일. 텔레그램 포함 다채널 지원. |
+> | [`llm-chain`](https://github.com/sobelio/llm-chain) | LLM 오케스트레이션 프레임워크 — ReAct 루프 + 채팅 어댑터 통합 참고용. |
+>
+> **웹훅 + axum 패턴**
+>
+> | 리소스 | 설명 |
+> |--------|------|
+> | [teloxide axum 웹훅 예제](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/axum_webhook.rs) | 공식 axum 웹훅 예제 — TLS 종단을 포함한 프로덕션 웹훅 모드 참고용. |
+
 
 ### WhatsApp 채널 어댑터 (WhatsApp Channel Adapter)
 
