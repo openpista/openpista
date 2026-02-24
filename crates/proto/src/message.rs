@@ -269,4 +269,81 @@ mod tests {
         assert_eq!(msg.tool_name, None);
         assert_eq!(msg.tool_calls, Some(calls));
     }
+
+    #[test]
+    fn session_id_default_creates_non_empty_value() {
+        let session = SessionId::default();
+        assert!(!session.as_str().is_empty());
+    }
+
+    #[test]
+    fn session_id_display_matches_inner_value() {
+        let session = SessionId::from("my-session");
+        assert_eq!(format!("{}", session), "my-session");
+    }
+
+    #[test]
+    fn session_id_from_string_and_str() {
+        let from_str = SessionId::from("abc");
+        let from_string = SessionId::from("abc".to_string());
+        assert_eq!(from_str.as_str(), from_string.as_str());
+    }
+
+    #[test]
+    fn channel_id_display_matches_inner_value() {
+        let channel = ChannelId::new("telegram", "42");
+        assert_eq!(format!("{}", channel), "telegram:42");
+    }
+
+    #[test]
+    fn channel_id_from_string_and_str() {
+        let from_str = ChannelId::from("cli:local");
+        let from_string = ChannelId::from("cli:local".to_string());
+        assert_eq!(from_str.as_str(), from_string.as_str());
+    }
+
+    #[test]
+    fn role_serde_round_trip() {
+        let roles = [Role::User, Role::Assistant, Role::System, Role::Tool];
+        for role in &roles {
+            let json = serde_json::to_string(role).expect("serialize");
+            let parsed: Role = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(&parsed, role);
+        }
+    }
+
+    #[test]
+    fn agent_message_serde_round_trip() {
+        let session = SessionId::from("s1");
+        let msg = AgentMessage::new(session, Role::User, "hello");
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let parsed: AgentMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.content, "hello");
+        assert_eq!(parsed.role, Role::User);
+        assert_eq!(parsed.session_id.as_str(), "s1");
+    }
+
+    #[test]
+    fn session_id_hash_and_eq() {
+        use std::collections::HashSet;
+        let a = SessionId::from("x");
+        let b = SessionId::from("x");
+        let c = SessionId::from("y");
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
+    }
+
+    #[test]
+    fn channel_id_hash_and_eq() {
+        use std::collections::HashSet;
+        let a = ChannelId::from("cli:local");
+        let b = ChannelId::from("cli:local");
+        let c = ChannelId::from("telegram:1");
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
+    }
 }

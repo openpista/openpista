@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use proto::{LlmError, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
+use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 16000;
@@ -78,10 +78,18 @@ struct AnthropicTool {
 
 // ── Response types ─────────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize, Default)]
+struct AnthropicUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
+    #[serde(default)]
+    usage: AnthropicUsage,
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────────
@@ -227,6 +235,11 @@ impl LlmProvider for AnthropicProvider {
             )));
         }
 
+        trace!(
+            "Anthropic response body: {}",
+            body.chars().take(2000).collect::<String>()
+        );
+
         let anthropic_resp: AnthropicResponse = serde_json::from_str(&body).map_err(|e| {
             LlmError::InvalidResponse(format!(
                 "Deserialization error: {e}; body: {}",
@@ -239,6 +252,16 @@ impl LlmProvider for AnthropicProvider {
             content_blocks = %anthropic_resp.content.len(),
             "Anthropic response parsed"
         );
+        warn!(
+            input_tokens = %anthropic_resp.usage.input_tokens,
+            output_tokens = %anthropic_resp.usage.output_tokens,
+            "Anthropic token usage"
+        );
+
+        let usage = TokenUsage {
+            prompt_tokens: anthropic_resp.usage.input_tokens,
+            completion_tokens: anthropic_resp.usage.output_tokens,
+        };
 
         if anthropic_resp.stop_reason.as_deref() == Some("tool_use") {
             let tool_calls: Vec<ToolCall> = anthropic_resp
@@ -258,7 +281,7 @@ impl LlmProvider for AnthropicProvider {
                     }
                 })
                 .collect();
-            return Ok(ChatResponse::ToolCalls(tool_calls));
+            return Ok(ChatResponse::ToolCalls(tool_calls, usage));
         }
 
         let text = anthropic_resp
@@ -278,7 +301,7 @@ impl LlmProvider for AnthropicProvider {
             .collect::<Vec<_>>()
             .join("");
 
-        Ok(ChatResponse::Text(text))
+        Ok(ChatResponse::Text(text, usage))
     }
 }
 
@@ -571,6 +594,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_usage_from_response() {
+        let json = r#"{"content":[{"type":"text","text":"Hi!"}],"stop_reason":"end_turn","usage":{"input_tokens":42,"output_tokens":17}}"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(resp.usage.input_tokens, 42);
+        assert_eq!(resp.usage.output_tokens, 17);
+    }
+
+    #[test]
     fn parses_tool_use_response() {
         let json = r#"{
             "content": [{"type":"tool_use","id":"tu1","name":"bash","input":{"command":"ls"}}],
@@ -716,5 +747,40 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("collision"), "expected 'collision' in: {msg}");
+    }
+
+    #[test]
+    fn tool_result_after_user_text_creates_separate_message() {
+        // When tool_result follows a plain-text user message (not blocks),
+        // it must NOT merge — a new user entry with blocks is created.
+        let msgs = vec![
+            ChatMessage::user("help me"),
+            ChatMessage::tool_result("tc1", "bash", "output here"),
+        ];
+        let converted = convert_messages(&msgs).expect("conversion");
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted[1].role, "user");
+        let AnthropicContent::Blocks(ref blocks) = converted[1].content else {
+            panic!("expected blocks in tool_result user message");
+        };
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn tool_result_as_first_message_creates_entry() {
+        // When tool_result is the first non-system message (result vec is empty),
+        // a new user message with blocks is created.
+        let msgs = vec![
+            ChatMessage::system("be helpful"),
+            ChatMessage::tool_result("tc1", "bash", "output"),
+        ];
+        let converted = convert_messages(&msgs).expect("conversion");
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+        let AnthropicContent::Blocks(ref blocks) = converted[0].content else {
+            panic!("expected blocks");
+        };
+        assert_eq!(blocks.len(), 1);
     }
 }

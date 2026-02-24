@@ -13,7 +13,7 @@ pub use anthropic::AnthropicProvider;
 /// Tool call approval handler trait and auto-approve default.
 pub use approval::{AutoApproveHandler, ToolApprovalHandler};
 /// Chat request/response models and provider interfaces.
-pub use llm::{ChatRequest, ChatResponse, LlmProvider, OpenAiProvider};
+pub use llm::{ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, TokenUsage};
 /// SQLite-backed conversation memory implementation.
 pub use memory::SqliteMemory;
 /// OpenAI Responses API provider (subscription-based billing).

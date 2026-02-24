@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, trace};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
+use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ impl LlmProvider for ResponsesApiProvider {
         if output_len == 0 && self.is_chatgpt_backend() {
             let has_tool_history = req.messages.iter().any(|m| m.role == proto::Role::Tool);
             if has_tool_history {
-                return Ok(ChatResponse::Text(String::new()));
+                return Ok(ChatResponse::Text(String::new(), TokenUsage::default()));
             }
             return Err(LlmError::AuthRequired(format!(
                 "ChatGPT 세션 토큰이 만료됐거나 '{}' 모델에 대한 접근 권한이 없습니다.",
@@ -288,7 +288,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect();
         if !tool_calls.is_empty() {
-            return Ok(ChatResponse::ToolCalls(tool_calls));
+            return Ok(ChatResponse::ToolCalls(tool_calls, TokenUsage::default()));
         }
         // Collect text from message output items.
         let text: String = responses_resp
@@ -309,7 +309,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect::<Vec<_>>()
             .join("");
-        Ok(ChatResponse::Text(text))
+        Ok(ChatResponse::Text(text, TokenUsage::default()))
     }
 }
 

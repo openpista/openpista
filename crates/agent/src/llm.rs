@@ -91,13 +91,30 @@ pub struct ChatRequest {
     pub model: String,
 }
 
+/// Token usage reported by the LLM for a single call.
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    /// Number of tokens in the prompt / input.
+    pub prompt_tokens: u32,
+    /// Number of tokens in the generated output.
+    pub completion_tokens: u32,
+}
+
+impl TokenUsage {
+    /// Accumulates another usage record into this one.
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+    }
+}
+
 /// Response from the LLM
 #[derive(Debug)]
 pub enum ChatResponse {
     /// Final assistant text response.
-    Text(String),
+    Text(String, TokenUsage),
     /// Assistant requested one or more tool calls.
-    ToolCalls(Vec<ToolCall>),
+    ToolCalls(Vec<ToolCall>, TokenUsage),
 }
 
 /// LLM provider trait
@@ -189,12 +206,15 @@ impl LlmProvider for OpenAiProvider {
             LlmError::Api(format!("{msg}{hint}"))
         })?;
 
+        let usage = TokenUsage {
+            prompt_tokens: response.usage.as_ref().map_or(0, |u| u.prompt_tokens),
+            completion_tokens: response.usage.as_ref().map_or(0, |u| u.completion_tokens),
+        };
         let choice = response
             .choices
             .into_iter()
             .next()
             .ok_or_else(|| LlmError::InvalidResponse("No choices in response".into()))?;
-
         match choice.finish_reason {
             Some(FinishReason::ToolCalls) => {
                 let tool_calls = choice
@@ -211,11 +231,11 @@ impl LlmProvider for OpenAiProvider {
                         }
                     })
                     .collect();
-                Ok(ChatResponse::ToolCalls(tool_calls))
+                Ok(ChatResponse::ToolCalls(tool_calls, usage))
             }
             _ => {
                 let text = choice.message.content.unwrap_or_default();
-                Ok(ChatResponse::Text(text))
+                Ok(ChatResponse::Text(text, usage))
             }
         }
     }
@@ -384,5 +404,78 @@ mod tests {
     fn provider_builders_construct_provider_instances() {
         let _provider = OpenAiProvider::new("k", "m");
         let _provider = OpenAiProvider::with_base_url("k", "https://example.com/v1", "m");
+    }
+
+    #[test]
+    fn token_usage_default_is_zero() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+    }
+
+    #[test]
+    fn token_usage_add_accumulates_values() {
+        let mut total = TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+        };
+        let other = TokenUsage {
+            prompt_tokens: 5,
+            completion_tokens: 15,
+        };
+        total.add(&other);
+        assert_eq!(total.prompt_tokens, 15);
+        assert_eq!(total.completion_tokens, 35);
+    }
+
+    #[test]
+    fn token_usage_add_zero_is_identity() {
+        let mut total = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 200,
+        };
+        total.add(&TokenUsage::default());
+        assert_eq!(total.prompt_tokens, 100);
+        assert_eq!(total.completion_tokens, 200);
+    }
+
+    #[test]
+    fn convert_message_tool_without_call_id_uses_unknown() {
+        let msg = ChatMessage {
+            role: proto::Role::Tool,
+            content: "result".to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        };
+        let converted = convert_message(&msg).expect("tool without call_id");
+        assert!(matches!(converted, ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
+    fn chat_request_debug_format() {
+        let req = ChatRequest {
+            messages: vec![ChatMessage::user("hi")],
+            tools: vec![],
+            model: "gpt-4o".to_string(),
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn chat_response_debug_format() {
+        let resp = ChatResponse::Text("hello".to_string(), TokenUsage::default());
+        let debug = format!("{:?}", resp);
+        assert!(debug.contains("hello"));
+    }
+
+    #[test]
+    fn chat_message_debug_and_clone() {
+        let msg = ChatMessage::user("test");
+        let cloned = msg.clone();
+        assert_eq!(cloned.content, "test");
+        let debug = format!("{:?}", msg);
+        assert!(debug.contains("User"));
     }
 }

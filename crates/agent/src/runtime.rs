@@ -278,7 +278,7 @@ impl AgentRuntime {
             };
 
             match response {
-                ChatResponse::Text(text) => {
+                ChatResponse::Text(text, _) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
 
                     // Save assistant response
@@ -297,7 +297,7 @@ impl AgentRuntime {
                     return Ok(text);
                 }
 
-                ChatResponse::ToolCalls(tool_calls) => {
+                ChatResponse::ToolCalls(tool_calls, _) => {
                     debug!(
                         "Tool calls requested: {:?}",
                         tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
@@ -476,7 +476,7 @@ impl AgentRuntime {
             };
 
             match response {
-                ChatResponse::Text(text) => {
+                ChatResponse::Text(text, _) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
 
                     // Save assistant response
@@ -495,7 +495,7 @@ impl AgentRuntime {
                     return Ok(text);
                 }
 
-                ChatResponse::ToolCalls(tool_calls) => {
+                ChatResponse::ToolCalls(tool_calls, _) => {
                     debug!(
                         "Tool calls requested: {:?}",
                         tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
@@ -825,7 +825,7 @@ mod tests {
             arguments: serde_json::json!({"value":"pong"}),
         };
         let llm = Arc::new(MockLlm::new(vec![
-            ChatResponse::ToolCalls(vec![tool_call]),
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
             ChatResponse::Text("done".to_string()),
         ]));
         let memory = open_temp_memory().await;
@@ -866,7 +866,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"value":"x"}),
         };
-        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(vec![tool_call])]));
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(vec![tool_call])], TokenUsage::default()));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
             llm,
@@ -984,7 +984,7 @@ mod tests {
             arguments: serde_json::json!({"value":"pong"}),
         };
         let llm = Arc::new(MockLlm::new(vec![
-            ChatResponse::ToolCalls(vec![tool_call]),
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
             ChatResponse::Text("final".to_string()),
         ]));
         let memory = open_temp_memory().await;
