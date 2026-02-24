@@ -222,4 +222,68 @@ mod tests {
         assert!(json.contains(r#""type":"auth""#));
         assert!(json.contains(r#""token":"secret""#));
     }
+
+    #[test]
+    fn outgoing_message_serializes_special_chars() {
+        let msg = OutgoingMessage {
+            user_message: "hello \"quotes\" & <angles>".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, r#"{"user_message":"hello \"quotes\" & <angles>"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed["user_message"].as_str().unwrap(),
+            "hello \"quotes\" & <angles>"
+        );
+    }
+
+    #[test]
+    fn outgoing_message_empty_string() {
+        let msg = OutgoingMessage {
+            user_message: String::new(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert_eq!(json, r#"{"user_message":""}"#);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub mod wasm_only {
+        use super::*;
+        use wasm_bindgen_test::*;
+
+        wasm_bindgen_test_configure!(run_in_browser);
+
+        #[wasm_bindgen_test]
+        fn client_new_stores_url_and_token() {
+            let client = Client::new("ws://localhost:3210/ws", "mytoken");
+            assert_eq!(client.url, "ws://localhost:3210/ws");
+            assert_eq!(client.token, "mytoken");
+            assert!(client.ws.is_none());
+        }
+
+        #[wasm_bindgen_test]
+        fn client_new_empty_token() {
+            let client = Client::new("ws://localhost:3210/ws", "");
+            assert_eq!(client.token, "");
+        }
+
+        #[wasm_bindgen_test]
+        fn client_is_connected_returns_false_when_no_ws() {
+            let client = Client::new("ws://localhost:3210/ws", "tok");
+            assert!(
+                !client.is_connected(),
+                "should not be connected without a WebSocket"
+            );
+        }
+
+        #[wasm_bindgen_test]
+        fn client_send_returns_error_when_not_connected() {
+            let client = Client::new("ws://localhost:3210/ws", "tok");
+            let err = client
+                .send("hello")
+                .expect_err("should fail when disconnected");
+            let err_str = err.as_string().unwrap_or_default();
+            assert!(err_str.contains("Not connected"));
+        }
+    }
 }

@@ -345,9 +345,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_caps_timeout_at_300_seconds() {
+    async fn execute_with_large_timeout_succeeds() {
         let tool = BashTool::new();
-        // Request 999 seconds, should be capped to 300
+        // Large timeout values should not break successful command execution.
         let result = tool
             .execute(
                 "c6",

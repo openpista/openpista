@@ -411,4 +411,26 @@ mod tests {
 
         fs::remove_dir_all(&workspace).expect("cleanup workspace");
     }
+
+    #[test]
+    fn wasm_run_request_debug() {
+        let req = WasmRunRequest {
+            call_id: "c3".to_string(),
+            skill_name: "dbg".to_string(),
+            workspace_dir: PathBuf::from("/d"),
+            arguments: serde_json::json!({}),
+            timeout_secs: Some(30),
+        };
+        let debug_str = format!("{:?}", req);
+        assert!(debug_str.contains("WasmRunRequest"));
+        assert!(debug_str.contains("dbg"));
+    }
+
+    #[test]
+    fn default_constants_are_reasonable() {
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 30);
+        assert!(WASM_MEMORY_LIMIT_BYTES > 0);
+        assert!(WASM_FUEL_LIMIT > 0);
+        assert!(PIPE_CAPACITY_BYTES > 0);
+    }
 }
