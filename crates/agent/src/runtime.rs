@@ -1102,6 +1102,71 @@ mod tests {
         assert!(!empty.contains("Available Skills"));
     }
 
+    #[test]
+    fn trim_session_history_returns_original_when_within_limit() {
+        let session = SessionId::from("trim-within-limit");
+        let history = vec![
+            AgentMessage::new(session.clone(), Role::User, "u1"),
+            AgentMessage::new(session, Role::Assistant, "a1"),
+        ];
+
+        let trimmed = trim_session_history(history.clone());
+        assert_eq!(trimmed.len(), history.len());
+        assert_eq!(trimmed[0].content, "u1");
+        assert_eq!(trimmed[1].content, "a1");
+    }
+
+    #[test]
+    fn trim_session_history_aligns_to_next_user_boundary() {
+        let session = SessionId::from("trim-user-boundary");
+        let mut history = Vec::new();
+        history.push(AgentMessage::new(session.clone(), Role::User, "old-user"));
+        history.push(AgentMessage::new(
+            session.clone(),
+            Role::Assistant,
+            "assistant-before-boundary",
+        ));
+        history.push(AgentMessage::new(
+            session.clone(),
+            Role::Tool,
+            "tool-before-boundary",
+        ));
+        history.push(AgentMessage::new(
+            session.clone(),
+            Role::User,
+            "boundary-user",
+        ));
+        for idx in 0..(MAX_CONTEXT_MESSAGES - 3) {
+            history.push(AgentMessage::new(
+                session.clone(),
+                Role::Assistant,
+                format!("tail-{idx}"),
+            ));
+        }
+
+        let trimmed = trim_session_history(history);
+        assert_eq!(trimmed.first().map(|m| m.role.clone()), Some(Role::User));
+        assert_eq!(
+            trimmed.first().map(|m| m.content.clone()),
+            Some("boundary-user".to_string())
+        );
+    }
+
+    #[test]
+    fn history_to_chat_messages_skips_stored_system_entries() {
+        let session = SessionId::from("history-skip-system");
+        let history = vec![
+            AgentMessage::new(session.clone(), Role::System, "persisted-system"),
+            AgentMessage::new(session, Role::User, "hello"),
+        ];
+        let messages = history_to_chat_messages("system-prompt", &history);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "system-prompt");
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].content, "hello");
+    }
+
     #[tokio::test]
     async fn register_and_switch_provider() {
         let llm1 = Arc::new(MockLlm::new(vec![ChatResponse::Text(

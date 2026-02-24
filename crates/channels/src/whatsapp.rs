@@ -520,6 +520,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_handles_transient_disconnect_then_stops_on_logged_out() {
+        let node_check = tokio::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .await
+            .expect("node is required to run WhatsApp bridge tests");
+        assert!(node_check.status.success(), "node --version should succeed");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script_path = tmp.path().join("bridge_test.js");
+        std::fs::write(
+            &script_path,
+            r#"
+console.log(JSON.stringify({ type: "disconnected", reason: "network" }));
+console.log(JSON.stringify({ type: "disconnected", reason: "logged out" }));
+"#,
+        )
+        .expect("write bridge script");
+
+        let config = WhatsAppAdapterConfig {
+            session_dir: tmp.path().join("wa-session").to_string_lossy().to_string(),
+            bridge_path: Some(script_path.to_string_lossy().to_string()),
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), adapter.run(event_tx))
+            .await
+            .expect("adapter run timed out");
+        assert!(result.is_ok(), "run should complete cleanly: {result:?}");
+    }
+
     #[test]
     fn bridge_event_message_without_timestamp() {
         let json = r#"{"type":"message","from":"123","text":"hi"}"#;

@@ -1193,6 +1193,13 @@ mod tests {
         std::fs::write(path, content).expect("write config");
     }
 
+    fn restore_home(original_home: Option<String>) {
+        match original_home {
+            Some(home) => set_env_var("HOME", &home),
+            None => remove_env_var("HOME"),
+        }
+    }
+
     #[test]
     fn default_config_has_expected_values() {
         let cfg = Config::default();
@@ -1876,10 +1883,7 @@ static_dir = "/tmp/web"
             let content = std::fs::read_to_string(&saved_path).expect("read");
             assert!(content.contains("[agent]"));
 
-            match original_home {
-                Some(home) => set_env_var("HOME", &home),
-                None => remove_env_var("HOME"),
-            }
+            restore_home(original_home);
         });
     }
 
@@ -1900,10 +1904,16 @@ static_dir = "/tmp/web"
             assert_eq!(loaded.last_model, "test-model");
             assert_eq!(loaded.last_provider, "test-provider");
 
-            match original_home {
-                Some(home) => set_env_var("HOME", &home),
-                None => remove_env_var("HOME"),
-            }
+            restore_home(original_home);
+        });
+    }
+
+    #[test]
+    fn restore_home_clears_env_when_original_home_missing() {
+        with_locked_env(|| {
+            set_env_var("HOME", "/tmp/openpista-test-home");
+            restore_home(None);
+            assert!(std::env::var("HOME").is_err());
         });
     }
 }
