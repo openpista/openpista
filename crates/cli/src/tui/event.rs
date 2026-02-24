@@ -736,7 +736,10 @@ pub async fn run_tui(
                                 let message = app.take_input();
                                 if let Some(models_cmd) = parse_models_command(&message) {
                                     if model_task.is_some() {
-                                        app.update(Action::PushError(model_sync_in_progress_error()));
+                                        app.update(Action::PushError(
+                                            "Model sync is already in progress. Please wait."
+                                                .to_string(),
+                                        ));
                                         app.update(Action::ScrollToBottom);
                                         continue;
                                     }
@@ -947,7 +950,10 @@ pub async fn run_tui(
 
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
-                                app.update(Action::PushError(model_sync_in_progress_error()));
+                                app.update(Action::PushError(
+                                    "Model sync is already in progress. Please wait."
+                                        .to_string(),
+                                ));
                             } else if let Some(query) = app.model_browser_query() {
                                 app.update(Action::MarkModelRefreshing);
                                 model_task_opts = Some(ModelTaskMode::Browse(query));
@@ -1621,6 +1627,13 @@ pub async fn run_tui(
 mod tests {
     use super::*;
 
+    fn restore_home_env(original_home: Option<String>) {
+        match original_home {
+            Some(home) => crate::test_support::set_env_var("HOME", &home),
+            None => crate::test_support::remove_env_var("HOME"),
+        }
+    }
+
     #[test]
     fn terminal_guard_drop_path_is_safe() {
         let guard = TerminalGuard;
@@ -1937,10 +1950,27 @@ mod tests {
                 .count();
             assert_eq!(active_count, 1);
 
-            match original_home {
-                Some(home) => crate::test_support::set_env_var("HOME", &home),
-                None => crate::test_support::remove_env_var("HOME"),
-            }
+            restore_home_env(original_home);
+        });
+    }
+
+    #[test]
+    fn restore_home_env_clears_home_when_original_missing() {
+        crate::test_support::with_locked_env(|| {
+            crate::test_support::set_env_var("HOME", "/tmp/openpista-event-home");
+            restore_home_env(None);
+            assert!(std::env::var("HOME").is_err());
+        });
+    }
+
+    #[test]
+    fn restore_home_env_sets_home_when_original_present() {
+        crate::test_support::with_locked_env(|| {
+            restore_home_env(Some("/tmp/openpista-event-home-restored".to_string()));
+            assert_eq!(
+                std::env::var("HOME").as_deref(),
+                Ok("/tmp/openpista-event-home-restored")
+            );
         });
     }
 
@@ -2365,7 +2395,8 @@ mod tests {
 
     #[test]
     fn collect_authenticated_providers_returns_vec() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.agent.api_key = "test-key-for-loop".to_string();
         let providers = collect_authenticated_providers(&config);
         // Result is always a Vec; each entry has (name, optional url, key)
         for (name, _url, _key) in &providers {

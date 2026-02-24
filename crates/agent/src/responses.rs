@@ -457,13 +457,13 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
             };
             if let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(response_obj.clone())
             {
-                if resp.usage.is_none() {
-                    resp.usage = response_obj
+                resp.usage = resp.usage.or_else(|| {
+                    response_obj
                         .get("usage")
                         .cloned()
                         .or_else(|| wrapper.get("usage").cloned())
-                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok());
-                }
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
         }
@@ -480,25 +480,25 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
                 && response.get("output").is_some()
                 && let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(response.clone())
             {
-                if resp.usage.is_none() {
-                    resp.usage = response
+                resp.usage = resp.usage.or_else(|| {
+                    response
                         .get("usage")
                         .cloned()
                         .or_else(|| parsed.get("usage").cloned())
-                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok());
-                }
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
             // Check if this is a complete response with output
             if parsed.get("output").is_some()
                 && let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(parsed.clone())
             {
-                if resp.usage.is_none() {
-                    resp.usage = parsed
+                resp.usage = resp.usage.or_else(|| {
+                    parsed
                         .get("usage")
                         .cloned()
-                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok());
-                }
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
         }
@@ -684,6 +684,15 @@ mod tests {
         let usage = token_usage_from_response(&resp);
         assert_eq!(usage.prompt_tokens, 12);
         assert_eq!(usage.completion_tokens, 7);
+    }
+
+    #[test]
+    fn token_usage_from_response_defaults_when_usage_missing() {
+        let json = r#"{"output":[]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        let usage = token_usage_from_response(&resp);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
     }
 
     #[test]

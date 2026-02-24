@@ -689,6 +689,19 @@ mod tests {
     }
 
     #[test]
+    fn chat_reaches_request_serialization_before_network_error() {
+        let req = crate::ChatRequest {
+            model: "claude-3-5-sonnet-20241022".to_string(),
+            messages: vec![ChatMessage::user("hello")],
+            tools: vec![],
+        };
+        let provider = AnthropicProvider::with_base_url("sk-ant-test", "http://127.0.0.1:1");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let result = rt.block_on(provider.chat(req));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn tool_result_after_user_text_creates_separate_message() {
         // When tool_result follows a plain-text user message (not blocks),
         // it must NOT merge — a new user entry with blocks is created.
@@ -700,10 +713,10 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[1].role, "user");
-        let AnthropicContent::Blocks(ref blocks) = converted[1].content else {
-            panic!("expected blocks in tool_result user message");
-        };
-        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &converted[1].content,
+            AnthropicContent::Blocks(blocks) if blocks.len() == 1
+        ));
     }
 
     #[test]
@@ -717,9 +730,9 @@ mod tests {
         let converted = convert_messages(&msgs).expect("conversion");
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "user");
-        let AnthropicContent::Blocks(ref blocks) = converted[0].content else {
-            panic!("expected blocks");
-        };
-        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &converted[0].content,
+            AnthropicContent::Blocks(blocks) if blocks.len() == 1
+        ));
     }
 }
