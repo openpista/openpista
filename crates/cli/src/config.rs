@@ -437,8 +437,10 @@ pub struct Config {
     pub skills: SkillsConfig,
 }
 
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 25;
+
 fn default_max_tool_rounds() -> usize {
-    25
+    DEFAULT_MAX_TOOL_ROUNDS
 }
 
 impl std::str::FromStr for ProviderPreset {
@@ -526,7 +528,7 @@ impl Default for AgentConfig {
             provider: ProviderPreset::default(),
             model: String::new(),
             api_key: String::new(),
-            max_tool_rounds: 25,
+            max_tool_rounds: default_max_tool_rounds(),
             base_url: None,
             oauth_client_id: String::new(),
         }
@@ -1760,8 +1762,9 @@ api_key = "tg-key"
             let content = std::fs::read_to_string(&saved_path).expect("read");
             assert!(content.contains("[agent]"));
 
-            if let Some(home) = original_home {
-                set_env_var("HOME", &home);
+            match original_home {
+                Some(home) => set_env_var("HOME", &home),
+                None => remove_env_var("HOME"),
             }
         });
     }
@@ -1783,8 +1786,9 @@ api_key = "tg-key"
             assert_eq!(loaded.last_model, "test-model");
             assert_eq!(loaded.last_provider, "test-provider");
 
-            if let Some(home) = original_home {
-                set_env_var("HOME", &home);
+            match original_home {
+                Some(home) => set_env_var("HOME", &home),
+                None => remove_env_var("HOME"),
             }
         });
     }

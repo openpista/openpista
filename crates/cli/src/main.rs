@@ -648,6 +648,41 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
 }
 
 #[cfg(not(test))]
+fn prompt_whatsapp_model_warning(config: &Config) -> anyhow::Result<bool> {
+    if !config.agent.model.is_empty() {
+        return Ok(true);
+    }
+
+    let provider = config.agent.provider.name();
+    let effective_model = config.agent.effective_model().to_string();
+
+    if effective_model.is_empty() {
+        println!("\u{26a0} No model configured for provider `{provider}`.");
+        println!("  WhatsApp needs an LLM model to respond to messages.");
+    } else {
+        println!(
+            "\u{26a0} No explicit model configured; using provider default {provider}/{effective_model}."
+        );
+    }
+    println!();
+    println!("  Run `openpista model select` to choose a model explicitly.");
+    println!("  Or set it in ~/.openpista/config.toml:");
+    println!("    [agent]");
+    println!("    provider = \"anthropic\"");
+    println!("    model = \"claude-sonnet-4-6\"");
+    println!();
+    print!("  Continue anyway? (y/N): ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        return Ok(false);
+    }
+    println!();
+    Ok(true)
+}
+
+#[cfg(not(test))]
 /// Non-TUI WhatsApp setup: check prerequisites, install bridge deps, spawn bridge,
 /// display QR in terminal, and save config on successful connection.
 async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
@@ -657,36 +692,8 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
     println!("==============");
     println!();
 
-    // Check if a model is configured
-    let effective_model = config.agent.effective_model().to_string();
-    if effective_model.is_empty() || config.agent.model.is_empty() {
-        println!(
-            "\u{26a0} No model configured. WhatsApp needs an LLM model to respond to messages."
-        );
-        println!(
-            "  Current: provider={}, model={}",
-            config.agent.provider.name(),
-            if effective_model.is_empty() {
-                "(none)"
-            } else {
-                &effective_model
-            }
-        );
-        println!();
-        println!("  Run `openpista model select` to choose a model first.");
-        println!("  Or set it in ~/.openpista/config.toml:");
-        println!("    [agent]");
-        println!("    provider = \"anthropic\"");
-        println!("    model = \"claude-sonnet-4-6\"");
-        println!();
-        print!("  Continue anyway? (y/N): ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            return Ok(());
-        }
-        println!();
+    if !prompt_whatsapp_model_warning(&config)? {
+        return Ok(());
     }
 
     // 1. Check Node.js
@@ -908,37 +915,10 @@ async fn cmd_whatsapp_start(config: Config) -> anyhow::Result<()> {
     println!("     VPN can block WhatsApp Web connections.");
     println!();
 
-    // Check if a model is configured
-    let effective_model = config.agent.effective_model().to_string();
-    if effective_model.is_empty() || config.agent.model.is_empty() {
-        println!(
-            "\u{26a0} No model configured. WhatsApp needs an LLM model to respond to messages."
-        );
-        println!(
-            "  Current: provider={}, model={}",
-            config.agent.provider.name(),
-            if effective_model.is_empty() {
-                "(none)"
-            } else {
-                &effective_model
-            }
-        );
-        println!();
-        println!("  Run `openpista model select` to choose a model first.");
-        println!("  Or set it in ~/.openpista/config.toml:");
-        println!("    [agent]");
-        println!("    provider = \"anthropic\"");
-        println!("    model = \"claude-sonnet-4-6\"");
-        println!();
-        print!("  Continue anyway? (y/N): ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            return Ok(());
-        }
-        println!();
+    if !prompt_whatsapp_model_warning(&config)? {
+        return Ok(());
     }
+    let effective_model = config.agent.effective_model().to_string();
 
     // Check prerequisites: Node.js
     let node_ok = tokio::process::Command::new("node")
@@ -1176,9 +1156,15 @@ async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> a
         .spawn()?;
 
     let stdout = child.stdout.take().expect("bridge stdout");
+    let stderr = child.stderr.take().expect("bridge stderr");
     let mut stdin = child.stdin.take().expect("bridge stdin");
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
+    let _stderr_drain = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut err_lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(_)) = err_lines.next_line().await {}
+    });
 
     println!("Connecting to WhatsApp...");
 

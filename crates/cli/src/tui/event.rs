@@ -116,6 +116,11 @@ fn collect_authenticated_providers(config: &Config) -> Vec<(String, Option<Strin
 }
 /// Maximum seconds to wait for the OAuth callback before timing out.
 const OAUTH_TIMEOUT_SECS: u64 = 120;
+const MODEL_SYNC_IN_PROGRESS_MESSAGE: &str = "Model sync is already in progress. Please wait.";
+
+fn model_sync_in_progress_error() -> String {
+    MODEL_SYNC_IN_PROGRESS_MESSAGE.to_string()
+}
 
 /// Parsed sub-command for the `/model` slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -731,10 +736,7 @@ pub async fn run_tui(
                                 let message = app.take_input();
                                 if let Some(models_cmd) = parse_models_command(&message) {
                                     if model_task.is_some() {
-                                        app.update(Action::PushError(
-                                            "Model sync is already in progress. Please wait."
-                                                .to_string(),
-                                        ));
+                                        app.update(Action::PushError(model_sync_in_progress_error()));
                                         app.update(Action::ScrollToBottom);
                                         continue;
                                     }
@@ -945,10 +947,7 @@ pub async fn run_tui(
 
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
-                                app.update(Action::PushError(
-                                    "Model sync is already in progress. Please wait."
-                                        .to_string(),
-                                ));
+                                app.update(Action::PushError(model_sync_in_progress_error()));
                             } else if let Some(query) = app.model_browser_query() {
                                 app.update(Action::MarkModelRefreshing);
                                 model_task_opts = Some(ModelTaskMode::Browse(query));
@@ -1898,6 +1897,51 @@ mod tests {
         let config = Config::default();
         let providers = collect_authenticated_providers(&config);
         assert!(providers.is_empty() || providers.iter().all(|(_, _, k)| !k.is_empty()));
+    }
+
+    #[test]
+    fn model_sync_in_progress_error_message_is_stable() {
+        assert_eq!(
+            model_sync_in_progress_error(),
+            "Model sync is already in progress. Please wait."
+        );
+    }
+
+    #[test]
+    fn collect_authenticated_providers_does_not_duplicate_active_provider() {
+        crate::test_support::with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            crate::test_support::set_env_var("HOME", tmp.path().to_str().expect("utf8 path"));
+
+            let mut creds = crate::auth::Credentials::default();
+            creds.set(
+                "openai".to_string(),
+                crate::auth::ProviderCredential {
+                    access_token: "tok-openai".to_string(),
+                    endpoint: None,
+                    refresh_token: None,
+                    expires_at: None,
+                    id_token: None,
+                },
+            );
+            let creds_path = crate::auth::Credentials::path();
+            creds.save_to(&creds_path).expect("save creds");
+
+            let config = Config::default();
+            let providers = collect_authenticated_providers(&config);
+            let active = config.agent.provider.name().to_string();
+            let active_count = providers
+                .iter()
+                .filter(|(name, _, _)| name == &active)
+                .count();
+            assert_eq!(active_count, 1);
+
+            match original_home {
+                Some(home) => crate::test_support::set_env_var("HOME", &home),
+                None => crate::test_support::remove_env_var("HOME"),
+            }
+        });
     }
 
     #[tokio::test]

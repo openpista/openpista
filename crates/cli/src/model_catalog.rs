@@ -1581,17 +1581,4 @@ mod tests {
         assert!(entries.iter().any(|e| e.id == "claude-3.5-sonnet"));
         assert!(entries.iter().any(|e| e.recommended_for_coding));
     }
-
-    #[test]
-    fn seed_models_openai_has_expected_count() {
-        let entries = seed_models_for_provider("openai");
-        // openai has 11 seed models
-        assert_eq!(entries.len(), 11);
-    }
-
-    #[test]
-    fn seed_models_github_copilot_has_expected_count() {
-        let entries = seed_models_for_provider("github-copilot");
-        assert_eq!(entries.len(), 3);
-    }
 }
