@@ -799,11 +799,23 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
     let token = match resolved {
         Some(t) => t,
         None => {
-            eprintln!("Error: no bot token found.");
-            eprintln!();
-            eprintln!("Run `openpista telegram setup --token YOUR_TOKEN` first,");
-            eprintln!("or set the TELEGRAM_BOT_TOKEN environment variable.");
-            anyhow::bail!("missing Telegram bot token");
+            println!("Telegram Bot Setup");
+            println!("==================");
+            println!();
+            println!("No token configured. Follow these steps to create a bot first:");
+            println!();
+            println!("1. Open the Telegram app, search for @BotFather, and start a chat");
+            println!("2. Send /newbot");
+            println!("3. Enter a name for your bot (e.g. MyPistaBot)");
+            println!("4. Enter a username for your bot (e.g. mypista_bot)  ← Name ending in _bot");
+            println!("5. BotFather will provide your token:");
+            println!("     123456789:AABBccDDeeFFggHH...");
+            println!();
+            println!("After receiving the token, run:");
+            println!("  openpista telegram setup --token YOUR_TOKEN");
+            println!("  openpista telegram start");
+            println!();
+            return Ok(());
         }
     };
 
@@ -814,8 +826,41 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
         );
     }
 
+    let effective_model = config.agent.effective_model().to_string();
+    if effective_model.is_empty() || config.agent.model.is_empty() {
+        println!(
+            "\u{26a0}  No model configured. Telegram needs an LLM model to respond to messages."
+        );
+        println!(
+            "  Current: provider={}, model={}",
+            config.agent.provider.name(),
+            if effective_model.is_empty() {
+                "(none)"
+            } else {
+                &effective_model
+            }
+        );
+        println!();
+        println!("  Run `openpista model select` to choose a model first.");
+        println!("  Or set it in ~/.openpista/config.toml:");
+        println!("    [agent]");
+        println!("    provider = \"anthropic\"");
+        println!("    model = \"claude-sonnet-4-6\"");
+        println!();
+        print!("  Continue anyway? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+        println!();
+    }
     println!("Telegram Bot Server");
     println!("===================");
+    println!();
+    println!("Provider: {}", config.agent.provider.name());
+    println!("Model   : {effective_model}");
     println!();
     println!("Starting agent runtime...");
 
