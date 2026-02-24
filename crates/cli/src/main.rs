@@ -102,9 +102,29 @@ enum Commands {
     },
     /// Set up WhatsApp channel (check prerequisites, install bridge, pair via QR)
     Whatsapp,
+    /// Manage Telegram channel (status, setup guide, enable)
+    Telegram {
+        #[command(subcommand)]
+        command: TelegramCommands,
+    },
 }
 
 /// `auth` sub-subcommands.
+/// `telegram` sub-subcommands.
+#[derive(Subcommand)]
+enum TelegramCommands {
+    /// Show current Telegram channel configuration and readiness
+    Status,
+    /// Print step-by-step guide to create a bot via @BotFather
+    Setup,
+    /// Save bot token to config and enable the Telegram channel
+    Start {
+        /// Bot token from @BotFather (e.g. 123456:ABC...)
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum AuthCommands {
     /// Authenticate with a provider via browser-based OAuth PKCE flow
@@ -237,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
             Commands::Model { .. } => "model",
             Commands::Auth { .. } => "auth",
             Commands::Whatsapp => "whatsapp",
+            Commands::Telegram { .. } => "telegram",
         };
         info!(
             version = env!("CARGO_PKG_VERSION"),
@@ -294,6 +315,11 @@ async fn main() -> anyhow::Result<()> {
             AuthCommands::Status => cmd_auth_status(),
         },
         Commands::Whatsapp => cmd_whatsapp(config).await,
+        Commands::Telegram { command } => match command {
+            TelegramCommands::Status => cmd_telegram_status(&config),
+            TelegramCommands::Setup => cmd_telegram_setup(),
+            TelegramCommands::Start { token } => cmd_telegram_start(config, token).await,
+        },
     }
 }
 
@@ -602,6 +628,118 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
 
     pid_file.remove().await;
     info!("openpista stopped");
+    Ok(())
+}
+
+// ─── Telegram CLI commands ───────────────────────────────────────────────────
+
+/// Validates that a Telegram bot token matches the expected `NUMBERS:STRING` format.
+fn is_valid_telegram_token(token: &str) -> bool {
+    let mut parts = token.splitn(2, ':');
+    let numeric = parts
+        .next()
+        .map(|p| p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty());
+    let rest = parts.next().map(|p| !p.is_empty());
+    matches!((numeric, rest), (Some(true), Some(true)))
+}
+
+#[cfg(not(test))]
+/// `openpista telegram status` — prints current Telegram channel configuration.
+fn cmd_telegram_status(config: &Config) -> anyhow::Result<()> {
+    println!("Telegram Status");
+    println!("===============");
+    println!();
+
+    let enabled = config.channels.telegram.enabled;
+    let token_set = !config.channels.telegram.token.is_empty();
+
+    println!("  Enabled : {}", if enabled { "Yes" } else { "No" });
+    println!(
+        "  Token   : {}",
+        if token_set { "(set)" } else { "(not set)" }
+    );
+    println!();
+
+    match (enabled, token_set) {
+        (true, true) => println!("  Status  : Ready — run `openpista start` to activate."),
+        (false, true) => {
+            println!("  Status  : Token set but channel is disabled.");
+            println!("           Enable it in config.toml or run `openpista telegram start`.");
+        }
+        (_, false) => {
+            println!("  Status  : Not configured.");
+            println!("           Run `openpista telegram setup` for setup instructions.");
+        }
+    }
+    Ok(())
+}
+
+/// `openpista telegram setup` — prints a step-by-step bot creation guide.
+#[cfg(not(test))]
+fn cmd_telegram_setup() -> anyhow::Result<()> {
+    println!("Telegram Setup Guide");
+    println!("====================");
+    println!();
+    println!("1. Open Telegram and search for @BotFather");
+    println!("2. Send /newbot and follow the prompts");
+    println!("3. Copy the bot token (format: 123456:ABC...)");
+    println!();
+    println!("Then run:");
+    println!("  openpista telegram start --token YOUR_TOKEN");
+    println!();
+    println!("Or add it manually to config.toml:");
+    println!("  [channels.telegram]");
+    println!("  enabled = true");
+    println!("  token   = \"123456:ABC...\"");
+    println!();
+    println!("Or use an environment variable (daemon mode):");
+    println!("  TELEGRAM_BOT_TOKEN=123456:ABC... openpista start");
+    Ok(())
+}
+
+/// `openpista telegram start [--token TOKEN]` — saves token and enables Telegram.
+#[cfg(not(test))]
+async fn cmd_telegram_start(mut config: Config, token: Option<String>) -> anyhow::Result<()> {
+    // Resolve token: flag > env var > already in config
+    let resolved = token
+        .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
+        .or_else(|| {
+            if config.channels.telegram.token.is_empty() {
+                None
+            } else {
+                Some(config.channels.telegram.token.clone())
+            }
+        });
+
+    let token = match resolved {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: no bot token provided.");
+            eprintln!();
+            eprintln!("Supply one with --token or TELEGRAM_BOT_TOKEN, or run:");
+            eprintln!("  openpista telegram setup");
+            anyhow::bail!("missing Telegram bot token");
+        }
+    };
+
+    if !is_valid_telegram_token(&token) {
+        anyhow::bail!(
+            "Invalid token format '{}'. Expected NUMBERS:STRING (e.g. 123456:ABC...)",
+            token
+        );
+    }
+
+    config.channels.telegram.token = token.clone();
+    config.channels.telegram.enabled = true;
+
+    config
+        .save()
+        .map_err(|e| anyhow::anyhow!("Failed to save config: {e}"))?;
+
+    println!("Telegram channel enabled.");
+    println!("Token saved to config.toml.");
+    println!();
+    println!("Run `openpista start` to activate all channels.");
     Ok(())
 }
 
@@ -1236,6 +1374,7 @@ fn format_run_header(exec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn should_send_telegram_response_checks_prefix() {
@@ -1296,5 +1435,47 @@ mod tests {
     fn print_goodbye_banner_short_session_id() {
         let session = SessionId::from("short");
         print_goodbye_banner(&session, "claude-sonnet-4-20250514");
+    }
+
+    // ─── Telegram CLI tests ─────────────────────────────────────────
+
+    #[test]
+    fn is_valid_telegram_token_accepts_valid() {
+        assert!(is_valid_telegram_token("123456:ABCdef"));
+        assert!(is_valid_telegram_token("9999999:xYz_123-ABC"));
+    }
+
+    #[test]
+    fn is_valid_telegram_token_rejects_invalid() {
+        assert!(!is_valid_telegram_token("notokens"));
+        assert!(!is_valid_telegram_token("abc:def")); // non-numeric prefix
+        assert!(!is_valid_telegram_token("123456:")); // empty suffix
+        assert!(!is_valid_telegram_token(":ABCdef")); // empty prefix
+        assert!(!is_valid_telegram_token(""));
+    }
+
+    #[test]
+    fn telegram_status_logic_not_configured() {
+        let config = Config::default();
+        assert!(!config.channels.telegram.enabled);
+        assert!(config.channels.telegram.token.is_empty());
+    }
+
+    #[test]
+    fn telegram_status_logic_enabled_with_token() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        assert!(config.channels.telegram.enabled);
+        assert!(!config.channels.telegram.token.is_empty());
+    }
+
+    #[test]
+    fn telegram_status_logic_token_but_disabled() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = false;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        assert!(!config.channels.telegram.enabled);
+        assert!(!config.channels.telegram.token.is_empty());
     }
 }
