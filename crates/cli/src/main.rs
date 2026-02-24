@@ -25,7 +25,7 @@ use agent::{
     ToolRegistry,
 };
 #[cfg(not(test))]
-use channels::{ChannelAdapter, CliAdapter, TelegramAdapter};
+use channels::{ChannelAdapter, CliAdapter, TelegramAdapter, WebAdapter};
 #[cfg(not(test))]
 use config::Config;
 #[cfg(not(test))]
@@ -451,6 +451,28 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    let mut web_resp_adapter: Option<WebAdapter> = None;
+    if config.channels.web.enabled {
+        if config.channels.web.token.is_empty() {
+            warn!("Web adapter enabled with empty token; websocket auth is disabled");
+        }
+
+        let tx = event_tx.clone();
+        let adapter = WebAdapter::new(
+            config.channels.web.port,
+            config.channels.web.token.clone(),
+            config.channels.web.cors_origins.clone(),
+            config.channels.web.static_dir.clone(),
+        );
+        web_resp_adapter = Some(adapter.clone());
+
+        tokio::spawn(async move {
+            if let Err(e) = adapter.run(tx).await {
+                error!("Web adapter error: {e}");
+            }
+        });
+    }
+
     // Response forwarder (always consume `resp_rx` to avoid dropped/backed-up responses)
     tokio::spawn(async move {
         while let Some(resp) = resp_rx.recv().await {
@@ -474,6 +496,17 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
                     }
                 } else {
                     warn!("Telegram response dropped because Telegram channel is disabled");
+                }
+                continue;
+            }
+
+            if should_send_web_response(&channel_id) {
+                if let Some(adapter) = &web_resp_adapter {
+                    if let Err(e) = adapter.send_response(resp).await {
+                        error!("Failed to send Web response: {e}");
+                    }
+                } else {
+                    warn!("Web response dropped because Web channel is disabled");
                 }
                 continue;
             }
@@ -973,6 +1006,10 @@ fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
 }
 
+fn should_send_web_response(channel_id: &ChannelId) -> bool {
+    channel_id.as_str().starts_with("web:")
+}
+
 /// Builds an outbound response from runtime result.
 fn build_agent_response(
     event: &ChannelEvent,
@@ -1011,6 +1048,13 @@ mod tests {
     fn should_send_cli_response_checks_prefix() {
         assert!(should_send_cli_response(&ChannelId::from("cli:local")));
         assert!(!should_send_cli_response(&ChannelId::from("telegram:123")));
+    }
+
+    #[test]
+    fn should_send_web_response_checks_prefix() {
+        assert!(should_send_web_response(&ChannelId::from("web:abc")));
+        assert!(!should_send_web_response(&ChannelId::from("telegram:123")));
+        assert!(!should_send_web_response(&ChannelId::from("cli:local")));
     }
 
     #[test]

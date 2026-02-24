@@ -563,6 +563,9 @@ pub struct ChannelsConfig {
     pub telegram: TelegramConfig,
     /// Local CLI adapter config.
     pub cli: CliConfig,
+    /// Web adapter config.
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 /// Telegram adapter config.
@@ -584,6 +587,34 @@ pub struct CliConfig {
 impl Default for CliConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// Web channel adapter config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebConfig {
+    /// Whether Web adapter is enabled.
+    pub enabled: bool,
+    /// Authentication token for WebSocket connections.
+    pub token: String,
+    /// HTTP/WS listen port.
+    pub port: u16,
+    /// Allowed CORS origins (comma-separated or "*").
+    pub cors_origins: String,
+    /// Directory for static files (WASM bundle, H5 assets).
+    pub static_dir: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Self {
+            enabled: false,
+            token: String::new(),
+            port: 3210,
+            cors_origins: "*".to_string(),
+            static_dir: format!("{home}/.openpista/web"),
+        }
     }
 }
 
@@ -660,6 +691,16 @@ impl Config {
         }
         if let Ok(workspace) = std::env::var("openpista_WORKSPACE") {
             config.skills.workspace = workspace;
+        }
+
+        if let Ok(token) = std::env::var("openpista_WEB_TOKEN") {
+            config.channels.web.token = token;
+            config.channels.web.enabled = true;
+        }
+        if let Ok(port) = std::env::var("openpista_WEB_PORT")
+            && let Ok(p) = port.parse()
+        {
+            config.channels.web.port = p;
         }
 
         debug!(
@@ -930,6 +971,54 @@ impl Config {
         }
 
         None
+    }
+
+    /// Persists the `[channels.web]` section to the config file.
+    ///
+    /// Reads the existing config file (or creates one), updates the
+    /// `channels.web` table, and writes it back.
+    pub fn save_web_section(&self) -> Result<(), ConfigError> {
+        use std::io::Write;
+
+        let config_path = {
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|d| d.join("config.toml"));
+            if cwd.as_ref().is_some_and(|p| p.exists()) {
+                cwd.unwrap()
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".openpista").join("config.toml")
+            }
+        };
+
+        let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let mut doc: toml::Value =
+            toml::from_str(&content).unwrap_or_else(|_| toml::Value::Table(Default::default()));
+
+        let root = doc.as_table_mut().ok_or_else(|| {
+            ConfigError::Toml("config root is not a table".to_string())
+        })?;
+
+        let channels = root
+            .entry("channels")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::Toml("channels is not a table".to_string()))?;
+
+        let web_value = toml::Value::try_from(&self.channels.web)
+            .map_err(|e| ConfigError::Toml(e.to_string()))?;
+        channels.insert("web".to_string(), web_value);
+
+        let serialized = toml::to_string_pretty(&doc)
+            .map_err(|e| ConfigError::Toml(e.to_string()))?;
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
+        }
+        let mut f = std::fs::File::create(&config_path).map_err(ConfigError::Io)?;
+        f.write_all(serialized.as_bytes()).map_err(ConfigError::Io)?;
+        Ok(())
     }
 }
 

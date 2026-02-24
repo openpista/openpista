@@ -19,6 +19,7 @@ config.toml
 *.cert
 *.pid
 *.log
+logs/
 
 # skills
 skills/hello-wasm/target

@@ -3,11 +3,11 @@
 use super::app::{AppState, TuiApp};
 use super::theme::THEME;
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
+    Frame,
 };
 
 /// Braille-pattern spinner frames for the status bar animation.
@@ -124,6 +124,10 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             " Confirm delete — y/Enter: delete, n/Esc: cancel ",
             Style::default().fg(THEME.error),
         )),
+        AppState::WebConfiguring { .. } => Line::from(Span::styled(
+            " Web adapter setup wizard active ",
+            Style::default().fg(THEME.status_hint),
+        )),
     };
 
     // Create a split to right-align the version
@@ -143,7 +147,7 @@ mod tests {
     use super::*;
     use crate::auth_picker::LoginBrowseStep;
     use proto::{ChannelId, SessionId};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn make_app() -> TuiApp {
         TuiApp::new(

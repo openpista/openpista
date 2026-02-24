@@ -41,12 +41,11 @@
 
 > **아키텍처 노트**
 >
-> 모든 채널 어댑터는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, HTTP 웹훅, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 프로세스 내 게이트웨이로 브릿지합니다.
+> 모든 채널 어댑터는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 프로세스 내 게이트웨이로 브릿지합니다.
 >
 > ```
 > CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
 > TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WhatsAppAdapter ── HTTP webhook → mpsc ──→ Gateway
 > WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
 > ```
 
@@ -60,12 +59,11 @@
 > | 모바일 채널 | `MobileAdapter` | QUIC을 네이티브로 사용하는 유일한 채널 어댑터입니다. 모바일 앱은 토큰 기반 인증과 0-RTT를 통해 QUIC으로 직접 연결합니다. |
 > | 웹 채널 | `WebAdapter` | 브라우저 기반 채널 어댑터. Rust→WASM 클라이언트 번들과 H5 채팅 UI를 HTTP로 서빙하고, WebSocket으로 실시간 에이전트 통신을 수행합니다. 네이티브 앱 필요 없이 모든 폰 브라우저에서 작동합니다. |
 >
-> 다른 채널 어댑터(CLI, Telegram, WhatsApp, Web)는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, HTTP 웹훅, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 게이트웨이로 브릿지합니다 — QUIC을 직접 사용하지 않습니다.
+> 다른 채널 어댑터(CLI, Telegram, Web)는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 게이트웨이로 브릿지합니다 — QUIC을 직접 사용하지 않습니다.
 >
 > ```
 > CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
 > TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WhatsAppAdapter ── HTTP webhook → mpsc ──→ Gateway
 > WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
 > MobileAdapter ──── QUIC ────────→ mpsc ──→ Gateway ← 워커로부터도 QUIC 수신
 > ```
@@ -87,65 +85,7 @@
 - [x] `MobileAdapter` — QUIC 양방향 스트림, 토큰 기반 인증, `rcgen`을 통한 자체 서명 TLS
 - [x] 응답 라우팅: CLI 응답 → stdout, 텔레그램 응답 → 봇 API
 - [x] 사용자에게 명확히 표시되는 오류 응답
- [ ] `WebAdapter` — Rust→WASM 브라우저 클라이언트 + WebSocket 전송 (웹 채널 어댑터 섹션 참조)
-
-
-### WhatsApp 채널 어댑터 (WhatsApp Channel Adapter)
-
-> WhatsApp은 Telegram과 동일한 HTTP→mpsc 브릿지 패턴을 따릅니다. 어댑터는 HTTP(`axum`)를 통해 웹훅 이벤트를 수신하고, `ChannelEvent`로 변환한 후 `tokio::mpsc`를 통해 전달합니다.
-
- [ ] `WhatsAppAdapter` — `reqwest`를 통한 WhatsApp Business Cloud API 통합
- [ ] 수신 메시지를 위한 웹훅 HTTP 서버 (`axum` 기반): GET 검증 챌린지 + POST 메시지 핸들러
- [ ] HMAC-SHA256 웹훅 페이로드 서명 검증 (`X-Hub-Signature-256` 헤더)
- [ ] Meta Graph API를 통한 텍스트 메시지 전송 (`POST /v21.0/{phone_number_id}/messages`)
- [ ] 대화별 안정적인 세션: `whatsapp:{sender_phone}` 채널 ID 및 세션 매핑
- [ ] `WhatsAppConfig` — `[channels.whatsapp]` 설정 섹션: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
- [ ] 환경 변수 재정의: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
- [ ] 수신 메시지 파싱: 텍스트, 이미지, 오디오, 비디오, 문서, 위치, 연락처
- [ ] 메시지 상태 웹훅 콜백 처리 (발송 → 수신 → 읽음)
- [ ] 미디어 메시지 다운로드 및 전달 (수신 미디어 → base64 또는 로컬 경로로 에이전트 컨텍스트에 전달)
- [ ] 인터랙티브 메시지 지원: 응답 버튼, 목록 메시지, 빠른 답장
- [ ] 아웃바운드 알림을 위한 메시지 템플릿 렌더링 (WhatsApp 24시간 정책에 필요한 HSM 템플릿)
- [ ] WhatsApp Business API 등급(tier)에 따른 처리율 제한 준수 (메시지 제한, 처리량)
- [ ] 일시적 API 장애(429, 500)에 대한 지수 백오프(exponential backoff) 재시도 로직
- [ ] 사용자에게 명확히 표시되는 오류 응답 (❌ 접두사, 다른 어댑터와 일관됨)
- [ ] 응답 라우팅 통합: WhatsApp 응답 → Graph API `send_message`
- [ ] 다중 번호 지원: 여러 번호를 가진 비즈니스 계정을 위한 구성 가능한 전화번호 ID
- [ ] 유닛 테스트: 웹훅 검증, 메시지 파싱, 세션 ID 생성, 응답 포맷팅, 서명 검증
- [ ] 통합 테스트: 엔드-투-엔드 웹훅 → `ChannelEvent` → `AgentResponse` → WhatsApp 전송 흐름
-
-#### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
-
-> **Rust 크레이트**
->
-> | 크레이트 | 설명 |
-> |----------|------|
-> | [`whatsapp-business-rs`](https://github.com/veecore/whatsapp-business-rs) | WhatsApp Business Cloud API 풀 SDK — axum 웹훅 서버 내장, HMAC-SHA256 검증, 메시지 송수신. 최우선 후보. |
-> | [`whatsapp-cloud-api`](https://github.com/sajuthankappan/whatsapp-cloud-api-rs) | Meta Graph API 경량 클라이언트 (30k+ 다운로드). 웹훅 서버 미포함 — 별도 axum 핸들러와 조합 필요. |
-> | [`whatsapp_handler`](https://github.com/bambby-plus/whatsapp_handler) | 웹훅 메시지 처리 + 미디어/인터랙티브 메시지 전송 지원. |
->
-> **유사 아키텍처 Rust AI 에이전트**
->
-> | 프로젝트 | 설명 |
-> |----------|------|
-> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | trait 기반 `Channel` 패턴이 openpista의 `ChannelAdapter`와 거의 동일. WhatsApp 포함 다채널 지원. |
-> | [`opencrust`](https://github.com/opencrust-org/opencrust) | 동일한 `crates/` 워크스페이스 구조. `whatsapp/webhook.rs` + `api.rs` 분리 모듈 패턴 참고. |
-> | [`localgpt`](https://github.com/localgpt-app/localgpt) | `bridges/whatsapp/` 브릿지 패턴으로 WhatsApp 통합. |
-> | [`loom`](https://github.com/ghuntley/loom) | Rust 워크스페이스 내 axum 기반 `routes/whatsapp.rs` 라우트 핸들러. |
->
-> **API 스펙 레퍼런스 (TypeScript)**
->
-> | 프로젝트 | 설명 |
-> |----------|------|
-> | [`WhatsApp-Nodejs-SDK`](https://github.com/WhatsApp/WhatsApp-Nodejs-SDK) | Meta 공식 SDK — 웹훅 페이로드 스키마 및 API 엔드포인트 스펙의 권위 있는 출처. |
-> | [`whatsapp-business-sdk`](https://github.com/MarcosNicolau/whatsapp-business-sdk) | 깔끔한 TypeScript 타입 정의와 Business Cloud API에 대한 좋은 테스트 커버리지. |
->
-> **Axum 웹훅 HMAC-SHA256 패턴**
->
-> | 리소스 | 설명 |
-> |--------|------|
-> | [pg3.dev — GitHub Webhooks in Rust with Axum](https://pg3.dev/post/github_webhooks_rust) | HMAC-SHA256 + axum 완성형 튜토리얼. `X-Hub-Signature-256` 형식이 WhatsApp과 동일. |
-> | [`axum-github-hooks`](https://github.com/rustunit/axum-github-hooks) | 웹훅 서명 검증을 위한 axum extractor 패턴 — `WhatsAppWebhookPayload` extractor로 응용 가능. |
+ - [x] `WebAdapter` — axum WebSocket 서버 + 정적 H5 채팅 UI (`static/`) 서빙; Rust→WASM 클라이언트 진행 중 (웹 채널 어댑터 섹션 참조)
 
 
 ### 웹 채널 어댑터 (Web Channel Adapter — Rust→WASM + WebSocket)
@@ -154,25 +94,25 @@
 
 #### 서버 (axum)
 
- [ ] `WebAdapter` — axum HTTP 서버: WebSocket 업그레이드 + WASM 번들용 정적 파일 서빙
- [ ] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `ChannelEvent` / `AgentResponse`
- [ ] WebSocket 핸드쉐이크 시 토큰 기반 인증 (`Sec-WebSocket-Protocol` 또는 쿼리 파람)
- [ ] `WebConfig` — `[channels.web]` 설정 섹션: `port`, `token`, `cors_origins`, `static_dir`
- [ ] 환경 변수 재정의: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
- [ ] 세션 매핑: 인증된 클라이언트별 안정적인 세션을 가진 `web:{client_id}` 채널 ID
- [ ] 자동 재연결 지원: 클라이언트 측 하트비트 ping/pong, 서버 측 타임아웃 감지
- [ ] 크로스 오리진 브라우저 접근을 위한 CORS 설정
+ - [x] `WebAdapter` — axum HTTP 서버: WebSocket 업그레이드 + WASM 번들용 정적 파일 서빙
+ - [x] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `WsMessage` 봉투 (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`)
+ - [x] WebSocket 핸드쉐이크 시 토큰 기반 인증 (쿼리 파람 `?token=`)
+ - [x] `WebConfig` — `[channels.web]` 설정 섹션: `port`, `token`, `cors_origins`, `static_dir`
+ - [x] 환경 변수 재정의: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
+ - [x] 세션 매핑: 인증된 클라이언트별 안정적인 세션을 가진 `web:{client_id}` 채널 ID
+ [ ] 자동 재연결 지원: `Ping`/`Pong` 메시지 정의 완료; 클라이언트 측 재연결 루프 및 서버 측 타임아웃 감지 구현 예정
+ - [x] 크로스 오리진 브라우저 접근을 위한 CORS 설정
  [ ] 리버스 프록시 또는 `axum-server` + `rustls`를 통한 WSS (TLS) 지원
- [ ] WASM 번들 및 H5 에셋을 위한 구성 가능한 정적 파일 디렉토리
+ - [x] WASM 번들 및 H5 에셋을 위한 구성 가능한 정적 파일 디렉토리
 
 #### 클라이언트 (Rust→WASM)
 
- [ ] `wasm-pack`을 통해 `wasm32-unknown-unknown`으로 컴파일되는 Rust 클라이언트 크레이트 (`crates/web/`)
- [ ] `wasm-bindgen` JS 인터롭: WebSocket API, DOM 조작, localStorage
- [ ] WebSocket 연결 관리자: 연결, 재연결, 하트비트, 버퍼링된 전송 큐
- [ ] 메시지 직렬화: `ChannelEvent` / `AgentResponse`를 위한 WASM 내 `serde_json`
- [ ] 세션 지속성: 페이지 새로고침 시 세션 ID와 인증 토큰 유지를 위한 `localStorage`
- [ ] H5 채팅 UI: 모바일 대응 채팅 인터페이스 (HTML/CSS/JS 또는 Yew/Leptos 프레임워크)
+ - [x] `wasm-pack`을 통해 `wasm32-unknown-unknown`으로 컴파일되는 Rust 클라이언트 크레이트 (`crates/web/`)
+ - [x] `wasm-bindgen` JS 인터롭: WebSocket API, DOM 조작, localStorage
+ - [ ] WebSocket 연결 관리자: 연결 ✅, 재연결 ◻, 하트비트 ◻, 버퍼링된 전송 큐 ◻
+ - [x] 메시지 직렬화: `ChannelEvent` / `AgentResponse`를 위한 WASM 내 `serde_json`
+ - [x] 세션 지속성: 페이지 새로고침 시 클라이언트 ID와 인증 토큰 유지를 위한 `localStorage` (`static/app.js`)
+ - [x] H5 채팅 UI: 모바일 대응 채팅 인터페이스 (`static/index.html` + `style.css` + `app.js`; 바닐라 JS, Rust→WASM 미전환)
  [ ] 스트리밍 응답 표시: 에이전트 출력 생성 시 점진적 텍스트 렌더링
  [ ] 슬래시 명령어 지원: 웹 UI 입력에서 `/model`, `/session`, `/clear`, `/help`
  [ ] 미디어 첨부 지원: 이미지 업로드 → base64 인코딩 → 에이전트 컨텍스트
@@ -181,9 +121,66 @@
 
 #### 품질 (Quality)
 
- [ ] 유닛 테스트: WebSocket 핸드쉐이크, 토큰 인증, 메시지 프레이밍, 재연결 로직
+ - [x] 유닛 테스트: WebSocket 핸드쉐이크, 토큰 인증, 메시지 프레이밍, ping/pong, CORS, 세션 매핑 — 11개 테스트 (`channels/src/web.rs`)
  [ ] 통합 테스트: 브라우저 → WebSocket → `ChannelEvent` → `AgentResponse` → 브라우저 렌더
  [ ] WASM 번들 크기 최적화: `wasm-opt`, 트리 셰이킹, gzip/brotli 서빙
+
+#### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
+
+> **Axum WebSocket 서버 패턴**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [axum — chat 예제](https://github.com/tokio-rs/axum/blob/main/examples/chat/src/main.rs) | 공식 Axum 브로드캐스트 기반 WebSocket 채팅 예제. `WebSocketUpgrade` + `tokio::sync::broadcast` 패턴의 최적 출발점. |
+> | [axum — websockets 예제](https://github.com/tokio-rs/axum/blob/main/examples/websockets/src/main.rs) | 공식 Axum WebSocket 예제 — 일반적인 WS 처리, ping/pong, 연결 생명주기 시연. |
+> | [0xLaurens/chatr](https://github.com/0xLaurens/chatr) | WebSocket과 Axum을 사용한 채팅 룸. 룸 기반 세션 아키텍처 시연. |
+> | [kumanote/axum-chat-example-rs](https://github.com/kumanote/axum-chat-example-rs) | Dragonfly(Redis 호환) pub/sub을 사용한 Axum WebSocket 채팅. 다중 인스턴스 스케일링 참고. |
+> | [`danielclough/fireside-chat`](https://github.com/danielclough/fireside-chat) | LLM 채팅 봇: Axum WebSocket 백엔드 + Leptos WASM 프론트엔드 — openpista의 목표 Web 어댑터 아키텍처와 가장 근접한 레퍼런스. |
+> | [`dawnchan030920/axum-ycrdt-websocket`](https://github.com/dawnchan030920/axum-ycrdt-websocket) | 컨넥션별 상태와 멀티클라이언트 브로드캐스트를 갖춘 Axum WebSocket 미들웨어 — 룸을 인식 WebSocket 핸들러 패턴 참고. |
+>
+> **Rust→WASM WebSocket 클라이언트 라이브러리**
+>
+> | 크레이트 | 설명 |
+> |----------|------|
+> | [wasm-bindgen — WebSocket 예제](https://github.com/rustwasm/wasm-bindgen/tree/main/examples/websockets) | wasm-bindgen의 정규 `web-sys` WebSocket 예제. WASM WS 클라이언트의 기초. |
+> | [`ewebsock`](https://github.com/rerun-io/ewebsock) | 크로스 플랫폼(네이티브 + WASM) WebSocket 클라이언트. 단일 통합 API 제공. Rerun 팀 제작. |
+> | [`tokio-tungstenite-wasm`](https://github.com/TannerRogalsky/tokio-tungstenite-wasm) | `web-sys`(WASM)와 `tokio-tungstenite`(네이티브)를 하나의 크로스 플랫폼 API로 래핑. crates.io 다운로드 ~343k. |
+> | [`ws_stream_wasm`](https://github.com/najamelan/ws_stream_wasm) | WASM 전용 WebSocket 라이브러리. `WsMeta`/`WsStream`을 통한 `AsyncRead`/`AsyncWrite` 제공. 스트림 기반 패턴에 최적. |
+> | [`cunarist/tokio-with-wasm`](https://github.com/cunarist/tokio-with-wasm) | 브라우저에서 tokio 런타임 에뮬레이션 — WASM 컨텍스트에서 `tokio::spawn`, `spawn_blocking` 등 사용 가능. |
+> | [`gloo-net`](https://github.com/rustwasm/gloo) | 공식 `rustwasm` 조직의 ergonomic `web-sys` 래퍼; `gloo_net::websocket`이 `Stream`/`Sink` WebSocket API를 제공 — 로우레벨 `web-sys`보다 간결. |
+>
+> **Rust WASM 프론트엔드 프레임워크 (H5 채팅 UI용)**
+>
+> | 프레임워크 | 설명 |
+> |------------|------|
+> | [`yew`](https://github.com/yewstack/yew) (~30.5k 스타) | 가장 성숙한 Rust/WASM 프론트엔드 프레임워크. React 유사 컴포넌트 모델과 JSX 스타일 `html!` 매크로. |
+> | [`leptos`](https://github.com/leptos-rs/leptos) (~20k 스타) | 풀스택 동형(isomorphic) Rust 프레임워크. 세밀한 반응성(fine-grained reactivity). `Stream`을 통한 네이티브 WebSocket 지원. |
+> | [`dioxus`](https://github.com/DioxusLabs/dioxus) (~24.5k 스타) | 크로스 플랫폼(웹 + 데스크톱 + 모바일) 앱 프레임워크. Axum과의 깊은 통합으로 풀스택 Rust 구현 가능. |
+> | [`leptos-use` — `use_websocket`](https://github.com/Synphonyte/leptos-use) | Leptos용 반응형 WebSocket 훅(hook). 코덱 지원 포함. VueUse에서 영감. |
+> | [`leptos_server_signal`](https://github.com/tqwewe/leptos_server_signal) | WebSocket을 통해 서버와 동기화되는 Leptos 시그널. Axum 및 Actix 백엔드 지원. |
+> | [`security-union/yew-websocket`](https://github.com/security-union/yew-websocket) | Yew 코어에서 추출된 독립형 Yew WebSocket 서비스 크레이트. |
+>
+> **풀스택 Rust WebSocket 채팅 레퍼런스**
+>
+> | 프로젝트 | 설명 |
+> |----------|------|
+> | [`YewChat`](https://github.com/jtordgeman/YewChat) | Yew로 구축된 완전한 WebSocket 채팅 앱 — 라우팅, 에이전트, GIF 지원. 인기 튜토리얼 시리즈의 동반 프로젝트. |
+> | [`ztm-project-uchat`](https://github.com/jayson-lennon/ztm-project-uchat) | 전체가 Rust로 작성된 풀스택 채팅 클론: WASM 프론트엔드(Trunk), Diesel ORM, PostgreSQL, Tailwind CSS. |
+> | [`fullstack-rust-axum-dioxus-rwa`](https://github.com/dxps/fullstack-rust-axum-dioxus-rwa) | Axum 백엔드 + Dioxus WASM 프론트엔드의 RealWorld 앱 — 인증, 라우팅, CRUD 구현. |
+> | [`rust-axum-leptos-wasm`](https://github.com/hvalfangst/rust-axum-leptos-wasm) | 풀스택 Axum + Leptos WASM. JWT 보호 엔드포인트 포함. |
+> | [`veklov/rust-chat`](https://github.com/veklov/rust-chat) | Warp 백엔드 + Yew/WASM 프론트엔드 웹 채팅. 엔드-투-엔드 WebDriver 테스트 포함. |
+> | [`ProstoyVadila/ws_chat`](https://github.com/ProstoyVadila/ws_chat) | 백엔드와 프론트엔드 모두 Rust로 작성된 WebSocket 채팅 — 서버/클라이언트 분리 크레이트 패턴 참고. |
+> | [`bestia-dev/mem6_game`](https://github.com/bestia-dev/mem6_game) | Rust WASM + 실시간 WebSocket + PWA 서비스 워커를 동시에 커버하는 유일한 레퍼런스 — WASM+WS+PWA 세 가지를 함께 다루는 유일한 사례. |
+>
+> **WASM 빌드 도구 및 PWA**
+>
+> | 도구 | 설명 |
+> |------|------|
+> | [`trunk`](https://github.com/trunk-rs/trunk) (~4.2k 스타) | Rust용 최고의 WASM 웹 애플리케이션 번들러. 핫 리로드 내장 개발 서버. Yew, Leptos, Dioxus 모두 지원. |
+> | [`wasm-pack`](https://github.com/rustwasm/wasm-pack) (~6.5k 스타) | 전통적인 Rust→WASM 워크플로우 도구. 참고: `rustwasm` 조직 2025년 중반 보관(archived); 커뮤니티 포크 [drager/wasm-pack](https://github.com/drager/wasm-pack). |
+> | [`yew-wasm-pack-template`](https://github.com/nickkos/nickkos/yew-wasm-pack-template) | 풀스택 PWA 템플릿: Yew 프론트엔드 + Actix 백엔드, Workbox 서비스 워커 구성 포함. |
+> | [`woz`](https://github.com/alexkehayias/woz) | Rust용 Progressive WebAssembly App(PWAA) 생성기 — PWA + WASM 도구를 단일 CLI로 결합. |
+> | [`wasm-bindgen-service-worker`](https://github.com/justinrubek/wasm-bindgen-service-worker) | wasm-bindgen을 통해 전체가 Rust로 작성된 서비스 워커. 최소한의 JS 글루 코드. |
 
 ### 스킬 시스템 (Skills System)
 

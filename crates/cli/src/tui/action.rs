@@ -103,6 +103,9 @@ pub enum Action {
     /// Forward a key event to the session browser state machine.
     SessionBrowserKey(crossterm::event::KeyEvent),
 
+    /// Forward a key event to the web config wizard state machine.
+    WebConfigKey(crossterm::event::KeyEvent),
+
     // ── Command palette ──────────────────────────────────────
     /// Move command palette cursor up.
     PaletteMoveUp,

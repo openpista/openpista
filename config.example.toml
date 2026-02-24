@@ -61,6 +61,14 @@ token = ""  # 또는 환경 변수 TELEGRAM_BOT_TOKEN
 enabled = true
 
 
+
+[channels.web]
+enabled = false
+token = ""        # 또는 환경 변수 openpista_WEB_TOKEN
+port = 3210       # 또는 환경 변수 openpista_WEB_PORT
+cors_origins = "*"
+static_dir = "~/.openpista/web"
+
 # ─────────────────────────────────────────────
 # 데이터베이스 / 스킬 경로
 # ─────────────────────────────────────────────

@@ -1,0 +1,151 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --text: #1d2433;
+  --muted: #64748b;
+  --accent: #0f766e;
+  --accent-2: #0ea5e9;
+  --border: #dbe3ee;
+  --error: #b91c1c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at 20% 10%, #dff4ff 0%, var(--bg) 45%);
+}
+
+.app {
+  width: min(900px, 100%);
+  margin: 0 auto;
+  min-height: 100vh;
+  padding: 24px 16px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 14px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.connect-row {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+input,
+button {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+input {
+  min-width: 260px;
+  background: var(--surface);
+}
+
+button {
+  cursor: pointer;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+  color: #fff;
+  border: 0;
+}
+
+.status {
+  font-size: 0.9rem;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #eef2ff;
+}
+
+.status.offline {
+  color: #475569;
+}
+
+.status.online {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.messages {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 14px;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.msg {
+  max-width: 85%;
+  border-radius: 12px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.msg.user {
+  justify-self: end;
+  background: #dbeafe;
+}
+
+.msg.agent {
+  justify-self: start;
+  background: #ecfeff;
+}
+
+.msg.error {
+  justify-self: start;
+  background: #fee2e2;
+  color: var(--error);
+}
+
+.composer {
+  display: flex;
+  gap: 10px;
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .connect-row {
+    align-items: stretch;
+  }
+
+  input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .composer {
+    flex-direction: column;
+  }
+}

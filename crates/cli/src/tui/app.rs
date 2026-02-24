@@ -75,6 +75,14 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/session delete <id>",
         description: "Delete a session by ID",
     },
+    SlashCommand {
+        name: "/web",
+        description: "Show web adapter status",
+    },
+    SlashCommand {
+        name: "/web setup",
+        description: "Configure web adapter (wizard)",
+    },
 ];
 
 // ─── Data types ──────────────────────────────────────────────
@@ -111,6 +119,23 @@ pub enum Screen {
     Home,
     /// The active chat conversation screen.
     Chat,
+}
+
+/// Steps in the web adapter configuration wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebConfigStep {
+    /// Toggle web adapter enabled/disabled.
+    Enable,
+    /// Enter auth token.
+    Token,
+    /// Enter listen port.
+    Port,
+    /// Enter CORS origins.
+    CorsOrigins,
+    /// Enter static file directory.
+    StaticDir,
+    /// Confirm and save settings.
+    Confirm,
 }
 
 /// High-level processing state.
@@ -191,6 +216,23 @@ pub enum AppState {
         session_id: String,
         /// Short preview text shown in the confirmation dialog.
         session_preview: String,
+    },
+    /// Step-by-step web adapter configuration wizard.
+    WebConfiguring {
+        /// Current wizard step.
+        step: WebConfigStep,
+        /// Whether web adapter is enabled.
+        enabled: bool,
+        /// Auth token value being configured.
+        token: String,
+        /// Port string being configured.
+        port: String,
+        /// CORS origins value being configured.
+        cors_origins: String,
+        /// Static dir value being configured.
+        static_dir: String,
+        /// Text input buffer for the current step.
+        input_buffer: String,
     },
 }
 
@@ -293,6 +335,8 @@ pub struct TuiApp {
     pub chat_scroll_clamped: u16,
     /// Pending session browser action: create new session (consumed by event loop).
     pub session_browser_new_requested: bool,
+    /// Pending web config from completed wizard (consumed by event loop).
+    pending_web_config: Option<crate::config::WebConfig>,
 }
 
 impl TuiApp {
@@ -338,6 +382,7 @@ impl TuiApp {
             chat_text_grid: Vec::new(),
             chat_scroll_clamped: 0,
             session_browser_new_requested: false,
+            pending_web_config: None,
         }
     }
 
@@ -441,7 +486,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/web - show web adapter status\n/web setup - configure web adapter\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -537,6 +582,37 @@ impl TuiApp {
             last_error: None,
             endpoint: None,
         };
+    }
+
+    /// Launches the step-by-step web adapter configuration wizard.
+    pub fn start_web_config_wizard(
+        &mut self,
+        enabled: bool,
+        token: String,
+        port: u16,
+        cors_origins: &str,
+        static_dir: &str,
+    ) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.screen = Screen::Chat;
+        self.push_assistant(
+            "Web Adapter Setup Wizard\nStep 1/6: Enable web adapter? (y/n)".to_string(),
+        );
+        self.state = AppState::WebConfiguring {
+            step: WebConfigStep::Enable,
+            enabled,
+            token,
+            port: port.to_string(),
+            cors_origins: cors_origins.to_string(),
+            static_dir: static_dir.to_string(),
+            input_buffer: String::new(),
+        };
+    }
+
+    /// Takes the pending web config set when the wizard completes.
+    pub fn take_pending_web_config(&mut self) -> Option<crate::config::WebConfig> {
+        self.pending_web_config.take()
     }
 
     /// Takes the pending `AuthLoginIntent` that was set during the login browser flow.
@@ -1840,6 +1916,153 @@ impl TuiApp {
                 Command::None
             }
 
+
+            // ── Web config wizard ──────────────────────────────
+            Action::WebConfigKey(key) => {
+                use crossterm::event::{KeyCode, KeyModifiers};
+                if let AppState::WebConfiguring {
+                    ref mut step,
+                    ref mut enabled,
+                    ref mut token,
+                    ref mut port,
+                    ref mut cors_origins,
+                    ref mut static_dir,
+                    ref mut input_buffer,
+                } = self.state
+                {
+                    // Esc cancels the wizard from any step
+                    if key.code == KeyCode::Esc
+                        || (key.modifiers == KeyModifiers::CONTROL
+                            && key.code == KeyCode::Char('c'))
+                    {
+                        self.push_assistant("Web setup cancelled.".to_string());
+                        self.state = AppState::Idle;
+                        return Command::None;
+                    }
+
+                    match step {
+                        WebConfigStep::Enable => match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                *enabled = true;
+                                *step = WebConfigStep::Token;
+                                *input_buffer = token.clone();
+                                self.push_assistant(
+                                    "Step 2/6: Auth token (leave empty for none):".to_string(),
+                                );
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                *enabled = false;
+                                *step = WebConfigStep::Token;
+                                *input_buffer = token.clone();
+                                self.push_assistant(
+                                    "Step 2/6: Auth token (leave empty for none):".to_string(),
+                                );
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Token => match key.code {
+                            KeyCode::Enter => {
+                                *token = input_buffer.clone();
+                                *step = WebConfigStep::Port;
+                                *input_buffer = port.clone();
+                                self.push_assistant(
+                                    "Step 3/6: HTTP/WS port (default 3210):".to_string(),
+                                );
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Port => match key.code {
+                            KeyCode::Enter => {
+                                *port = input_buffer.clone();
+                                *step = WebConfigStep::CorsOrigins;
+                                *input_buffer = cors_origins.clone();
+                                self.push_assistant(
+                                    "Step 4/6: CORS origins (comma-separated, or \"*\"):".to_string(),
+                                );
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::CorsOrigins => match key.code {
+                            KeyCode::Enter => {
+                                *cors_origins = input_buffer.clone();
+                                *step = WebConfigStep::StaticDir;
+                                *input_buffer = static_dir.clone();
+                                self.push_assistant(
+                                    "Step 5/6: Static file directory:".to_string(),
+                                );
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::StaticDir => match key.code {
+                            KeyCode::Enter => {
+                                *static_dir = input_buffer.clone();
+                                let summary = format!(
+                                    "Step 6/6: Confirm settings?\n\
+                                     enabled: {}\n\
+                                     token: {}\n\
+                                     port: {}\n\
+                                     cors_origins: {}\n\
+                                     static_dir: {}\n\
+                                     Save? (y/n)",
+                                    enabled,
+                                    if token.is_empty() { "(none)" } else { token.as_str() },
+                                    port,
+                                    cors_origins,
+                                    static_dir,
+                                );
+                                *step = WebConfigStep::Confirm;
+                                *input_buffer = String::new();
+                                self.push_assistant(summary);
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Confirm => match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                let web_cfg = crate::config::WebConfig {
+                                    enabled: *enabled,
+                                    token: token.clone(),
+                                    port: port.parse::<u16>().unwrap_or(3210),
+                                    cors_origins: cors_origins.clone(),
+                                    static_dir: static_dir.clone(),
+                                };
+                                self.pending_web_config = Some(web_cfg);
+                                self.push_assistant("Web config saved.".to_string());
+                                self.state = AppState::Idle;
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                self.push_assistant("Web setup cancelled.".to_string());
+                                self.state = AppState::Idle;
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                Command::None
+            }
             // ── Command palette ─────────────────────────────────
             Action::PaletteMoveUp => {
                 self.command_palette_cursor = self.command_palette_cursor.saturating_sub(1);
@@ -2035,6 +2258,10 @@ impl TuiApp {
             return vec![Action::SessionBrowserKey(key)];
         }
 
+
+        if matches!(self.state, AppState::WebConfiguring { .. }) {
+            return vec![Action::WebConfigKey(key)];
+        }
         let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
 
         match (key.modifiers, key.code) {

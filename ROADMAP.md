@@ -41,12 +41,11 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 > **Architecture note**
 >
-> All channel adapters use their native protocols (stdin, HTTP polling, HTTP webhooks, WebSocket) and bridge into the in-process gateway through `tokio::mpsc` channels.
+> All channel adapters use their native protocols (stdin, HTTP polling, WebSocket) and bridge into the in-process gateway through `tokio::mpsc` channels.
 >
 > ```
 > CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
 > TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WhatsAppAdapter ── HTTP webhook → mpsc ──→ Gateway
 > WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← Rust→WASM client in browser
 > ```
 
@@ -66,65 +65,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
 - [x] Response routing: CLI responses → stdout, Telegram responses → bot API
 - [x] Error responses clearly surfaced to the user
- [ ] `WebAdapter` — Rust→WASM browser client with WebSocket transport (see Web Channel Adapter section)
-
-
-### WhatsApp Channel Adapter
-
-> WhatsApp follows the same HTTP-to-mpsc bridge pattern as Telegram. The adapter receives webhook events over HTTP (via `axum`), converts them to `ChannelEvent`, and forwards through `tokio::mpsc`.
-
- [ ] `WhatsAppAdapter` — WhatsApp Business Cloud API integration via `reqwest`
- [ ] Webhook HTTP server (via `axum`) for incoming messages: GET verification challenge + POST message handler
- [ ] HMAC-SHA256 webhook payload signature verification (`X-Hub-Signature-256` header)
- [ ] Text message sending via Meta Graph API (`POST /v21.0/{phone_number_id}/messages`)
- [ ] Stable per-conversation sessions: `whatsapp:{sender_phone}` channel ID and session mapping
- [ ] `WhatsAppConfig` — `[channels.whatsapp]` config section: `phone_number_id`, `access_token`, `verify_token`, `app_secret`, `webhook_port`
- [ ] Environment variable overrides: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`
- [ ] Incoming message parsing: text, image, audio, video, document, location, contacts
- [ ] Message status webhook callback handling (sent → delivered → read)
- [ ] Media message download and forwarding (incoming media → base64 or local path for agent context)
- [ ] Interactive message support: reply buttons, list messages, quick replies
- [ ] Message template rendering for outbound notifications (HSM templates required by WhatsApp 24h policy)
- [ ] Rate limiting compliance with WhatsApp Business API tiers (messaging limits, throughput)
- [ ] Retry logic with exponential backoff for transient API failures (429, 500)
- [ ] Error responses clearly surfaced to the user (consistent with other adapters)
- [ ] Response routing integration: WhatsApp responses → Graph API `send_message`
- [ ] Multi-number support: configurable phone number IDs for business accounts with multiple numbers
- [ ] Unit tests: webhook verification, message parsing, session ID generation, response formatting, signature validation
- [ ] Integration test: end-to-end webhook → `ChannelEvent` → `AgentResponse` → WhatsApp send flow
-
-#### Reference Open-Source Projects
-
-> **Rust crates**
->
-> | Crate | Description |
-> |-------|-------------|
-> | [`whatsapp-business-rs`](https://github.com/veecore/whatsapp-business-rs) | Full WhatsApp Business Cloud API SDK — axum webhook server, HMAC-SHA256 verification, message send/receive. Primary candidate. |
-> | [`whatsapp-cloud-api`](https://github.com/sajuthankappan/whatsapp-cloud-api-rs) | Lightweight API client for Meta Graph API (30k+ downloads). No webhook server — pair with custom axum handler. |
-> | [`whatsapp_handler`](https://github.com/bambby-plus/whatsapp_handler) | Webhook message processing + media/interactive message sending. |
->
-> **Similar-architecture Rust AI agents**
->
-> | Project | Description |
-> |---------|-------------|
-> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | Trait-based `Channel` pattern nearly identical to openpista's `ChannelAdapter`. Multi-channel including WhatsApp. |
-> | [`opencrust`](https://github.com/opencrust-org/opencrust) | Same `crates/` workspace layout. Separate `whatsapp/webhook.rs` + `api.rs` module structure. |
-> | [`localgpt`](https://github.com/localgpt-app/localgpt) | `bridges/whatsapp/` bridge pattern for WhatsApp integration. |
-> | [`loom`](https://github.com/ghuntley/loom) | Axum-based `routes/whatsapp.rs` route handler in a Rust workspace. |
->
-> **API spec references (TypeScript)**
->
-> | Project | Description |
-> |---------|-------------|
-> | [`WhatsApp-Nodejs-SDK`](https://github.com/WhatsApp/WhatsApp-Nodejs-SDK) | Official Meta SDK — authoritative webhook payload schemas and API endpoint specs. |
-> | [`whatsapp-business-sdk`](https://github.com/MarcosNicolau/whatsapp-business-sdk) | Clean TypeScript types and good test coverage for Business Cloud API. |
->
-> **Axum webhook HMAC-SHA256 patterns**
->
-> | Resource | Description |
-> |----------|-------------|
-> | [pg3.dev — GitHub Webhooks in Rust with Axum](https://pg3.dev/post/github_webhooks_rust) | Complete HMAC-SHA256 + axum tutorial. `X-Hub-Signature-256` format identical to WhatsApp. |
-> | [`axum-github-hooks`](https://github.com/rustunit/axum-github-hooks) | Axum extractor pattern for webhook signature verification — adaptable to `WhatsAppWebhookPayload`. |
+ - [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
 
 
 ### Web Channel Adapter (Rust→WASM + WebSocket)
@@ -133,25 +74,25 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 #### Server (axum)
 
- [ ] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
- [ ] WebSocket message framing: JSON `ChannelEvent` / `AgentResponse` over WS text frames
- [ ] Token-based authentication on WebSocket handshake (`Sec-WebSocket-Protocol` or query param)
- [ ] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
- [ ] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
- [ ] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
- [ ] Auto-reconnect support: client-side heartbeat ping/pong, server-side timeout detection
- [ ] CORS configuration for cross-origin browser access
+ - [x] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
+ - [x] WebSocket message framing: JSON `WsMessage` envelope (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`) over WS text frames
+ - [x] Token-based authentication on WebSocket handshake (query param `?token=`)
+ - [x] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
+ - [x] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
+ - [x] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
+ [ ] Auto-reconnect support: `Ping`/`Pong` messages defined; full client-side reconnect loop and server-side timeout detection pending
+ - [x] CORS configuration for cross-origin browser access
  [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
- [ ] Configurable static file directory for WASM bundle and H5 assets
+ - [x] Configurable static file directory for WASM bundle and H5 assets
 
 #### Client (Rust→WASM)
 
- [ ] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
- [ ] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
- [ ] WebSocket connection manager: connect, reconnect, heartbeat, buffered send queue
- [ ] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
- [ ] Session persistence: `localStorage` for session ID and auth token across page reloads
- [ ] H5 chat UI: mobile-responsive chat interface (HTML/CSS/JS or Yew/Leptos framework)
+ - [x] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
+ - [x] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
+ - [ ] WebSocket connection manager: connect ✅, reconnect ◻, heartbeat ◻, buffered send queue ◻
+ - [x] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
+ - [x] Session persistence: `localStorage` for client ID and auth token across page reloads (`static/app.js`)
+ - [x] H5 chat UI: mobile-responsive chat interface (`static/index.html` + `style.css` + `app.js`; vanilla JS, not yet Rust→WASM)
  [ ] Streaming response display: progressive text rendering as agent generates output
  [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
  [ ] Media attachment support: image upload → base64 encoding → agent context
@@ -160,9 +101,66 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 #### Quality
 
- [ ] Unit tests: WebSocket handshake, token auth, message framing, reconnect logic
+ - [x] Unit tests: WebSocket handshake, token auth, message framing, ping/pong, CORS, session mapping — 11 tests (`channels/src/web.rs`)
  [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
  [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
+
+#### Reference Open-Source Projects
+
+> **Axum WebSocket server patterns**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [axum — chat example](https://github.com/tokio-rs/axum/blob/main/examples/chat/src/main.rs) | Official Axum broadcast-based WebSocket chat example. Best starting point for `WebSocketUpgrade` + `tokio::sync::broadcast`. |
+> | [axum — websockets example](https://github.com/tokio-rs/axum/blob/main/examples/websockets/src/main.rs) | Official Axum WebSocket example demonstrating general WS handling, ping/pong, and connection lifecycle. |
+> | [0xLaurens/chatr](https://github.com/0xLaurens/chatr) | Chat room with WebSocket and Axum, demonstrating room-based session architecture. |
+> | [kumanote/axum-chat-example-rs](https://github.com/kumanote/axum-chat-example-rs) | Axum WebSocket chat with Dragonfly (Redis-compatible) pub/sub for multi-instance scaling. |
+> | [`danielclough/fireside-chat`](https://github.com/danielclough/fireside-chat) | LLM chat bot: Axum WebSocket backend + Leptos WASM frontend — closest architecture match to openpista's target Web adapter design. |
+> | [`dawnchan030920/axum-ycrdt-websocket`](https://github.com/dawnchan030920/axum-ycrdt-websocket) | Axum WebSocket middleware with per-connection state and multi-client broadcast — good reference for room-aware WebSocket handler patterns. |
+>
+> **Rust→WASM WebSocket client libraries**
+>
+> | Crate | Description |
+> |-------|-------------|
+> | [wasm-bindgen — WebSocket example](https://github.com/rustwasm/wasm-bindgen/tree/main/examples/websockets) | Canonical `web-sys` WebSocket example from wasm-bindgen. Foundation for WASM WS clients. |
+> | [`ewebsock`](https://github.com/rerun-io/ewebsock) | Cross-platform (native + WASM) WebSocket client with a single unified API. By the Rerun team. |
+> | [`tokio-tungstenite-wasm`](https://github.com/TannerRogalsky/tokio-tungstenite-wasm) | Wraps `web-sys` (WASM) and `tokio-tungstenite` (native) behind one cross-platform API. ~343k crates.io downloads. |
+> | [`ws_stream_wasm`](https://github.com/najamelan/ws_stream_wasm) | WASM-only WebSocket library providing `AsyncRead`/`AsyncWrite` via `WsMeta`/`WsStream`. Most ergonomic for stream-based patterns. |
+> | [`cunarist/tokio-with-wasm`](https://github.com/cunarist/tokio-with-wasm) | Tokio runtime emulation in the browser — enables `tokio::spawn`, `spawn_blocking` in WASM contexts. |
+> | [`gloo-net`](https://github.com/rustwasm/gloo) | Ergonomic `web-sys` wrappers from the official `rustwasm` org; `gloo_net::websocket` gives a clean `Stream`/`Sink` WebSocket API — simpler than raw `web-sys`. |
+>
+> **Rust WASM frontend frameworks (for H5 chat UI)**
+>
+> | Framework | Description |
+> |-----------|-------------|
+> | [`yew`](https://github.com/yewstack/yew) (~30.5k stars) | Most mature Rust/WASM frontend framework. React-like component model with JSX-style `html!` macros. |
+> | [`leptos`](https://github.com/leptos-rs/leptos) (~20k stars) | Full-stack isomorphic Rust framework with fine-grained reactivity. Native WebSocket support for server functions via `Stream`. |
+> | [`dioxus`](https://github.com/DioxusLabs/dioxus) (~24.5k stars) | Cross-platform (web + desktop + mobile) app framework. Deep Axum integration for full-stack Rust. |
+> | [`leptos-use` — `use_websocket`](https://github.com/Synphonyte/leptos-use) | Reactive WebSocket hook for Leptos with codec support. Inspired by VueUse. |
+> | [`leptos_server_signal`](https://github.com/tqwewe/leptos_server_signal) | Leptos signals synced with server through WebSocket. Supports Axum and Actix backends. |
+> | [`security-union/yew-websocket`](https://github.com/security-union/yew-websocket) | Standalone Yew WebSocket service crate (extracted from Yew core). |
+>
+> **Full-stack Rust WebSocket chat references**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`YewChat`](https://github.com/jtordgeman/YewChat) | Complete WebSocket chat app built with Yew — routing, agents, GIF support. Companion to a popular tutorial series. |
+> | [`ztm-project-uchat`](https://github.com/jayson-lennon/ztm-project-uchat) | Full-stack chat clone entirely in Rust: WASM frontend (Trunk), Diesel ORM, PostgreSQL, Tailwind CSS. |
+> | [`fullstack-rust-axum-dioxus-rwa`](https://github.com/dxps/fullstack-rust-axum-dioxus-rwa) | RealWorld app with Axum backend + Dioxus WASM frontend — auth, routing, CRUD. |
+> | [`rust-axum-leptos-wasm`](https://github.com/hvalfangst/rust-axum-leptos-wasm) | Full-stack Axum + Leptos WASM with JWT-protected endpoints. |
+> | [`veklov/rust-chat`](https://github.com/veklov/rust-chat) | Web chat with Warp backend + Yew/WASM frontend, includes end-to-end WebDriver tests. |
+> | [`ProstoyVadila/ws_chat`](https://github.com/ProstoyVadila/ws_chat) | Backend and frontend both in Rust — demonstrates the full-stack Rust WebSocket approach with separate server/client crates. |
+> | [`bestia-dev/mem6_game`](https://github.com/bestia-dev/mem6_game) | Multi-player browser game in Rust WASM with real-time WebSocket and PWA service worker — the only reference covering WASM + WebSocket + PWA simultaneously. |
+>
+> **WASM build tooling & PWA**
+>
+> | Tool | Description |
+> |------|-------------|
+> | [`trunk`](https://github.com/trunk-rs/trunk) (~4.2k stars) | Leading WASM web application bundler for Rust. Built-in dev server with hot reload. Works with Yew, Leptos, Dioxus. |
+> | [`wasm-pack`](https://github.com/rustwasm/wasm-pack) (~6.5k stars) | Classic Rust→WASM workflow tool. Note: `rustwasm` org archived mid-2025; community fork at [drager/wasm-pack](https://github.com/drager/wasm-pack). |
+> | [`yew-wasm-pack-template`](https://github.com/nickkos/nickkos/yew-wasm-pack-template) | Full-stack PWA template: Yew frontend + Actix backend, with Workbox service worker. |
+> | [`woz`](https://github.com/nickkos/nickkos/alexkehayias/woz) | Progressive WebAssembly App (PWAA) generator for Rust — PWA + WASM tooling in a single CLI. |
+> | [`wasm-bindgen-service-worker`](https://github.com/justinrubek/wasm-bindgen-service-worker) | Service worker written entirely in Rust via wasm-bindgen. Minimal JS glue. |
 
 ### Skills System
 

@@ -181,6 +181,32 @@ fn parse_session_command(raw: &str) -> Option<SessionCommand> {
     }
 }
 
+
+/// Parsed sub-command for the `/web` slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WebCommand {
+    /// `/web` or `/web status` — display current web config.
+    Status,
+    /// `/web setup` — launch interactive configuration wizard.
+    Setup,
+    /// Unrecognised sub-command.
+    Invalid(String),
+}
+
+fn parse_web_command(raw: &str) -> Option<WebCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/web" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("status") => Some(WebCommand::Status),
+        Some("setup") => Some(WebCommand::Setup),
+        Some(_) => Some(WebCommand::Invalid(
+            "Use /web to show status or /web setup to configure.".to_string(),
+        )),
+    }
+}
+
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelTaskMode {
@@ -716,6 +742,36 @@ pub async fn run_tui(
                                     continue;
                                 }
 
+
+                                if let Some(web_cmd) = parse_web_command(&message) {
+                                    match web_cmd {
+                                        WebCommand::Status => {
+                                            let wc = &config.channels.web;
+                                            let token_set = if wc.token.is_empty() { "no" } else { "yes" };
+                                            let status = format!(
+                                                "Web Adapter Config:\n  enabled: {}\n  port: {}\n  token set: {}\n  cors_origins: {}\n  static_dir: {}",
+                                                wc.enabled, wc.port, token_set, wc.cors_origins, wc.static_dir
+                                            );
+                                            app.update(Action::PushAssistantMessage(status));
+                                        }
+                                        WebCommand::Setup => {
+                                            let wc = &config.channels.web;
+                                            app.start_web_config_wizard(
+                                                wc.enabled,
+                                                wc.token.clone(),
+                                                wc.port,
+                                                &wc.cors_origins,
+                                                &wc.static_dir,
+                                            );
+                                        }
+                                        WebCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
                                     app.update(Action::ScrollToBottom);
@@ -810,6 +866,11 @@ pub async fn run_tui(
                             let _ = state.save();
                         }
 
+
+                        if let Some(web_cfg) = app.take_pending_web_config() {
+                            config.channels.web = web_cfg;
+                            let _ = config.save_web_section();
+                        }
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
                                 app.update(Action::PushError(
