@@ -2243,8 +2243,15 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
         .spawn()?;
 
     let stdout = child.stdout.take().expect("bridge stdout");
+    let stderr = child.stderr.take().expect("bridge stderr");
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
+    // Drain stderr in background so the bridge can't block on a full pipe.
+    let _stderr_drain = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut err_lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(_)) = err_lines.next_line().await {}
+    });
 
     // 4. Read bridge events
     println!("Waiting for QR code... (scan with your phone)");
