@@ -15,6 +15,8 @@ use crate::{
 const DEFAULT_SYSTEM_PROMPT: &str = r#"You are openpista, an OS Gateway AI Agent.
 You can interact with the operating system through available tools.
 Be helpful, concise, and safe. Always confirm before running potentially destructive commands."#;
+const MAX_CONTEXT_MESSAGES: usize = 40;
+const MAX_TOOL_RESULT_CHARS: usize = 16_000;
 
 /// The main agent runtime: manages the ReAct loop
 pub struct AgentRuntime {
@@ -129,47 +131,9 @@ impl AgentRuntime {
             .await
             .map_err(proto::Error::Database)?;
 
-        // Trim history to avoid context-window overflow (e.g. 942k tokens).
-        // Keep the most recent MAX_CONTEXT_MESSAGES, starting at a User
-        // boundary so we never begin mid tool-call chain.
-        const MAX_CONTEXT_MESSAGES: usize = 40;
-        // Tool results (e.g. screenshots, large bash output) are capped at
-        // MAX_TOOL_RESULT_CHARS characters before being sent to the LLM so a
-        // single result can never blow the context window.
-        const MAX_TOOL_RESULT_CHARS: usize = 16_000;
-        let history = if history.len() > MAX_CONTEXT_MESSAGES {
-            let start = history.len() - MAX_CONTEXT_MESSAGES;
-            // Advance to next User boundary to preserve tool-call integrity.
-            let offset = history[start..]
-                .iter()
-                .position(|m| m.role == Role::User)
-                .unwrap_or(0);
-            history[start + offset..].to_vec()
-        } else {
-            history
-        };
+        let history = trim_session_history(history);
 
-        // Convert history to chat messages
-        let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
-        for msg in &history {
-            match msg.role {
-                Role::User => messages.push(ChatMessage::user(&msg.content)),
-                Role::Assistant => {
-                    let mut assistant = ChatMessage::assistant(&msg.content);
-                    assistant.tool_calls = msg.tool_calls.clone();
-                    messages.push(assistant);
-                }
-                Role::Tool => {
-                    let content = truncate_tool_result(&msg.content, MAX_TOOL_RESULT_CHARS);
-                    messages.push(ChatMessage::tool_result(
-                        msg.tool_call_id.as_deref().unwrap_or(""),
-                        msg.tool_name.as_deref().unwrap_or(""),
-                        &content,
-                    ));
-                }
-                Role::System => {} // skip stored system messages
-            }
-        }
+        let mut messages = history_to_chat_messages(&system_prompt, &history);
 
         // ReAct loop
         let tool_defs = self.tools.definitions();
@@ -299,45 +263,14 @@ impl AgentRuntime {
             .await
             .map_err(proto::Error::Database)?;
 
-        // Trim history to avoid context-window overflow.
-        const MAX_CONTEXT_MESSAGES: usize = 40;
-        const MAX_TOOL_RESULT_CHARS: usize = 16_000;
-        let history = if history.len() > MAX_CONTEXT_MESSAGES {
-            let start = history.len() - MAX_CONTEXT_MESSAGES;
-            let offset = history[start..]
-                .iter()
-                .position(|m| m.role == Role::User)
-                .unwrap_or(0);
-            history[start + offset..].to_vec()
-        } else {
-            history
-        };
+        let history = trim_session_history(history);
 
-        // Convert history to chat messages
-        let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
-        for msg in &history {
-            match msg.role {
-                Role::User => messages.push(ChatMessage::user(&msg.content)),
-                Role::Assistant => {
-                    let mut assistant = ChatMessage::assistant(&msg.content);
-                    assistant.tool_calls = msg.tool_calls.clone();
-                    messages.push(assistant);
-                }
-                Role::Tool => {
-                    let content = truncate_tool_result(&msg.content, MAX_TOOL_RESULT_CHARS);
-                    messages.push(ChatMessage::tool_result(
-                        msg.tool_call_id.as_deref().unwrap_or(""),
-                        msg.tool_name.as_deref().unwrap_or(""),
-                        &content,
-                    ));
-                }
-                Role::System => {} // skip stored system messages
-            }
-        }
+        let mut messages = history_to_chat_messages(&system_prompt, &history);
 
         // ReAct loop with progress events
         let tool_defs = self.tools.definitions();
         let mut round = 0;
+        let mut total_usage = TokenUsage::default();
 
         loop {
             if round >= self.max_tool_rounds {
@@ -364,8 +297,9 @@ impl AgentRuntime {
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
 
             match response {
-                ChatResponse::Text(text, _usage) => {
+                ChatResponse::Text(text, usage) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
+                    total_usage.add(&usage);
                     let assistant_msg =
                         AgentMessage::new(session_id.clone(), Role::Assistant, &text);
                     self.memory
@@ -377,14 +311,20 @@ impl AgentRuntime {
                         .touch_session(session_id)
                         .await
                         .map_err(proto::Error::Database)?;
+                    info!(
+                        prompt_tokens = total_usage.prompt_tokens,
+                        completion_tokens = total_usage.completion_tokens,
+                        "Accumulated token usage in process_with_progress"
+                    );
                     return Ok(text);
                 }
 
-                ChatResponse::ToolCalls(tool_calls, _usage) => {
+                ChatResponse::ToolCalls(tool_calls, usage) => {
                     debug!(
                         "Tool calls requested: {:?}",
                         tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
                     );
+                    total_usage.add(&usage);
                     // Persist assistant tool-call message
                     let assistant_tool_calls_msg =
                         AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
@@ -456,6 +396,48 @@ fn build_system_prompt(skills_context: Option<&str>) -> String {
     prompt
 }
 
+/// Trims loaded session history to stay within context limits while preserving
+/// message-sequence integrity around user boundaries.
+fn trim_session_history(history: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    if history.len() <= MAX_CONTEXT_MESSAGES {
+        return history;
+    }
+
+    let start = history.len() - MAX_CONTEXT_MESSAGES;
+    // Advance to next User boundary to preserve tool-call integrity.
+    let offset = history[start..]
+        .iter()
+        .position(|m| m.role == Role::User)
+        .unwrap_or(0);
+    history[start + offset..].to_vec()
+}
+
+/// Converts persisted session history into model input messages, including
+/// tool-output truncation safeguards.
+fn history_to_chat_messages(system_prompt: &str, history: &[AgentMessage]) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(system_prompt)];
+    for msg in history {
+        match msg.role {
+            Role::User => messages.push(ChatMessage::user(&msg.content)),
+            Role::Assistant => {
+                let mut assistant = ChatMessage::assistant(&msg.content);
+                assistant.tool_calls = msg.tool_calls.clone();
+                messages.push(assistant);
+            }
+            Role::Tool => {
+                let content = truncate_tool_result(&msg.content, MAX_TOOL_RESULT_CHARS);
+                messages.push(ChatMessage::tool_result(
+                    msg.tool_call_id.as_deref().unwrap_or(""),
+                    msg.tool_name.as_deref().unwrap_or(""),
+                    &content,
+                ));
+            }
+            Role::System => {} // skip stored system messages
+        }
+    }
+    messages
+}
+
 fn prepare_tool_args(tool_name: &str, args: Value) -> Value {
     if tool_name != "container.run" {
         return args;
@@ -474,11 +456,13 @@ fn prepare_tool_args(tool_name: &str, args: Value) -> Value {
 /// Truncates a tool result to at most `max_chars` characters.
 /// If the result is longer, it appends a note with how many characters were cut.
 fn truncate_tool_result(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
+    let total_chars = output.chars().count();
+    if total_chars <= max_chars {
         return output.to_string();
     }
-    let kept = &output[..max_chars];
-    let cut = output.len() - max_chars;
+
+    let kept = output.chars().take(max_chars).collect::<String>();
+    let cut = total_chars - max_chars;
     format!("{kept}\n...[output truncated: {cut} chars omitted]")
 }
 
@@ -937,6 +921,14 @@ mod tests {
         assert!(result.starts_with(&"a".repeat(60)));
         assert!(result.contains("output truncated"));
         assert!(result.contains("40 chars omitted"));
+    }
+
+    #[test]
+    fn truncate_tool_result_multibyte_is_utf8_safe() {
+        let input = "안녕🙂세계";
+        let result = truncate_tool_result(input, 3);
+        assert!(result.starts_with("안녕🙂"));
+        assert!(result.contains("2 chars omitted"));
     }
 
     #[test]
