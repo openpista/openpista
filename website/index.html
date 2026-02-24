@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>openpista — Your OS, Controlled by AI</title>
+  <meta name="description" content="An OS Gateway AI Agent built in Rust. Control your operating system through Telegram, WhatsApp, CLI, or Web via an LLM agent loop.">
+  <meta property="og:title" content="openpista — Your OS, Controlled by AI">
+  <meta property="og:description" content="A single Rust binary that bridges messaging channels to your operating system via an AI agent loop.">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23F74C00'/%3E%3Ctext x='16' y='22' text-anchor='middle' fill='white' font-size='18' font-weight='bold' font-family='system-ui'%3Eop%3C/text%3E%3C/svg%3E">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="assets/style.css">
+  <script>
+    (function() {
+      // Theme FOUC prevention
+      var p = localStorage.getItem('theme') || 'system';
+      var t = p;
+      if (p === 'system') t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.setAttribute('data-theme-pref', p);
+      // Lang detection: URL param > localStorage > browser lang
+      var ql = new URLSearchParams(location.search).get('lang');
+      var sl = localStorage.getItem('lang');
+      var nl = (navigator.language || '').startsWith('ko') ? 'ko' : 'en';
+      var lang = ql || sl || nl;
+      if (lang !== 'ko') lang = 'en';
+      window.__INIT_LANG__ = lang;
+      document.documentElement.lang = lang;
+    })();
+  </script>
+</head>
+<body class="bg-slate-900 text-slate-200 antialiased">
+
+  <canvas id="bg-canvas" aria-hidden="true" style="position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;"></canvas>
+  <div style="position:relative;z-index:1">
+
+  <!-- Navigation -->
+  <nav class="fixed top-0 w-full z-50 bg-slate-900/80 backdrop-blur-xl border-b border-slate-800">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <!-- Logo -->
+        <a href="#" class="flex items-center gap-2.5">
+          <img src="assets/pistacrab-512.png" class="w-8 h-8 object-cover rounded-lg" alt="openpista">
+          <span class="text-xl font-bold text-white">openpista</span>
+        </a>
+
+        <!-- Desktop Menu -->
+        <div class="hidden md:flex items-center gap-8">
+          <a href="#features" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="nav_features">Features</a>
+          <a href="#architecture" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="nav_architecture">Architecture</a>
+          <a href="#channels" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="nav_channels">Channels</a>
+          <a href="#compare" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="nav_compare">Compare</a>
+          <a href="#quickstart" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="nav_quickstart">Quick Start</a>
+          <a href="https://github.com/openpista/openpista" target="_blank" class="text-sm text-slate-400 hover:text-white transition-colors flex items-center gap-1">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+            GitHub
+          </a>
+          <!-- Theme Toggle -->
+          <div class="theme-toggle rounded-lg border border-slate-700 p-0.5" role="radiogroup" aria-label="Theme">
+            <button data-set-theme="light" class="theme-btn text-slate-400 hover:text-white" title="Light" aria-label="Light theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+            </button>
+            <button data-set-theme="dark" class="theme-btn text-slate-400 hover:text-white" title="Dark" aria-label="Dark theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+            </button>
+            <button data-set-theme="system" class="theme-btn text-slate-400 hover:text-white" title="System" aria-label="System theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </button>
+          </div>
+          <!-- Lang Toggle -->
+          <div class="lang-toggle rounded-lg border border-slate-700 p-0.5">
+            <button data-set-lang="en" class="lang-btn text-slate-400 hover:text-white">EN</button>
+            <button data-set-lang="ko" class="lang-btn text-slate-400 hover:text-white">KO</button>
+          </div>
+        </div>
+
+        <!-- Mobile Hamburger -->
+        <button id="menu-toggle" class="md:hidden p-2 text-slate-400 hover:text-white">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path id="menu-icon-open" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+            <path id="menu-icon-close" class="hidden" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Mobile Menu -->
+    <div id="mobile-menu" class="mobile-menu md:hidden border-t border-slate-800 bg-slate-900/95 backdrop-blur-xl">
+      <div class="px-4 py-4 space-y-3">
+        <a href="#features" class="block text-sm text-slate-400 hover:text-white py-2" data-i18n="nav_features">Features</a>
+        <a href="#architecture" class="block text-sm text-slate-400 hover:text-white py-2" data-i18n="nav_architecture">Architecture</a>
+        <a href="#channels" class="block text-sm text-slate-400 hover:text-white py-2" data-i18n="nav_channels">Channels</a>
+        <a href="#compare" class="block text-sm text-slate-400 hover:text-white py-2" data-i18n="nav_compare">Compare</a>
+        <a href="#quickstart" class="block text-sm text-slate-400 hover:text-white py-2" data-i18n="nav_quickstart">Quick Start</a>
+        <a href="https://github.com/openpista/openpista" target="_blank" class="block text-sm text-slate-400 hover:text-white py-2">GitHub</a>
+        <div class="flex items-center gap-3 py-2">
+          <span class="text-sm text-slate-400">Theme:</span>
+          <div class="theme-toggle rounded-lg border border-slate-700 p-0.5" role="radiogroup">
+            <button data-set-theme="light" class="theme-btn text-slate-400 hover:text-white" title="Light" aria-label="Light theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+            </button>
+            <button data-set-theme="dark" class="theme-btn text-slate-400 hover:text-white" title="Dark" aria-label="Dark theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+            </button>
+            <button data-set-theme="system" class="theme-btn text-slate-400 hover:text-white" title="System" aria-label="System theme">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="flex items-center gap-3 py-2">
+          <span class="text-sm text-slate-400">Language:</span>
+          <div class="lang-toggle rounded-lg border border-slate-700 p-0.5">
+            <button data-set-lang="en" class="lang-btn text-slate-400 hover:text-white">EN</button>
+            <button data-set-lang="ko" class="lang-btn text-slate-400 hover:text-white">KO</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section class="hero-gradient grid-pattern relative pt-32 pb-20 sm:pt-40 sm:pb-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="grid lg:grid-cols-2 gap-12 items-center">
+        <!-- Left: Text -->
+        <div class="fade-in">
+          <div class="flex items-center gap-2 mb-6">
+            <span class="badge border-orange-500/30 text-orange-400 bg-orange-500/10">v0.1.0</span>
+            <span class="badge border-slate-600 text-slate-400 bg-slate-800">Rust</span>
+            <span class="badge border-slate-600 text-slate-400 bg-slate-800">MIT / Apache-2.0</span>
+          </div>
+          <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold leading-tight mb-6">
+            <span data-i18n="hero_h1_line1">Your OS, Controlled by AI</span>
+            <span class="gradient-text block" data-i18n="hero_h1_line2">— Through Any Messenger</span>
+          </h1>
+          <p class="text-lg sm:text-xl text-slate-400 mb-8 max-w-xl leading-relaxed" data-i18n="hero_tagline">
+            A single Rust binary that bridges Telegram, WhatsApp, CLI, and Web to your operating system via an LLM agent loop. ~10 MB, zero runtime dependencies.
+          </p>
+          <div class="flex flex-wrap gap-4">
+            <a href="#quickstart" class="glow-orange inline-flex items-center gap-2 px-6 py-3 bg-orange-600 hover:bg-orange-500 text-white font-semibold rounded-lg transition-colors">
+              <span data-i18n="hero_cta_start">Get Started</span>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+            </a>
+            <a href="https://github.com/openpista/openpista" target="_blank" class="inline-flex items-center gap-2 px-6 py-3 border border-slate-600 hover:border-slate-400 text-slate-300 hover:text-white font-semibold rounded-lg transition-colors">
+              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+              <span data-i18n="hero_cta_github">View on GitHub</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Right: Terminal -->
+        <div class="fade-in">
+          <div class="terminal">
+            <div class="terminal-header">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+              <span class="text-xs text-slate-500 ml-2">openpista</span>
+            </div>
+            <div class="terminal-body">
+              <div><span class="prompt">$</span> <span class="command">openpista auth login</span></div>
+              <div class="output" data-i18n="hero_term_auth1">Opening browser for OAuth PKCE login...</div>
+              <div class="output accent" data-i18n="hero_term_auth2">✓ Authenticated with OpenAI (gpt-4o)</div>
+              <div class="mt-3"><span class="prompt">$</span> <span class="command">openpista</span></div>
+              <div class="output mt-2"><span class="text-white">openpista</span> <span class="text-slate-500">v0.1.0</span></div>
+              <div class="output"><span class="text-slate-500" data-i18n="hero_term_model_label">Model:</span> <span class="accent">gpt-4o</span></div>
+              <div class="mt-2"><span class="text-blue-400">You:</span> <span data-i18n="hero_term_user_msg">List all running Docker containers</span></div>
+              <div class="mt-1"><span class="accent">Agent:</span> <span class="text-slate-300" data-i18n="hero_term_agent_msg">Running system.run...</span><span class="cursor"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Features Section -->
+  <section id="features" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="feat_title">Powerful OS Tools</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="feat_subtitle">
+          Six core tool categories let the AI agent interact with your operating system safely and effectively.
+        </p>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Bash Tool -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-orange-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_bash_title">Bash Tool</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n-html="feat_bash_desc">
+            Execute system commands with configurable timeouts, output truncation, and exit code capture. <code class="text-orange-400">system.run</code>
+          </p>
+        </div>
+
+        <!-- Browser Automation -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-blue-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_browser_title">Browser Automation</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n-html="feat_browser_desc">
+            Navigate, click, type, and screenshot web pages via Chromium CDP. Full headless browser control. <code class="text-blue-400">browser.*</code>
+          </p>
+        </div>
+
+        <!-- Screen Capture -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-purple-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_screen_title">Screen Capture</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n-html="feat_screen_desc">
+            Capture desktop screenshots for visual context. The agent sees what you see. <code class="text-purple-400">screen.capture</code>
+          </p>
+        </div>
+
+        <!-- Docker Sandbox -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-cyan-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_docker_title">Docker Sandbox</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n-html="feat_docker_desc">
+            Run commands in isolated containers with CPU/memory limits, ephemeral tokens, and no host network access. <code class="text-cyan-400">container.run</code>
+          </p>
+        </div>
+
+        <!-- Skills System -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-green-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_skills_title">Skills System</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n-html="feat_skills_desc">
+            Drop a <code class="text-green-400">SKILL.md</code> into your workspace to extend the agent. Supports subprocess, Python, and WASM runtimes.
+          </p>
+        </div>
+
+        <!-- SQLite Memory -->
+        <div class="feature-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
+          <div class="w-12 h-12 rounded-lg bg-amber-500/10 flex items-center justify-center mb-4">
+            <svg class="w-6 h-6 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="feat_memory_title">SQLite Memory</h3>
+          <p class="text-slate-400 text-sm leading-relaxed" data-i18n="feat_memory_desc">
+            Persistent conversation memory backed by SQLite. Sessions, message history, and tool call metadata survive restarts.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Architecture Section -->
+  <section id="architecture" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="arch_title">Architecture</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="arch_subtitle">
+          A clean four-layer pipeline: channels in, gateway routes, agent reasons, tools execute.
+        </p>
+      </div>
+
+      <div class="max-w-3xl mx-auto fade-in">
+        <!-- Layer 1: Channel Adapters -->
+        <div class="arch-box">
+          <div class="text-xs text-slate-500 uppercase tracking-wider mb-2" data-i18n="arch_l1_label">Layer 1</div>
+          <div class="text-lg font-semibold text-white mb-1" data-i18n="arch_l1_title">Channel Adapters</div>
+          <div class="flex flex-wrap justify-center gap-2 mt-3">
+            <span class="badge border-blue-500/30 text-blue-400 bg-blue-500/10" data-i18n="badge_telegram">Telegram</span>
+            <span class="badge border-green-500/30 text-green-400 bg-green-500/10" data-i18n="badge_whatsapp">WhatsApp</span>
+            <span class="badge border-slate-500/30 text-slate-300 bg-slate-600/20">CLI (TUI)</span>
+            <span class="badge border-purple-500/30 text-purple-400 bg-purple-500/10" data-i18n="badge_web_wasm">Web (WASM)</span>
+          </div>
+        </div>
+
+        <div class="arch-arrow">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+          <span class="text-xs text-slate-500 ml-2">tokio::mpsc ChannelEvent</span>
+        </div>
+
+        <!-- Layer 2: Gateway -->
+        <div class="arch-box">
+          <div class="text-xs text-slate-500 uppercase tracking-wider mb-2" data-i18n="arch_l2_label">Layer 2</div>
+          <div class="text-lg font-semibold text-white mb-1" data-i18n="arch_l2_title">OS Gateway</div>
+          <div class="flex flex-wrap justify-center gap-2 mt-3">
+            <span class="badge border-slate-500/30 text-slate-300 bg-slate-600/20" data-i18n="badge_session_router">Session Router</span>
+            <span class="badge border-slate-500/30 text-slate-300 bg-slate-600/20" data-i18n="badge_cron_scheduler">Cron Scheduler</span>
+          </div>
+        </div>
+
+        <div class="arch-arrow">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+        </div>
+
+        <!-- Layer 3: Agent Runtime -->
+        <div class="arch-box">
+          <div class="text-xs text-slate-500 uppercase tracking-wider mb-2" data-i18n="arch_l3_label">Layer 3</div>
+          <div class="text-lg font-semibold text-white mb-1" data-i18n="arch_l3_title">Agent Runtime</div>
+          <div class="flex flex-wrap justify-center gap-2 mt-3">
+            <span class="badge border-orange-500/30 text-orange-400 bg-orange-500/10" data-i18n="badge_react_loop">ReAct Loop</span>
+            <span class="badge border-orange-500/30 text-orange-400 bg-orange-500/10" data-i18n="badge_llm_provider">LLM Provider</span>
+            <span class="badge border-amber-500/30 text-amber-400 bg-amber-500/10" data-i18n="badge_sqlite_memory">SQLite Memory</span>
+          </div>
+        </div>
+
+        <div class="arch-arrow">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+          <span class="text-xs text-slate-500 ml-2">tool_call</span>
+        </div>
+
+        <!-- Layer 4: OS Tools -->
+        <div class="arch-box">
+          <div class="text-xs text-slate-500 uppercase tracking-wider mb-2" data-i18n="arch_l4_label">Layer 4</div>
+          <div class="text-lg font-semibold text-white mb-1" data-i18n="arch_l4_title">OS Tools &amp; Skills</div>
+          <div class="flex flex-wrap justify-center gap-2 mt-3">
+            <span class="badge border-orange-500/30 text-orange-400 bg-orange-500/10">system.run</span>
+            <span class="badge border-blue-500/30 text-blue-400 bg-blue-500/10">browser.*</span>
+            <span class="badge border-purple-500/30 text-purple-400 bg-purple-500/10">screen.capture</span>
+            <span class="badge border-cyan-500/30 text-cyan-400 bg-cyan-500/10">container.run</span>
+            <span class="badge border-green-500/30 text-green-400 bg-green-500/10">SKILL.md</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Channels Section -->
+  <section id="channels" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="channels_title">Messaging Channels</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="channels_subtitle">
+          Control your OS from wherever you already chat. All channels share the same agent runtime and conversation memory.
+        </p>
+      </div>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <!-- Telegram -->
+        <div class="channel-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="w-14 h-14 rounded-full bg-blue-500/10 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-blue-400" viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.96 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="ch_telegram_name">Telegram</h3>
+          <p class="text-slate-400 text-sm" data-i18n="ch_telegram_desc">HTTP long-polling via teloxide. Stable per-chat sessions.</p>
+        </div>
+
+        <!-- WhatsApp -->
+        <div class="channel-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="w-14 h-14 rounded-full bg-green-500/10 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-green-400" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="ch_whatsapp_name">WhatsApp</h3>
+          <p class="text-slate-400 text-sm" data-i18n="ch_whatsapp_desc">Business Cloud API with webhook HMAC verification.</p>
+        </div>
+
+        <!-- CLI TUI -->
+        <div class="channel-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="w-14 h-14 rounded-full bg-slate-500/10 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2">CLI (TUI)</h3>
+          <p class="text-slate-400 text-sm" data-i18n="ch_cli_desc">Full-featured ratatui terminal UI with sessions, sidebar, and model browser.</p>
+        </div>
+
+        <!-- Web WASM -->
+        <div class="channel-card fade-in bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="w-14 h-14 rounded-full bg-purple-500/10 flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-white mb-2" data-i18n="ch_web_name">Web (WASM)</h3>
+          <p class="text-slate-400 text-sm" data-i18n="ch_web_desc">Rust&rarr;WASM browser client with WebSocket. Access from any device.</p>
+        </div>
+      </div>
+
+      <!-- Coming Soon -->
+      <div class="mt-8 text-center fade-in">
+        <p class="text-slate-500 text-sm">
+          <span data-i18n="ch_coming_label">Coming in v0.2.0:</span>
+          <span class="badge border-slate-600 text-slate-400 bg-slate-800 ml-2">Discord</span>
+          <span class="badge border-slate-600 text-slate-400 bg-slate-800 ml-2">Slack</span>
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Providers Section -->
+  <section id="providers" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="prov_title">LLM Providers</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="prov_subtitle">
+          Six provider presets out of the box. OAuth PKCE login for OpenAI, Anthropic, and OpenRouter — no API keys needed.
+        </p>
+      </div>
+
+      <div class="max-w-4xl mx-auto fade-in overflow-x-auto">
+        <table class="w-full text-left">
+          <thead>
+            <tr class="border-b border-slate-700">
+              <th class="py-4 px-4 text-sm font-semibold text-slate-300" data-i18n="prov_th_provider">Provider</th>
+              <th class="py-4 px-4 text-sm font-semibold text-slate-300" data-i18n="prov_th_model">Default Model</th>
+              <th class="py-4 px-4 text-sm font-semibold text-slate-300" data-i18n="prov_th_auth">Auth</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="provider-row border-b border-slate-800">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">openai</span> <span class="text-xs text-slate-500" data-i18n="prov_openai_default">(default)</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm">gpt-4o</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_oauth_key">OAuth PKCE, API key</td>
+            </tr>
+            <tr class="provider-row border-b border-slate-800">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">claude</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm">claude-sonnet-4-6</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_bearer">OAuth PKCE, Bearer</td>
+            </tr>
+            <tr class="provider-row border-b border-slate-800">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">together</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm">Llama-3.3-70B-Instruct-Turbo</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_key">API key</td>
+            </tr>
+            <tr class="provider-row border-b border-slate-800">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">ollama</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm">llama3.2</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_none">None (local)</td>
+            </tr>
+            <tr class="provider-row border-b border-slate-800">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">openrouter</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm">openai/gpt-4o</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_oauth_key">OAuth PKCE, API key</td>
+            </tr>
+            <tr class="provider-row">
+              <td class="py-3.5 px-4"><span class="font-mono text-orange-400">custom</span></td>
+              <td class="py-3.5 px-4 text-slate-300 font-mono text-sm" data-i18n="prov_model_config">configurable</td>
+              <td class="py-3.5 px-4 text-slate-400 text-sm" data-i18n="prov_auth_config">configurable</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Compare Section -->
+  <section id="compare" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="cmp_title">Why openpista?</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="cmp_subtitle">
+          A Rust-native OS agent built for performance, safety, and real multi-channel deployment.
+        </p>
+      </div>
+
+      <!-- Stat Cards -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-16 fade-in">
+        <div class="stat-card bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="text-3xl font-bold gradient-text mb-1">~10 MB</div>
+          <div class="text-sm font-semibold text-white mb-1" data-i18n="cmp_stat1_label">Static binary</div>
+          <div class="text-xs text-slate-400" data-i18n="cmp_stat1_sub">Zero runtime dependencies</div>
+        </div>
+        <div class="stat-card bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="text-3xl font-bold gradient-text mb-1">4+1</div>
+          <div class="text-sm font-semibold text-white mb-1" data-i18n="cmp_stat2_label">Channels + Cron</div>
+          <div class="text-xs text-slate-400" data-i18n="cmp_stat2_sub">Telegram, WhatsApp, CLI, Web</div>
+        </div>
+        <div class="stat-card bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="text-3xl font-bold gradient-text mb-1">6</div>
+          <div class="text-sm font-semibold text-white mb-1" data-i18n="cmp_stat3_label">LLM Providers</div>
+          <div class="text-xs text-slate-400" data-i18n="cmp_stat3_sub">OAuth PKCE + API key auth</div>
+        </div>
+        <div class="stat-card bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 text-center">
+          <div class="text-3xl font-bold gradient-text mb-1">600+</div>
+          <div class="text-sm font-semibold text-white mb-1" data-i18n="cmp_stat4_label">Tests</div>
+          <div class="text-xs text-slate-400" data-i18n="cmp_stat4_sub">Zero Clippy warnings</div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Quick Start Section -->
+  <section id="quickstart" class="py-20 sm:py-28">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="text-center mb-16 fade-in">
+        <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4" data-i18n="qs_title">Quick Start</h2>
+        <p class="text-lg text-slate-400 max-w-2xl mx-auto" data-i18n="qs_subtitle">
+          Three steps to get openpista running on your machine.
+        </p>
+      </div>
+
+      <div class="max-w-3xl mx-auto space-y-6">
+        <!-- Step 1 -->
+        <div class="fade-in">
+          <div class="flex items-center gap-3 mb-3">
+            <span class="w-8 h-8 rounded-full bg-orange-500/20 text-orange-400 flex items-center justify-center text-sm font-bold">1</span>
+            <h3 class="text-lg font-semibold text-white" data-i18n="qs_step1_title">Clone &amp; Build</h3>
+          </div>
+          <div class="terminal">
+            <div class="terminal-header">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+              <span class="text-xs text-slate-500 ml-2">terminal</span>
+            </div>
+            <div class="terminal-body">
+              <div><span class="prompt">$</span> <span class="command">git clone https://github.com/openpista/openpista.git</span></div>
+              <div><span class="prompt">$</span> <span class="command">cd openpista</span></div>
+              <div><span class="prompt">$</span> <span class="command">cargo build --release</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="fade-in">
+          <div class="flex items-center gap-3 mb-3">
+            <span class="w-8 h-8 rounded-full bg-orange-500/20 text-orange-400 flex items-center justify-center text-sm font-bold">2</span>
+            <h3 class="text-lg font-semibold text-white" data-i18n="qs_step2_title">Authenticate</h3>
+          </div>
+          <div class="terminal">
+            <div class="terminal-header">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+              <span class="text-xs text-slate-500 ml-2">terminal</span>
+            </div>
+            <div class="terminal-body">
+              <div><span class="prompt">$</span> <span class="command">openpista auth login</span></div>
+              <div class="output" data-i18n="qs_term_auth1">Opening browser for OAuth PKCE login...</div>
+              <div class="output accent" data-i18n="qs_term_auth2">✓ Authenticated successfully</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="fade-in">
+          <div class="flex items-center gap-3 mb-3">
+            <span class="w-8 h-8 rounded-full bg-orange-500/20 text-orange-400 flex items-center justify-center text-sm font-bold">3</span>
+            <h3 class="text-lg font-semibold text-white" data-i18n="qs_step3_title">Launch</h3>
+          </div>
+          <div class="terminal">
+            <div class="terminal-header">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+              <span class="text-xs text-slate-500 ml-2">terminal</span>
+            </div>
+            <div class="terminal-body">
+              <div><span class="prompt">$</span> <span class="command">openpista</span></div>
+              <div class="output mt-1" data-i18n="qs_term_launch1">Welcome to openpista v0.1.0</div>
+              <div class="output" data-i18n="qs_term_launch2">Type a message or use /help for commands</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider max-w-5xl mx-auto"></div>
+
+  <!-- Footer -->
+  <footer class="py-12 border-t border-slate-800">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-6">
+        <div class="flex items-center gap-2.5">
+          <img src="assets/pistacrab-512.png" class="w-6 h-6 object-cover rounded-md" alt="openpista">
+          <span class="text-sm text-slate-400">openpista &mdash; MIT / Apache-2.0</span>
+        </div>
+
+        <div class="flex items-center gap-6">
+          <a href="https://github.com/openpista/openpista" target="_blank" class="text-sm text-slate-400 hover:text-white transition-colors">GitHub</a>
+          <a href="https://github.com/openpista/openpista/blob/main/ROADMAP.md" target="_blank" class="text-sm text-slate-400 hover:text-white transition-colors" data-i18n="footer_roadmap">Roadmap</a>
+          <div class="lang-toggle rounded-lg border border-slate-700 p-0.5">
+            <button data-set-lang="en" class="lang-btn text-slate-400 hover:text-white">EN</button>
+            <button data-set-lang="ko" class="lang-btn text-slate-400 hover:text-white">KO</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  </div><!-- /z-wrapper -->
+
+  <!-- Scripts -->
+  <script>
+    // === Translations ===
+    window.STRINGS = {
+      en: {
+        meta_title: 'openpista — Your OS, Controlled by AI',
+        nav_features: 'Features',
+        nav_architecture: 'Architecture',
+        nav_channels: 'Channels',
+        nav_compare: 'Compare',
+        nav_quickstart: 'Quick Start',
+        hero_h1_line1: 'Your OS, Controlled by AI',
+        hero_h1_line2: '— Through Any Messenger',
+        hero_tagline: 'A single Rust binary that bridges Telegram, WhatsApp, CLI, and Web to your operating system via an LLM agent loop. ~10 MB, zero runtime dependencies.',
+        hero_cta_start: 'Get Started',
+        hero_cta_github: 'View on GitHub',
+        hero_term_auth1: 'Opening browser for OAuth PKCE login...',
+        hero_term_auth2: '✓ Authenticated with OpenAI (gpt-4o)',
+        hero_term_model_label: 'Model:',
+        hero_term_user_msg: 'List all running Docker containers',
+        hero_term_agent_msg: 'Running system.run...',
+        feat_title: 'Powerful OS Tools',
+        feat_subtitle: 'Six core tool categories let the AI agent interact with your operating system safely and effectively.',
+        feat_bash_title: 'Bash Tool',
+        feat_bash_desc: 'Execute system commands with configurable timeouts, output truncation, and exit code capture. <code class="text-orange-400">system.run</code>',
+        feat_browser_title: 'Browser Automation',
+        feat_browser_desc: 'Navigate, click, type, and screenshot web pages via Chromium CDP. Full headless browser control. <code class="text-blue-400">browser.*</code>',
+        feat_screen_title: 'Screen Capture',
+        feat_screen_desc: 'Capture desktop screenshots for visual context. The agent sees what you see. <code class="text-purple-400">screen.capture</code>',
+        feat_docker_title: 'Docker Sandbox',
+        feat_docker_desc: 'Run commands in isolated containers with CPU/memory limits, ephemeral tokens, and no host network access. <code class="text-cyan-400">container.run</code>',
+        feat_skills_title: 'Skills System',
+        feat_skills_desc: 'Drop a <code class="text-green-400">SKILL.md</code> into your workspace to extend the agent. Supports subprocess, Python, and WASM runtimes.',
+        feat_memory_title: 'SQLite Memory',
+        feat_memory_desc: 'Persistent conversation memory backed by SQLite. Sessions, message history, and tool call metadata survive restarts.',
+        arch_title: 'Architecture',
+        arch_subtitle: 'A clean four-layer pipeline: channels in, gateway routes, agent reasons, tools execute.',
+        arch_l1_label: 'Layer 1',
+        arch_l1_title: 'Channel Adapters',
+        arch_l2_label: 'Layer 2',
+        arch_l2_title: 'OS Gateway',
+        arch_l3_label: 'Layer 3',
+        arch_l3_title: 'Agent Runtime',
+        arch_l4_label: 'Layer 4',
+        arch_l4_title: 'OS Tools & Skills',
+        badge_telegram: 'Telegram',
+        badge_whatsapp: 'WhatsApp',
+        badge_web_wasm: 'Web (WASM)',
+        badge_session_router: 'Session Router',
+        badge_cron_scheduler: 'Cron Scheduler',
+        badge_react_loop: 'ReAct Loop',
+        badge_llm_provider: 'LLM Provider',
+        badge_sqlite_memory: 'SQLite Memory',
+        channels_title: 'Messaging Channels',
+        channels_subtitle: 'Control your OS from wherever you already chat. All channels share the same agent runtime and conversation memory.',
+        ch_telegram_name: 'Telegram',
+        ch_telegram_desc: 'HTTP long-polling via teloxide. Stable per-chat sessions.',
+        ch_whatsapp_name: 'WhatsApp',
+        ch_whatsapp_desc: 'Business Cloud API with webhook HMAC verification.',
+        ch_cli_desc: 'Full-featured ratatui terminal UI with sessions, sidebar, and model browser.',
+        ch_web_name: 'Web (WASM)',
+        ch_web_desc: 'Rust→WASM browser client with WebSocket. Access from any device.',
+        ch_coming_label: 'Coming in v0.2.0:',
+        prov_title: 'LLM Providers',
+        prov_subtitle: 'Six provider presets out of the box. OAuth PKCE login for OpenAI, Anthropic, and OpenRouter — no API keys needed.',
+        prov_th_provider: 'Provider',
+        prov_th_model: 'Default Model',
+        prov_th_auth: 'Auth',
+        prov_openai_default: '(default)',
+        prov_auth_oauth_key: 'OAuth PKCE, API key',
+        prov_auth_bearer: 'OAuth PKCE, Bearer',
+        prov_auth_key: 'API key',
+        prov_auth_none: 'None (local)',
+        prov_model_config: 'configurable',
+        prov_auth_config: 'configurable',
+        cmp_title: 'Why openpista?',
+        cmp_subtitle: 'A Rust-native OS agent built for performance, safety, and real multi-channel deployment.',
+        cmp_stat1_label: 'Static binary',
+        cmp_stat1_sub: 'Zero runtime dependencies',
+        cmp_stat2_label: 'Channels + Cron',
+        cmp_stat2_sub: 'Telegram, WhatsApp, CLI, Web',
+        cmp_stat3_label: 'LLM Providers',
+        cmp_stat3_sub: 'OAuth PKCE + API key auth',
+        cmp_stat4_label: 'Tests',
+        cmp_stat4_sub: 'Zero Clippy warnings',
+        qs_title: 'Quick Start',
+        qs_subtitle: 'Three steps to get openpista running on your machine.',
+        qs_step1_title: 'Clone & Build',
+        qs_step2_title: 'Authenticate',
+        qs_step3_title: 'Launch',
+        qs_term_auth1: 'Opening browser for OAuth PKCE login...',
+        qs_term_auth2: '✓ Authenticated successfully',
+        qs_term_launch1: 'Welcome to openpista v0.1.0',
+        qs_term_launch2: 'Type a message or use /help for commands',
+        footer_roadmap: 'Roadmap',
+      },
+      ko: {
+        meta_title: 'openpista — AI로 제어하는 당신의 OS',
+        nav_features: '기능',
+        nav_architecture: '아키텍처',
+        nav_channels: '채널',
+        nav_compare: '비교',
+        nav_quickstart: '빠른 시작',
+        hero_h1_line1: 'AI로 제어하는 당신의 OS',
+        hero_h1_line2: '— 어떤 메신저에서든',
+        hero_tagline: '텔레그램, 왓츠앱, CLI, 웹을 운영체제에 연결하는 단일 Rust 바이너리. LLM 에이전트 루프로 동작합니다. ~10 MB, 런타임 의존성 제로.',
+        hero_cta_start: '시작하기',
+        hero_cta_github: 'GitHub에서 보기',
+        hero_term_auth1: 'OAuth PKCE 로그인을 위해 브라우저 열기...',
+        hero_term_auth2: '✓ OpenAI(gpt-4o)로 인증 완료',
+        hero_term_model_label: '모델:',
+        hero_term_user_msg: '실행 중인 Docker 컨테이너 목록 보여줘',
+        hero_term_agent_msg: 'system.run 실행 중...',
+        feat_title: '강력한 OS 도구',
+        feat_subtitle: '6가지 핵심 도구 카테고리로 AI 에이전트가 운영체제와 안전하고 효과적으로 상호작용합니다.',
+        feat_bash_title: 'Bash 도구',
+        feat_bash_desc: '설정 가능한 타임아웃, 출력 자르기, 종료 코드 캡처로 시스템 명령을 실행합니다. <code class="text-orange-400">system.run</code>',
+        feat_browser_title: '브라우저 자동화',
+        feat_browser_desc: 'Chromium CDP를 통해 웹 페이지 탐색, 클릭, 입력, 스크린샷. 완전한 헤드리스 브라우저 제어. <code class="text-blue-400">browser.*</code>',
+        feat_screen_title: '화면 캡처',
+        feat_screen_desc: '시각적 컨텍스트를 위한 데스크톱 스크린샷 캡처. 에이전트가 당신이 보는 것을 봅니다. <code class="text-purple-400">screen.capture</code>',
+        feat_docker_title: 'Docker 샌드박스',
+        feat_docker_desc: 'CPU/메모리 제한, 임시 토큰, 호스트 네트워크 차단이 적용된 격리 컨테이너에서 명령을 실행합니다. <code class="text-cyan-400">container.run</code>',
+        feat_skills_title: 'Skills 시스템',
+        feat_skills_desc: '워크스페이스에 <code class="text-green-400">SKILL.md</code>를 넣어 에이전트를 확장하세요. 서브프로세스, Python, WASM 런타임을 지원합니다.',
+        feat_memory_title: 'SQLite 메모리',
+        feat_memory_desc: 'SQLite 기반의 영구 대화 메모리. 세션, 메시지 히스토리, 도구 호출 메타데이터가 재시작 후에도 유지됩니다.',
+        arch_title: '아키텍처',
+        arch_subtitle: '깔끔한 4계층 파이프라인: 채널 입력 → 게이트웨이 라우팅 → 에이전트 추론 → 도구 실행.',
+        arch_l1_label: '레이어 1',
+        arch_l1_title: '채널 어댑터',
+        arch_l2_label: '레이어 2',
+        arch_l2_title: 'OS 게이트웨이',
+        arch_l3_label: '레이어 3',
+        arch_l3_title: '에이전트 런타임',
+        arch_l4_label: '레이어 4',
+        arch_l4_title: 'OS 도구 & Skills',
+        badge_telegram: '텔레그램',
+        badge_whatsapp: '왓츠앱',
+        badge_web_wasm: '웹 (WASM)',
+        badge_session_router: '세션 라우터',
+        badge_cron_scheduler: '크론 스케줄러',
+        badge_react_loop: 'ReAct 루프',
+        badge_llm_provider: 'LLM 프로바이더',
+        badge_sqlite_memory: 'SQLite 메모리',
+        channels_title: '메시징 채널',
+        channels_subtitle: '이미 사용하는 메신저에서 OS를 제어하세요. 모든 채널은 동일한 에이전트 런타임과 대화 메모리를 공유합니다.',
+        ch_telegram_name: '텔레그램',
+        ch_telegram_desc: 'teloxide를 통한 HTTP 롱폴링. 안정적인 채팅별 세션.',
+        ch_whatsapp_name: '왓츠앱',
+        ch_whatsapp_desc: '웹훅 HMAC 검증이 포함된 Business Cloud API.',
+        ch_cli_desc: '세션, 사이드바, 모델 브라우저를 갖춘 완전한 ratatui 터미널 UI.',
+        ch_web_name: '웹 (WASM)',
+        ch_web_desc: 'WebSocket 기반 Rust→WASM 브라우저 클라이언트. 어떤 기기에서든 접속.',
+        ch_coming_label: 'v0.2.0 예정:',
+        prov_title: 'LLM 프로바이더',
+        prov_subtitle: '6가지 프로바이더 프리셋 기본 제공. OpenAI, Anthropic, OpenRouter는 OAuth PKCE 로그인 — API 키 불필요.',
+        prov_th_provider: '프로바이더',
+        prov_th_model: '기본 모델',
+        prov_th_auth: '인증',
+        prov_openai_default: '(기본값)',
+        prov_auth_oauth_key: 'OAuth PKCE, API 키',
+        prov_auth_bearer: 'OAuth PKCE, Bearer',
+        prov_auth_key: 'API 키',
+        prov_auth_none: '없음 (로컬)',
+        prov_model_config: '직접 설정',
+        prov_auth_config: '직접 설정',
+        cmp_title: '왜 openpista인가?',
+        cmp_subtitle: '성능, 안전성, 실제 멀티채널 배포를 위해 설계된 Rust 네이티브 OS 에이전트.',
+        cmp_stat1_label: '정적 바이너리',
+        cmp_stat1_sub: '런타임 의존성 제로',
+        cmp_stat2_label: '채널 + 크론',
+        cmp_stat2_sub: '텔레그램, 왓츠앱, CLI, 웹',
+        cmp_stat3_label: 'LLM 프로바이더',
+        cmp_stat3_sub: 'OAuth PKCE + API 키 인증',
+        cmp_stat4_label: '테스트',
+        cmp_stat4_sub: 'Clippy 경고 제로',
+        qs_title: '빠른 시작',
+        qs_subtitle: '3단계로 openpista를 실행하세요.',
+        qs_step1_title: '클론 & 빌드',
+        qs_step2_title: '인증',
+        qs_step3_title: '실행',
+        qs_term_auth1: 'OAuth PKCE 로그인을 위해 브라우저 열기...',
+        qs_term_auth2: '✓ 인증 성공',
+        qs_term_launch1: 'openpista v0.1.0에 오신 것을 환영합니다',
+        qs_term_launch2: '메시지를 입력하거나 /help로 명령어를 확인하세요',
+        footer_roadmap: '로드맵',
+      }
+    };
+
+    // === i18n: apply language ===
+    function setLang(lang) {
+      lang = (lang === 'ko') ? 'ko' : 'en';
+      document.documentElement.lang = lang;
+      localStorage.setItem('lang', lang);
+      var S = window.STRINGS[lang];
+      document.querySelectorAll('[data-i18n]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n');
+        if (S[key] !== undefined) el.textContent = S[key];
+      });
+      document.querySelectorAll('[data-i18n-html]').forEach(function(el) {
+        var key = el.getAttribute('data-i18n-html');
+        if (S[key] !== undefined) el.innerHTML = S[key];
+      });
+      if (S.meta_title) document.title = S.meta_title;
+      document.querySelectorAll('[data-set-lang]').forEach(function(btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-set-lang') === lang);
+      });
+      // Update URL param without reload
+      var url = new URL(location.href);
+      if (lang === 'ko') url.searchParams.set('lang', 'ko');
+      else url.searchParams.delete('lang');
+      history.replaceState(null, '', url.toString());
+    }
+
+    // Bind lang toggle buttons
+    document.querySelectorAll('[data-set-lang]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        setLang(this.getAttribute('data-set-lang'));
+      });
+    });
+
+    // Apply initial language
+    setLang(window.__INIT_LANG__ || 'en');
+
+    // === Theme Management ===
+    function getEffectiveTheme(pref) {
+      if (pref === 'system') {
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      return pref;
+    }
+
+    function applyTheme(pref) {
+      var effective = getEffectiveTheme(pref);
+      document.documentElement.setAttribute('data-theme', effective);
+      document.documentElement.setAttribute('data-theme-pref', pref);
+      localStorage.setItem('theme', pref);
+      document.querySelectorAll('[data-set-theme]').forEach(function(btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-set-theme') === pref);
+      });
+    }
+
+    var savedPref = localStorage.getItem('theme') || 'system';
+    applyTheme(savedPref);
+
+    document.querySelectorAll('[data-set-theme]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        applyTheme(this.getAttribute('data-set-theme'));
+      });
+    });
+
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function() {
+      var pref = localStorage.getItem('theme') || 'system';
+      if (pref === 'system') applyTheme('system');
+    });
+
+    // === Mobile menu toggle ===
+    const menuToggle = document.getElementById('menu-toggle');
+    const mobileMenu = document.getElementById('mobile-menu');
+    const iconOpen = document.getElementById('menu-icon-open');
+    const iconClose = document.getElementById('menu-icon-close');
+
+    menuToggle.addEventListener('click', () => {
+      mobileMenu.classList.toggle('open');
+      iconOpen.classList.toggle('hidden');
+      iconClose.classList.toggle('hidden');
+    });
+
+    mobileMenu.querySelectorAll('a').forEach(link => {
+      link.addEventListener('click', () => {
+        mobileMenu.classList.remove('open');
+        iconOpen.classList.remove('hidden');
+        iconClose.classList.add('hidden');
+      });
+    });
+
+    // === Scroll fade-in animation ===
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+    // === Background particle animation ===
+    (function() {
+      const cv = document.getElementById('bg-canvas');
+      if (!cv) return;
+      const cx = cv.getContext('2d');
+      let W, H, pts;
+
+      function resize() {
+        W = cv.width = window.innerWidth;
+        H = cv.height = window.innerHeight;
+      }
+
+      function mk() {
+        return {
+          x: Math.random() * W, y: Math.random() * H,
+          vx: (Math.random() - .5) * .55, vy: (Math.random() - .5) * .55,
+          r: Math.random() * 2.5 + 1
+        };
+      }
+
+      function draw() {
+        cx.clearRect(0, 0, W, H);
+        pts.forEach(p => {
+          p.x = (p.x + p.vx + W) % W;
+          p.y = (p.y + p.vy + H) % H;
+          cx.beginPath(); cx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          cx.fillStyle = 'rgba(247,76,0,.8)'; cx.fill();
+        });
+        for (let i = 0; i < pts.length - 1; i++) {
+          for (let j = i + 1; j < pts.length; j++) {
+            const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            if (d < 200) {
+              cx.beginPath(); cx.moveTo(pts[i].x, pts[i].y); cx.lineTo(pts[j].x, pts[j].y);
+              cx.strokeStyle = `rgba(247,76,0,${(1 - d / 200) * .35})`; cx.lineWidth = .8; cx.stroke();
+            }
+          }
+        }
+        requestAnimationFrame(draw);
+      }
+
+      resize();
+      const N = Math.min(100, Math.floor(W / 14));
+      pts = Array.from({ length: N }, mk);
+      draw();
+      window.addEventListener('resize', function() { resize(); });
+    })();
+
+    // === Active nav link highlighting ===
+    const sections = document.querySelectorAll('section[id]');
+    const navLinks = document.querySelectorAll('nav a[href^="#"]');
+
+    window.addEventListener('scroll', () => {
+      let current = '';
+      sections.forEach(section => {
+        const sectionTop = section.offsetTop - 100;
+        if (scrollY >= sectionTop) {
+          current = section.getAttribute('id');
+        }
+      });
+      navLinks.forEach(link => {
+        link.classList.remove('text-white');
+        if (link.getAttribute('href') === `#${current}`) {
+          link.classList.add('text-white');
+        }
+      });
+    });
+  </script>
+</body>
+</html>

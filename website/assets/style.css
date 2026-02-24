@@ -1,0 +1,582 @@
+/* openpista — Custom Styles (Tailwind CSS supplement) */
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Theme transition */
+body,
+nav,
+.terminal,
+.terminal-header,
+.terminal-body,
+.arch-box,
+.section-divider,
+.feature-card,
+.channel-card,
+footer {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* Custom scrollbar — dark */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Terminal window */
+.terminal {
+  background: #0c0c0c;
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.terminal-header {
+  background: #1e1e1e;
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 1px solid #2d2d2d;
+}
+
+.terminal-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.terminal-dot.red { background: #ff5f57; }
+.terminal-dot.yellow { background: #febc2e; }
+.terminal-dot.green { background: #28c840; }
+
+.terminal-body {
+  padding: 1.25rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: #e2e8f0;
+  min-height: 200px;
+}
+
+.terminal-body .prompt {
+  color: #28c840;
+}
+
+.terminal-body .command {
+  color: #f8fafc;
+}
+
+.terminal-body .output {
+  color: #94a3b8;
+}
+
+.terminal-body .accent {
+  color: #F74C00;
+}
+
+/* Typing cursor animation */
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.1em;
+  background: #F74C00;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #F74C00 0%, #fb923c 50%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-text-blue {
+  background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 50%, #a855f7 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Hero gradient background */
+.hero-gradient {
+  background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(247, 76, 0, 0.15) 0%, transparent 60%),
+              radial-gradient(ellipse 60% 40% at 80% 0%, rgba(59, 130, 246, 0.1) 0%, transparent 50%);
+}
+
+/* Card hover effect */
+.feature-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, background-color 0.3s ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.3);
+  border-color: rgba(247, 76, 0, 0.3);
+}
+
+/* Architecture flow */
+.arch-box {
+  background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+  border: 1px solid #334155;
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  text-align: center;
+  transition: border-color 0.2s ease, background 0.3s ease;
+}
+
+.arch-box:hover {
+  border-color: rgba(247, 76, 0, 0.4);
+}
+
+.arch-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #475569;
+  font-size: 1.5rem;
+  padding: 0.5rem 0;
+}
+
+/* Channel card */
+.channel-card {
+  transition: transform 0.2s ease, border-color 0.2s ease, background-color 0.3s ease;
+}
+
+.channel-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+/* Provider row hover */
+.provider-row {
+  transition: background-color 0.15s ease;
+}
+
+.provider-row:hover {
+  background-color: rgba(247, 76, 0, 0.05);
+}
+
+/* Mobile menu transition */
+.mobile-menu {
+  transition: max-height 0.3s ease, opacity 0.3s ease;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
+
+.mobile-menu.open {
+  max-height: 400px;
+  opacity: 1;
+}
+
+/* Fade-in animation for scroll */
+.fade-in {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.fade-in.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Glow effect for hero CTA */
+.glow-orange {
+  box-shadow: 0 0 20px rgba(247, 76, 0, 0.3);
+  transition: box-shadow 0.2s ease;
+}
+
+.glow-orange:hover {
+  box-shadow: 0 0 30px rgba(247, 76, 0, 0.5);
+}
+
+/* Badge/tag style */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  border: 1px solid;
+}
+
+/* Grid pattern background */
+.grid-pattern {
+  background-image:
+    linear-gradient(rgba(51, 65, 85, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(51, 65, 85, 0.1) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Section divider */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, #334155 50%, transparent 100%);
+}
+
+/* ===== Lang Toggle ===== */
+.lang-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.lang-btn {
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.lang-btn.active {
+  background-color: rgba(247, 76, 0, 0.15);
+  color: #F74C00;
+}
+
+[data-theme="light"] .lang-btn.active {
+  background-color: rgba(247, 76, 0, 0.12);
+  color: #ea580c;
+}
+
+/* ===== Theme Toggle ===== */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.theme-btn {
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  line-height: 0;
+}
+
+.theme-btn.active {
+  background-color: rgba(247, 76, 0, 0.15);
+  color: #F74C00;
+}
+
+[data-theme="light"] .theme-btn.active {
+  background-color: rgba(247, 76, 0, 0.12);
+  color: #ea580c;
+}
+
+
+/* ============================================================
+   LIGHT THEME OVERRIDES
+   JS resolves "system" → "light" or "dark" at runtime,
+   so CSS only targets [data-theme="light"].
+   ============================================================ */
+
+[data-theme="light"] body {
+  background-color: #ffffff !important;
+  color: #334155 !important;
+}
+
+/* --- Scrollbar --- */
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* --- Navigation --- */
+[data-theme="light"] nav {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+  border-bottom-color: #e2e8f0 !important;
+}
+
+[data-theme="light"] nav .text-xl.font-bold {
+  color: #0f172a !important;
+}
+
+[data-theme="light"] #mobile-menu {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-top-color: #e2e8f0 !important;
+}
+
+/* --- Hero --- */
+[data-theme="light"] .hero-gradient {
+  background: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(247, 76, 0, 0.08) 0%, transparent 60%),
+              radial-gradient(ellipse 60% 40% at 80% 0%, rgba(59, 130, 246, 0.06) 0%, transparent 50%) !important;
+}
+
+[data-theme="light"] .grid-pattern {
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px) !important;
+}
+
+/* --- Terminal --- */
+[data-theme="light"] .terminal {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="light"] .terminal-header {
+  background: #f1f5f9;
+  border-bottom-color: #e2e8f0;
+}
+
+[data-theme="light"] .terminal-body {
+  color: #334155;
+}
+
+[data-theme="light"] .terminal-body .prompt {
+  color: #16a34a;
+}
+
+[data-theme="light"] .terminal-body .command {
+  color: #0f172a;
+}
+
+[data-theme="light"] .terminal-body .output {
+  color: #64748b;
+}
+
+/* --- Architecture --- */
+[data-theme="light"] .arch-box {
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  border-color: #e2e8f0;
+}
+
+[data-theme="light"] .arch-arrow {
+  color: #94a3b8;
+}
+
+/* --- Section Divider --- */
+[data-theme="light"] .section-divider {
+  background: linear-gradient(90deg, transparent 0%, #cbd5e1 50%, transparent 100%);
+}
+
+/* --- Feature Card Hover --- */
+[data-theme="light"] .feature-card:hover {
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.1);
+}
+
+/* --- Provider Row Hover --- */
+[data-theme="light"] .provider-row:hover {
+  background-color: rgba(247, 76, 0, 0.04);
+}
+
+/* --- Footer --- */
+[data-theme="light"] footer {
+  border-top-color: #e2e8f0 !important;
+}
+
+/* --- Glow effect toned down --- */
+[data-theme="light"] .glow-orange {
+  box-shadow: 0 0 15px rgba(247, 76, 0, 0.2);
+}
+[data-theme="light"] .glow-orange:hover {
+  box-shadow: 0 0 25px rgba(247, 76, 0, 0.35);
+}
+
+/* --- Tailwind class overrides for light theme ---
+   These override the hardcoded dark-palette Tailwind utility classes.
+   Specificity: [data-theme="light"] .class  beats  .class alone. */
+
+/* Backgrounds */
+[data-theme="light"] .bg-slate-900 {
+  background-color: #ffffff !important;
+}
+[data-theme="light"] .bg-slate-900\/80 {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+}
+[data-theme="light"] .bg-slate-900\/95 {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+}
+[data-theme="light"] .bg-slate-800\/50 {
+  background-color: rgba(241, 245, 249, 0.8) !important;
+}
+[data-theme="light"] .bg-slate-800 {
+  background-color: #f1f5f9 !important;
+}
+[data-theme="light"] .bg-slate-600\/20 {
+  background-color: rgba(100, 116, 139, 0.08) !important;
+}
+
+/* Text colors */
+[data-theme="light"] .text-white {
+  color: #0f172a !important;
+}
+[data-theme="light"] .text-slate-200 {
+  color: #334155 !important;
+}
+[data-theme="light"] .text-slate-300 {
+  color: #475569 !important;
+}
+[data-theme="light"] .text-slate-400 {
+  color: #64748b !important;
+}
+[data-theme="light"] .text-slate-500 {
+  color: #94a3b8 !important;
+}
+
+/* Hover text — keep hover:text-white working */
+[data-theme="light"] a:hover.hover\:text-white,
+[data-theme="light"] button:hover.hover\:text-white,
+[data-theme="light"] .hover\:text-white:hover {
+  color: #0f172a !important;
+}
+
+/* Border colors */
+[data-theme="light"] .border-slate-800 {
+  border-color: #e2e8f0 !important;
+}
+[data-theme="light"] .border-slate-700 {
+  border-color: #cbd5e1 !important;
+}
+[data-theme="light"] .border-slate-700\/50 {
+  border-color: rgba(203, 213, 225, 0.6) !important;
+}
+[data-theme="light"] .border-slate-600 {
+  border-color: #cbd5e1 !important;
+}
+[data-theme="light"] .border-slate-500\/30 {
+  border-color: rgba(148, 163, 184, 0.25) !important;
+}
+
+/* Hover border */
+[data-theme="light"] .hover\:border-slate-500:hover {
+  border-color: #94a3b8 !important;
+}
+[data-theme="light"] .hover\:border-slate-400:hover {
+  border-color: #94a3b8 !important;
+}
+
+/* Keep accent colors readable in light mode */
+[data-theme="light"] .text-orange-400 {
+  color: #ea580c !important;
+}
+[data-theme="light"] .text-blue-400 {
+  color: #2563eb !important;
+}
+[data-theme="light"] .text-green-400 {
+  color: #16a34a !important;
+}
+[data-theme="light"] .text-purple-400 {
+  color: #7c3aed !important;
+}
+[data-theme="light"] .text-cyan-400 {
+  color: #0891b2 !important;
+}
+[data-theme="light"] .text-amber-400 {
+  color: #d97706 !important;
+}
+
+/* Badge border accent adjustments */
+[data-theme="light"] .border-orange-500\/30 {
+  border-color: rgba(234, 88, 12, 0.25) !important;
+}
+[data-theme="light"] .border-blue-500\/30 {
+  border-color: rgba(37, 99, 235, 0.25) !important;
+}
+[data-theme="light"] .border-green-500\/30 {
+  border-color: rgba(22, 163, 74, 0.25) !important;
+}
+[data-theme="light"] .border-purple-500\/30 {
+  border-color: rgba(124, 58, 237, 0.25) !important;
+}
+[data-theme="light"] .border-cyan-500\/30 {
+  border-color: rgba(8, 145, 178, 0.25) !important;
+}
+[data-theme="light"] .border-amber-500\/30 {
+  border-color: rgba(217, 119, 6, 0.25) !important;
+}
+
+/* Badge backgrounds for light */
+[data-theme="light"] .bg-orange-500\/10 {
+  background-color: rgba(234, 88, 12, 0.08) !important;
+}
+[data-theme="light"] .bg-blue-500\/10 {
+  background-color: rgba(37, 99, 235, 0.08) !important;
+}
+[data-theme="light"] .bg-green-500\/10 {
+  background-color: rgba(22, 163, 74, 0.08) !important;
+}
+[data-theme="light"] .bg-purple-500\/10 {
+  background-color: rgba(124, 58, 237, 0.08) !important;
+}
+[data-theme="light"] .bg-cyan-500\/10 {
+  background-color: rgba(8, 145, 178, 0.08) !important;
+}
+[data-theme="light"] .bg-amber-500\/10 {
+  background-color: rgba(217, 119, 6, 0.08) !important;
+}
+[data-theme="light"] .bg-slate-500\/10 {
+  background-color: rgba(100, 116, 139, 0.08) !important;
+}
+
+/* Table header */
+[data-theme="light"] thead tr {
+  border-bottom-color: #cbd5e1 !important;
+}
+
+/* GitHub icon in hero button inherits — make sure it's visible */
+[data-theme="light"] .bg-orange-600 {
+  color: #ffffff !important;
+}
+[data-theme="light"] .bg-orange-600 svg {
+  color: #ffffff !important;
+}
+
+/* ===== Compare Section ===== */
+.stat-card {
+  transition: transform 0.2s ease, border-color 0.2s ease, background-color 0.3s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(247, 76, 0, 0.3);
+}
+
+.compare-row {
+  transition: background-color 0.15s ease;
+}
+
+.compare-row:hover {
+  background-color: rgba(247, 76, 0, 0.04);
+}
+
+[data-theme="light"] .compare-row:hover {
+  background-color: rgba(247, 76, 0, 0.04);
+}
