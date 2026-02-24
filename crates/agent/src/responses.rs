@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, trace};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
+use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -248,7 +248,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect();
         if !tool_calls.is_empty() {
-            return Ok(ChatResponse::ToolCalls(tool_calls));
+            return Ok(ChatResponse::ToolCalls(tool_calls, TokenUsage::default()));
         }
         // Collect text from message output items.
         let text: String = responses_resp
@@ -269,7 +269,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect::<Vec<_>>()
             .join("");
-        Ok(ChatResponse::Text(text))
+        Ok(ChatResponse::Text(text, TokenUsage::default()))
     }
 }
 
@@ -851,5 +851,82 @@ mod tests {
         );
         let resp = parse_sse_response(body).expect("fallback direct output");
         assert_eq!(resp.output.len(), 1);
+    }
+
+    // ── sanitize_tool_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_tool_name_replaces_dots() {
+        assert_eq!(sanitize_tool_name("system.run"), "system_run");
+    }
+
+    #[test]
+    fn sanitize_tool_name_preserves_valid_chars() {
+        assert_eq!(sanitize_tool_name("my-tool_v2"), "my-tool_v2");
+    }
+
+    #[test]
+    fn sanitize_tool_name_replaces_special_chars() {
+        assert_eq!(sanitize_tool_name("a@b#c$d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_tool_name_empty_string() {
+        assert_eq!(sanitize_tool_name(""), "");
+    }
+
+    #[test]
+    fn sanitize_tool_name_all_special() {
+        assert_eq!(sanitize_tool_name("..."), "___");
+    }
+
+    // ── convert_messages edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn tool_result_without_call_id_uses_unknown() {
+        let mut msg = ChatMessage::tool_result("tc1", "tool", "output");
+        msg.tool_call_id = None;
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["call_id"], "unknown");
+    }
+
+    #[test]
+    fn convert_messages_empty_input() {
+        let converted = convert_messages(&[]);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn convert_messages_multiple_system_messages_all_skipped() {
+        let msgs = vec![
+            ChatMessage::system("sys1"),
+            ChatMessage::system("sys2"),
+            ChatMessage::user("hello"),
+        ];
+        let converted = convert_messages(&msgs);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+    }
+
+    // ── parse_tool_arguments edge cases ──────────────────────────────────────
+
+    #[test]
+    fn parse_tool_arguments_empty_string() {
+        let result = parse_tool_arguments("");
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn parse_tool_arguments_null_json() {
+        let result = parse_tool_arguments("null");
+        // null is valid JSON but not an object, so it returns null
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn parse_tool_arguments_nested_object() {
+        let result = parse_tool_arguments(r#"{"a":{"b":1}}"#);
+        assert_eq!(result["a"]["b"], 1);
     }
 }

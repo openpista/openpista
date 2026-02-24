@@ -849,23 +849,6 @@ pub async fn run_tui(
                                 }
 
 
-                                if let Some(wa_cmd) = parse_whatsapp_command(&message) {
-                                    match wa_cmd {
-                                        WhatsAppCommand::Setup => {
-                                            app.update(Action::OpenWhatsAppSetup);
-                                        }
-                                        WhatsAppCommand::Status => {
-                                            let status = format_whatsapp_status(&config);
-                                            app.update(Action::PushAssistantMessage(status));
-                                        }
-                                        WhatsAppCommand::Invalid(msg) => {
-                                            app.update(Action::PushError(msg));
-                                        }
-                                    }
-                                    app.update(Action::ScrollToBottom);
-                                    continue;
-                                }
-
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
                                     app.update(Action::ScrollToBottom);
@@ -2009,5 +1992,340 @@ mod tests {
         // Even an empty string should produce a valid QR code
         let qr = render_qr_text("");
         assert!(qr.is_some());
+    }
+
+    #[test]
+    fn detect_local_ip_returns_non_empty_string() {
+        let ip = detect_local_ip();
+        assert!(!ip.is_empty());
+        // Must be either a valid IP or the fallback
+        assert!(ip == "localhost" || ip.contains('.') || ip.contains(':'));
+    }
+
+    #[test]
+    fn format_model_list_other_with_docs_source_no_api_tag() {
+        use model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
+        let entries = vec![ModelCatalogEntry {
+            id: "old-model".into(),
+            provider: "together".into(),
+            recommended_for_coding: false,
+            status: ModelStatus::Stable,
+            source: ModelSource::Docs,
+            available: true,
+        }];
+        let out = format_model_list(&entries, &[]);
+        assert!(out.contains("Other:"));
+        assert!(out.contains("old-model [together]"));
+        // Docs-source entries in Other should NOT have the "(api)" tag
+        assert!(!out.contains("(api)"));
+    }
+
+    #[test]
+    fn collect_authenticated_providers_includes_active_when_api_key_set() {
+        let mut config = Config::default();
+        config.agent.api_key = "test-key-abc".to_string();
+        let providers = collect_authenticated_providers(&config);
+        // Active provider with a configured key should be included
+        let active = config.agent.provider.name().to_string();
+        let found = providers
+            .iter()
+            .any(|(n, _, k)| n == &active && !k.is_empty());
+        assert!(
+            found,
+            "active provider should appear when api_key is configured"
+        );
+    }
+
+    // ── build_and_store_credential_with_path error paths ─────────────
+
+    #[tokio::test]
+    async fn persist_auth_unknown_provider_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "nonexistent-provider-xyz".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("key".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Unknown provider"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_empty_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "together".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("   ".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_with_whitespace_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "together".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("key with spaces".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("whitespace"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_missing_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "together".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: None,
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("API key input is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_endpoint_and_key_missing_endpoint_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "custom".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("tok-custom".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Endpoint is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_endpoint_and_key_empty_endpoint_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "custom".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: Some("   ".to_string()),
+                api_key: Some("tok-custom".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Endpoint is required"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_ollama_no_auth_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "ollama".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: None,
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("does not require authentication"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_auth_oauth_api_key_fallback_saves_credential() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "openai".to_string(),
+                auth_method: AuthMethodChoice::ApiKey,
+                endpoint: None,
+                api_key: Some("sk-openai-test".to_string()),
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path.clone(),
+        )
+        .await;
+        assert!(result.is_ok(), "got: {:?}", result);
+        let msg = result.unwrap();
+        assert!(msg.contains("Saved API key"), "got: {msg}");
+        let content = std::fs::read_to_string(&cred_path).expect("read");
+        let creds: crate::auth::Credentials = toml::from_str(&content).expect("parse");
+        let saved = creds.get("openai").expect("credential saved");
+        assert_eq!(saved.access_token, "sk-openai-test");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_openai_oauth_fails_in_test_mode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+        let result = persist_auth_with_path(
+            Config::default(),
+            AuthLoginIntent {
+                provider: "openai".to_string(),
+                auth_method: AuthMethodChoice::OAuth,
+                endpoint: None,
+                api_key: None,
+            },
+            OAUTH_CALLBACK_PORT,
+            OAUTH_TIMEOUT_SECS,
+            cred_path,
+        )
+        .await;
+        // OAuth is stubbed in test mode, should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_api_key_trims_whitespace() {
+        assert_eq!(
+            validate_api_key("  sk-test  ".to_string()).unwrap(),
+            "sk-test"
+        );
+    }
+
+    #[test]
+    fn load_credentials_returns_default_for_missing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("nonexistent.toml");
+        let creds = load_credentials(&path);
+        assert!(creds.get("openai").is_none());
+    }
+
+    #[test]
+    fn load_credentials_returns_default_for_invalid_toml() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("bad.toml");
+        std::fs::write(&path, "not valid toml {{{").unwrap();
+        let creds = load_credentials(&path);
+        assert!(creds.get("openai").is_none());
+    }
+
+    #[test]
+    fn persist_credential_creates_file_and_saves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("creds.toml");
+        let cred = crate::auth::ProviderCredential {
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: None,
+            endpoint: None,
+            id_token: None,
+        };
+        persist_credential("test-provider".to_string(), cred, path.clone()).unwrap();
+        let loaded = load_credentials(&path);
+        let saved = loaded.get("test-provider").expect("should exist");
+        assert_eq!(saved.access_token, "tok");
+    }
+
+    #[test]
+    fn format_whatsapp_status_unconfigured_session_dir() {
+        let mut config = Config::default();
+        config.channels.whatsapp.session_dir = String::new();
+        let status = format_whatsapp_status(&config);
+        assert!(status.contains("Incomplete"));
+    }
+
+    #[test]
+    fn render_qr_text_long_url_produces_larger_qr() {
+        let short = render_qr_text("hi").unwrap();
+        let long =
+            render_qr_text("https://example.com/very/long/path/to/resource?with=params&and=more")
+                .unwrap();
+        assert!(long.lines().count() >= short.lines().count());
+    }
+
+    #[test]
+    fn format_model_list_only_unavailable_models_shows_nothing() {
+        use model_catalog::{ModelCatalogEntry, ModelSource, ModelStatus};
+        let entries = vec![ModelCatalogEntry {
+            id: "unavailable-model".into(),
+            provider: "test".into(),
+            recommended_for_coding: true,
+            status: ModelStatus::Stable,
+            source: ModelSource::Docs,
+            available: false,
+        }];
+        let out = format_model_list(&entries, &[]);
+        assert!(out.contains("1 total"));
+        // Unavailable models are not shown in either section
+        assert!(!out.contains("Recommended:"));
+        assert!(!out.contains("Other:"));
+    }
+
+    #[test]
+    fn collect_authenticated_providers_returns_vec() {
+        let config = Config::default();
+        let providers = collect_authenticated_providers(&config);
+        // Result is always a Vec; each entry has (name, optional url, key)
+        for (name, _url, _key) in &providers {
+            assert!(!name.is_empty(), "provider name must not be empty");
+        }
     }
 }

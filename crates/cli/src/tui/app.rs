@@ -76,14 +76,6 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Delete a session by ID",
     },
     SlashCommand {
-        name: "/whatsapp",
-        description: "Configure WhatsApp channel",
-    },
-    SlashCommand {
-        name: "/whatsapp status",
-        description: "Show WhatsApp config status",
-    },
-    SlashCommand {
         name: "/qr",
         description: "Show QR code for Web UI URL",
     },
@@ -518,7 +510,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -535,9 +527,6 @@ impl TuiApp {
                     "Loading model catalog... (inside browser: s or / to search, r to refresh)"
                         .to_string(),
                 );
-            }
-            "/whatsapp" => {
-                // "status" subcommand is handled in event.rs; bare /whatsapp opens wizard
             }
             "/qr" => {
                 // QR code generation is handled in event.rs (needs config access)

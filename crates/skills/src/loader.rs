@@ -706,4 +706,80 @@ mod tests {
         assert_eq!(parse_mode("subprocess"), SkillExecutionMode::Subprocess);
         assert_eq!(parse_mode(""), SkillExecutionMode::Subprocess);
     }
+
+    // ── pure function coverage ────────────────────────────────────
+
+    #[test]
+    fn is_valid_skill_name_rejects_traversal_and_nested_paths() {
+        assert!(!is_valid_skill_name(".."));
+        assert!(!is_valid_skill_name("nested/path"));
+        assert!(!is_valid_skill_name(""));
+        assert!(!is_valid_skill_name("."));
+        assert!(is_valid_skill_name("valid-name"));
+        assert!(is_valid_skill_name("skill_123"));
+    }
+
+    #[test]
+    fn normalize_optional_text_trims_and_filters_empty() {
+        assert_eq!(
+            normalize_optional_text("  hello  ".to_string()),
+            Some("hello".to_string())
+        );
+        assert_eq!(normalize_optional_text("   ".to_string()), None);
+        assert_eq!(normalize_optional_text("".to_string()), None);
+    }
+
+    #[test]
+    fn extract_front_matter_returns_none_without_closing_delimiter() {
+        assert!(extract_front_matter("---\nkey: value\nno closing").is_none());
+    }
+
+    #[test]
+    fn extract_front_matter_returns_none_without_opening_delimiter() {
+        assert!(extract_front_matter("no front matter at all").is_none());
+    }
+
+    #[tokio::test]
+    async fn load_skill_metadata_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let loader = SkillLoader::new(tmp.path());
+        assert!(loader.load_skill_metadata("../escape").await.is_none());
+        assert!(loader.load_skill_metadata("..").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_skill_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let loader = SkillLoader::new(tmp.path());
+        let result = loader.run_skill("../escape", &[]).await;
+        assert!(result.is_error);
+        assert!(result.output.contains("Invalid skill name"));
+    }
+
+    #[tokio::test]
+    async fn load_context_skips_non_markdown_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join("skills");
+        write_file(&skills_dir.join("readme.txt"), "not a skill");
+        write_file(&skills_dir.join("data.json"), "{}");
+        write_file(&skills_dir.join("valid.md"), "# Valid\nSkill content");
+
+        let loader = SkillLoader::new(tmp.path());
+        let ctx = loader.load_context().await;
+        assert!(ctx.contains("### Skill: valid"));
+        assert!(!ctx.contains("not a skill"));
+        assert!(!ctx.contains("{}"));
+    }
+
+    #[tokio::test]
+    async fn run_skill_executes_main_sh_script() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_path = tmp.path().join("skills/hello/main.sh");
+        write_file(&run_path, "echo main_sh:$1");
+
+        let loader = SkillLoader::new(tmp.path());
+        let result = loader.run_skill("hello", &["arg1"]).await;
+        assert!(!result.is_error);
+        assert!(result.output.contains("main_sh:arg1"));
+    }
 }

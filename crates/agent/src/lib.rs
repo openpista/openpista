@@ -10,7 +10,7 @@ pub mod tool_registry;
 /// Anthropic Messages API provider.
 pub use anthropic::AnthropicProvider;
 /// Chat request/response models and provider interfaces.
-pub use llm::{ChatRequest, ChatResponse, LlmProvider, OpenAiProvider};
+pub use llm::{ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, TokenUsage};
 /// SQLite-backed conversation memory implementation.
 pub use memory::SqliteMemory;
 /// OpenAI Responses API provider (subscription-based billing).
