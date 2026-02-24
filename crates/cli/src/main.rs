@@ -1254,6 +1254,22 @@ mod tests {
     }
 
     #[test]
+    fn should_send_whatsapp_response_checks_prefix() {
+        assert!(should_send_whatsapp_response(&ChannelId::from(
+            "whatsapp:123"
+        )));
+        assert!(!should_send_whatsapp_response(&ChannelId::from(
+            "cli:local"
+        )));
+    }
+
+    #[test]
+    fn should_send_web_response_checks_prefix() {
+        assert!(should_send_web_response(&ChannelId::from("web:conn1")));
+        assert!(!should_send_web_response(&ChannelId::from("telegram:123")));
+    }
+
+    #[test]
     fn build_agent_response_maps_success_and_error() {
         let event = ChannelEvent::new(ChannelId::from("cli:local"), SessionId::from("s1"), "msg");
         let ok = build_agent_response(&event, Ok("done".to_string()));

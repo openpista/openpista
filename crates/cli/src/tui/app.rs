@@ -84,6 +84,18 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Show WhatsApp config status",
     },
     SlashCommand {
+        name: "/telegram",
+        description: "Telegram bot setup guide",
+    },
+    SlashCommand {
+        name: "/telegram status",
+        description: "Show Telegram config status",
+    },
+    SlashCommand {
+        name: "/telegram start",
+        description: "Start Telegram adapter info",
+    },
+    SlashCommand {
         name: "/qr",
         description: "Show QR code for Web UI URL",
     },
@@ -538,6 +550,9 @@ impl TuiApp {
             }
             "/whatsapp" => {
                 // "status" subcommand is handled in event.rs; bare /whatsapp opens wizard
+            }
+            "/telegram" => {
+                // Subcommands are handled in event.rs
             }
             "/qr" => {
                 // QR code generation is handled in event.rs (needs config access)
