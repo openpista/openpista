@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::{
-    llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider},
+    llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage},
     memory::SqliteMemory,
     tool_registry::ToolRegistry,
 };
@@ -105,7 +105,7 @@ impl AgentRuntime {
         session_id: &SessionId,
         user_message: &str,
         skills_context: Option<&str>,
-    ) -> Result<String, proto::Error> {
+    ) -> Result<(String, TokenUsage), proto::Error> {
         // Ensure session exists
         self.memory
             .ensure_session(session_id, channel_id.as_str())
@@ -129,6 +129,26 @@ impl AgentRuntime {
             .await
             .map_err(proto::Error::Database)?;
 
+        // Trim history to avoid context-window overflow (e.g. 942k tokens).
+        // Keep the most recent MAX_CONTEXT_MESSAGES, starting at a User
+        // boundary so we never begin mid tool-call chain.
+        const MAX_CONTEXT_MESSAGES: usize = 40;
+        // Tool results (e.g. screenshots, large bash output) are capped at
+        // MAX_TOOL_RESULT_CHARS characters before being sent to the LLM so a
+        // single result can never blow the context window.
+        const MAX_TOOL_RESULT_CHARS: usize = 16_000;
+        let history = if history.len() > MAX_CONTEXT_MESSAGES {
+            let start = history.len() - MAX_CONTEXT_MESSAGES;
+            // Advance to next User boundary to preserve tool-call integrity.
+            let offset = history[start..]
+                .iter()
+                .position(|m| m.role == Role::User)
+                .unwrap_or(0);
+            history[start + offset..].to_vec()
+        } else {
+            history
+        };
+
         // Convert history to chat messages
         let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
         for msg in &history {
@@ -140,10 +160,11 @@ impl AgentRuntime {
                     messages.push(assistant);
                 }
                 Role::Tool => {
+                    let content = truncate_tool_result(&msg.content, MAX_TOOL_RESULT_CHARS);
                     messages.push(ChatMessage::tool_result(
                         msg.tool_call_id.as_deref().unwrap_or(""),
                         msg.tool_name.as_deref().unwrap_or(""),
-                        &msg.content,
+                        &content,
                     ));
                 }
                 Role::System => {} // skip stored system messages
@@ -153,6 +174,7 @@ impl AgentRuntime {
         // ReAct loop
         let tool_defs = self.tools.definitions();
         let mut round = 0;
+        let mut total_usage = TokenUsage::default();
 
         loop {
             if round >= self.max_tool_rounds {
@@ -162,23 +184,20 @@ impl AgentRuntime {
                 );
                 return Err(proto::Error::Llm(LlmError::MaxToolRoundsExceeded));
             }
-
             let req = ChatRequest {
                 messages: messages.clone(),
                 tools: tool_defs.clone(),
                 model: self.model.read().expect("model lock").clone(),
             };
-
             debug!("LLM call (round {round}) for session {session_id}");
             let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
             let t0 = std::time::Instant::now();
             let response = llm.chat(req).await.map_err(proto::Error::Llm)?;
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
-
             match response {
-                ChatResponse::Text(text) => {
+                ChatResponse::Text(text, usage) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
-
+                    total_usage.add(&usage);
                     // Save assistant response
                     let assistant_msg =
                         AgentMessage::new(session_id.clone(), Role::Assistant, &text);
@@ -192,15 +211,15 @@ impl AgentRuntime {
                         .await
                         .map_err(proto::Error::Database)?;
 
-                    return Ok(text);
+                    return Ok((text, total_usage));
                 }
 
-                ChatResponse::ToolCalls(tool_calls) => {
+                ChatResponse::ToolCalls(tool_calls, usage) => {
                     debug!(
                         "Tool calls requested: {:?}",
                         tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
                     );
-
+                    total_usage.add(&usage);
                     // Persist assistant tool-call message so replayed history remains valid.
                     let assistant_tool_calls_msg =
                         AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
@@ -208,7 +227,6 @@ impl AgentRuntime {
                         .save_message(&assistant_tool_calls_msg)
                         .await
                         .map_err(proto::Error::Database)?;
-
                     // Add assistant message with tool calls to history
                     let assistant_msg = ChatMessage {
                         role: Role::Assistant,
@@ -218,13 +236,9 @@ impl AgentRuntime {
                         tool_calls: Some(tool_calls.clone()),
                     };
                     messages.push(assistant_msg);
-
-                    // Execute each tool call
                     for tc in &tool_calls {
                         let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
-
                         let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
-
                         // Save tool result message to memory
                         let tool_msg = AgentMessage::tool_result(
                             session_id.clone(),
@@ -236,11 +250,13 @@ impl AgentRuntime {
                             .save_message(&tool_msg)
                             .await
                             .map_err(proto::Error::Database)?;
-
                         // Add to in-memory conversation
-                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                        messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            truncate_tool_result(&result.output, MAX_TOOL_RESULT_CHARS),
+                        ));
                     }
-
                     round += 1;
                 }
             }
@@ -283,6 +299,20 @@ impl AgentRuntime {
             .await
             .map_err(proto::Error::Database)?;
 
+        // Trim history to avoid context-window overflow.
+        const MAX_CONTEXT_MESSAGES: usize = 40;
+        const MAX_TOOL_RESULT_CHARS: usize = 16_000;
+        let history = if history.len() > MAX_CONTEXT_MESSAGES {
+            let start = history.len() - MAX_CONTEXT_MESSAGES;
+            let offset = history[start..]
+                .iter()
+                .position(|m| m.role == Role::User)
+                .unwrap_or(0);
+            history[start + offset..].to_vec()
+        } else {
+            history
+        };
+
         // Convert history to chat messages
         let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
         for msg in &history {
@@ -294,10 +324,11 @@ impl AgentRuntime {
                     messages.push(assistant);
                 }
                 Role::Tool => {
+                    let content = truncate_tool_result(&msg.content, MAX_TOOL_RESULT_CHARS);
                     messages.push(ChatMessage::tool_result(
                         msg.tool_call_id.as_deref().unwrap_or(""),
                         msg.tool_name.as_deref().unwrap_or(""),
-                        &msg.content,
+                        &content,
                     ));
                 }
                 Role::System => {} // skip stored system messages
@@ -333,10 +364,8 @@ impl AgentRuntime {
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
 
             match response {
-                ChatResponse::Text(text) => {
+                ChatResponse::Text(text, _usage) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
-
-                    // Save assistant response
                     let assistant_msg =
                         AgentMessage::new(session_id.clone(), Role::Assistant, &text);
                     self.memory
@@ -348,16 +377,14 @@ impl AgentRuntime {
                         .touch_session(session_id)
                         .await
                         .map_err(proto::Error::Database)?;
-
                     return Ok(text);
                 }
 
-                ChatResponse::ToolCalls(tool_calls) => {
+                ChatResponse::ToolCalls(tool_calls, _usage) => {
                     debug!(
                         "Tool calls requested: {:?}",
                         tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
                     );
-
                     // Persist assistant tool-call message
                     let assistant_tool_calls_msg =
                         AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
@@ -365,7 +392,6 @@ impl AgentRuntime {
                         .save_message(&assistant_tool_calls_msg)
                         .await
                         .map_err(proto::Error::Database)?;
-
                     // Add assistant message with tool calls to history
                     let assistant_msg = ChatMessage {
                         role: Role::Assistant,
@@ -375,8 +401,6 @@ impl AgentRuntime {
                         tool_calls: Some(tool_calls.clone()),
                     };
                     messages.push(assistant_msg);
-
-                    // Execute each tool call with progress events
                     for tc in &tool_calls {
                         // Progress: tool call started
                         let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallStarted {
@@ -388,7 +412,6 @@ impl AgentRuntime {
                         let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
                         let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
-
                         // Progress: tool call finished
                         let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallFinished {
                             call_id: tc.id.clone(),
@@ -396,7 +419,6 @@ impl AgentRuntime {
                             output: result.output.clone(),
                             is_error: result.is_error,
                         });
-
                         // Save tool result message to memory
                         let tool_msg = AgentMessage::tool_result(
                             session_id.clone(),
@@ -408,11 +430,13 @@ impl AgentRuntime {
                             .save_message(&tool_msg)
                             .await
                             .map_err(proto::Error::Database)?;
-
                         // Add to in-memory conversation
-                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                        messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            truncate_tool_result(&result.output, MAX_TOOL_RESULT_CHARS),
+                        ));
                     }
-
                     round += 1;
                 }
             }
@@ -445,6 +469,17 @@ fn prepare_tool_args(tool_name: &str, args: Value) -> Value {
     object.insert("allow_subprocess_fallback".to_string(), Value::Bool(false));
 
     Value::Object(object)
+}
+
+/// Truncates a tool result to at most `max_chars` characters.
+/// If the result is longer, it appends a note with how many characters were cut.
+fn truncate_tool_result(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars {
+        return output.to_string();
+    }
+    let kept = &output[..max_chars];
+    let cut = output.len() - max_chars;
+    format!("{kept}\n...[output truncated: {cut} chars omitted]")
 }
 
 #[cfg(test)]
@@ -513,7 +548,10 @@ mod tests {
     impl LlmProvider for SlowLlm {
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
             tokio::time::sleep(self.delay).await;
-            Ok(ChatResponse::Text("late".to_string()))
+            Ok(ChatResponse::Text(
+                "late".to_string(),
+                TokenUsage::default(),
+            ))
         }
     }
 
@@ -537,6 +575,7 @@ mod tests {
     async fn process_returns_text_and_persists_messages() {
         let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text(
             "assistant reply".to_string(),
+            TokenUsage::default(),
         )]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
@@ -550,7 +589,7 @@ mod tests {
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-1");
 
-        let text = runtime
+        let (text, _usage) = runtime
             .process(&channel, &session, "hello", None)
             .await
             .expect("process should succeed");
@@ -572,8 +611,8 @@ mod tests {
             arguments: serde_json::json!({"value":"pong"}),
         };
         let llm = Arc::new(MockLlm::new(vec![
-            ChatResponse::ToolCalls(vec![tool_call]),
-            ChatResponse::Text("done".to_string()),
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
+            ChatResponse::Text("done".to_string(), TokenUsage::default()),
         ]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
@@ -587,7 +626,7 @@ mod tests {
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-2");
 
-        let text = runtime
+        let (text, _usage) = runtime
             .process(&channel, &session, "run echo", Some("skill context"))
             .await
             .expect("process should succeed");
@@ -612,7 +651,10 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({"value":"x"}),
         };
-        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(vec![tool_call])]));
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(
+            vec![tool_call],
+            TokenUsage::default(),
+        )]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
             llm,
@@ -691,7 +733,10 @@ mod tests {
 
     #[tokio::test]
     async fn process_with_progress_emits_thinking_and_returns_text() {
-        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text("done".to_string())]));
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "done".to_string(),
+            TokenUsage::default(),
+        )]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
             llm,
@@ -726,8 +771,8 @@ mod tests {
             arguments: serde_json::json!({"value":"pong"}),
         };
         let llm = Arc::new(MockLlm::new(vec![
-            ChatResponse::ToolCalls(vec![tool_call]),
-            ChatResponse::Text("final".to_string()),
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
+            ChatResponse::Text("final".to_string(), TokenUsage::default()),
         ]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(
@@ -822,9 +867,11 @@ mod tests {
     async fn register_and_switch_provider() {
         let llm1 = Arc::new(MockLlm::new(vec![ChatResponse::Text(
             "from-first".to_string(),
+            TokenUsage::default(),
         )]));
         let llm2 = Arc::new(MockLlm::new(vec![ChatResponse::Text(
             "from-second".to_string(),
+            TokenUsage::default(),
         )]));
         let memory = open_temp_memory().await;
         let runtime = AgentRuntime::new(llm1, build_registry(), memory, "first", "mock-model", 4);
@@ -838,7 +885,7 @@ mod tests {
 
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-switch");
-        let text = runtime
+        let (text, _usage) = runtime
             .process(&channel, &session, "hello", None)
             .await
             .expect("process should succeed");
@@ -866,5 +913,222 @@ mod tests {
         runtime.register_provider("beta", llm2);
         let names = runtime.registered_providers();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    // ── truncate_tool_result ─────────────────────────────────────────
+
+    #[test]
+    fn truncate_tool_result_short_input_unchanged() {
+        let result = truncate_tool_result("hello", 100);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_tool_result_exact_boundary_unchanged() {
+        let input = "a".repeat(50);
+        let result = truncate_tool_result(&input, 50);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_tool_result_over_limit_truncates_with_note() {
+        let input = "a".repeat(100);
+        let result = truncate_tool_result(&input, 60);
+        assert!(result.starts_with(&"a".repeat(60)));
+        assert!(result.contains("output truncated"));
+        assert!(result.contains("40 chars omitted"));
+    }
+
+    #[test]
+    fn truncate_tool_result_empty_input() {
+        let result = truncate_tool_result("", 100);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn truncate_tool_result_zero_limit() {
+        let result = truncate_tool_result("hello", 0);
+        assert!(result.contains("output truncated"));
+        assert!(result.contains("5 chars omitted"));
+    }
+
+    // ── prepare_tool_args additional ─────────────────────────────────
+
+    #[test]
+    fn prepare_tool_args_non_object_passthrough() {
+        let args = serde_json::json!("just a string");
+        let result = prepare_tool_args("container.run", args.clone());
+        assert_eq!(result, args);
+    }
+
+    #[test]
+    fn prepare_tool_args_container_adds_flag() {
+        let args = serde_json::json!({"image": "ubuntu"});
+        let result = prepare_tool_args("container.run", args);
+        assert_eq!(result["allow_subprocess_fallback"], false);
+        assert_eq!(result["image"], "ubuntu");
+    }
+
+    // ── getter/setter coverage ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_getter_returns_shared_memory() {
+        let llm = Arc::new(MockLlm::new(vec![]));
+        let memory = open_temp_memory().await;
+        let memory_clone = Arc::clone(&memory);
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "p", "m", 1);
+        assert!(Arc::ptr_eq(runtime.memory(), &memory_clone));
+    }
+
+    #[tokio::test]
+    async fn set_model_changes_active_model() {
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "ok".to_string(),
+            TokenUsage::default(),
+        )]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm, build_registry(), memory, "p", "old-model", 4);
+        runtime.set_model("new-model".to_string());
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-set-model");
+        let (text, _) = runtime
+            .process(&channel, &session, "hi", None)
+            .await
+            .expect("process");
+        assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
+    async fn set_llm_replaces_active_provider() {
+        let llm1 = Arc::new(MockLlm::new(vec![]));
+        let llm2 = Arc::new(MockLlm::new(vec![ChatResponse::Text(
+            "from-new".to_string(),
+            TokenUsage::default(),
+        )]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(llm1, build_registry(), memory, "p", "m", 4);
+        runtime.set_llm(llm2);
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-set-llm");
+        let (text, _) = runtime
+            .process(&channel, &session, "hi", None)
+            .await
+            .expect("process");
+        assert_eq!(text, "from-new");
+    }
+
+    // ── history role conversion coverage ──────────────────────────────
+
+    #[tokio::test]
+    async fn process_converts_prior_assistant_and_tool_history() {
+        let tool_call = ToolCall {
+            id: "tc-hist".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value": "test"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
+            ChatResponse::Text("first-done".to_string(), TokenUsage::default()),
+            ChatResponse::Text("second-done".to_string(), TokenUsage::default()),
+        ]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory.clone(),
+            "mock-provider",
+            "mock-model",
+            4,
+        );
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-history-conv");
+
+        let (text1, _) = runtime
+            .process(&channel, &session, "first", None)
+            .await
+            .expect("first process");
+        assert_eq!(text1, "first-done");
+
+        let (text2, _) = runtime
+            .process(&channel, &session, "second", None)
+            .await
+            .expect("second process");
+        assert_eq!(text2, "second-done");
+
+        let history = memory.load_session(&session).await.expect("history");
+        assert_eq!(history.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn process_with_progress_converts_prior_assistant_and_tool_history() {
+        let tool_call = ToolCall {
+            id: "tc-prog-hist".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value": "test"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![
+            ChatResponse::ToolCalls(vec![tool_call], TokenUsage::default()),
+            ChatResponse::Text("first-done".to_string(), TokenUsage::default()),
+            ChatResponse::Text("second-done".to_string(), TokenUsage::default()),
+        ]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            4,
+        );
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-prog-hist");
+
+        let (tx1, _rx1) = tokio::sync::mpsc::channel(32);
+        let text1 = runtime
+            .process_with_progress(&channel, &session, "first", None, tx1)
+            .await
+            .expect("first");
+        assert_eq!(text1, "first-done");
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(32);
+        let text2 = runtime
+            .process_with_progress(&channel, &session, "second", None, tx2)
+            .await
+            .expect("second");
+        assert_eq!(text2, "second-done");
+    }
+
+    #[tokio::test]
+    async fn process_with_progress_errors_when_max_tool_rounds_exceeded() {
+        let tool_call = ToolCall {
+            id: "tc-prog-max".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"value": "x"}),
+        };
+        let llm = Arc::new(MockLlm::new(vec![ChatResponse::ToolCalls(
+            vec![tool_call],
+            TokenUsage::default(),
+        )]));
+        let memory = open_temp_memory().await;
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "mock-provider",
+            "mock-model",
+            1,
+        );
+        let channel = ChannelId::from("cli:local");
+        let session = SessionId::from("session-prog-max");
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+
+        let err = runtime
+            .process_with_progress(&channel, &session, "loop", None, tx)
+            .await
+            .expect_err("should exceed rounds");
+        match err {
+            proto::Error::Llm(LlmError::MaxToolRoundsExceeded) => {}
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

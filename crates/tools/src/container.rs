@@ -1706,4 +1706,367 @@ mod tests {
         assert_eq!(non_empty("   "), None);
         assert_eq!(non_empty("\t\n"), None);
     }
+
+    #[tokio::test]
+    async fn run_as_subprocess_rejects_empty_command() {
+        let mut args = base_args("");
+        args.command = Some(String::new());
+        let err = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect_err("empty command should fail");
+        assert!(err.contains("command must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_rejects_whitespace_only_command() {
+        let mut args = base_args("  ");
+        args.command = Some("   ".to_string());
+        let err = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect_err("whitespace command should fail");
+        assert!(err.contains("command must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_rejects_invalid_env_format() {
+        let mut args = base_args("echo ok");
+        args.env = Some(vec!["NO_EQUALS_SIGN".to_string()]);
+        let err = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect_err("malformed env should fail");
+        assert!(err.contains("Invalid env entry"));
+        assert!(err.contains("KEY=VALUE"));
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_rejects_empty_env_key() {
+        let mut args = base_args("echo ok");
+        args.env = Some(vec!["=somevalue".to_string()]);
+        let err = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect_err("empty key env should fail");
+        assert!(err.contains("key must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn run_as_subprocess_handles_multiple_env_vars() {
+        let mut args = base_args("printf '%s:%s' \"$A\" \"$B\"");
+        args.env = Some(vec!["A=hello".to_string(), "B=world".to_string()]);
+        let exec = run_as_subprocess(&args, Duration::from_secs(2))
+            .await
+            .expect("multiple env should work");
+        assert_eq!(exec.exit_code, 0);
+        assert!(exec.stdout.contains("hello:world"));
+    }
+
+    #[test]
+    fn maybe_mint_task_credential_generates_valid_token_when_enabled() {
+        let args = ContainerArgs {
+            inject_task_token: Some(true),
+            token_ttl_secs: Some(60),
+            token_env_name: Some("MY_TOKEN".to_string()),
+            ..base_args("echo hi")
+        };
+        let credential = maybe_mint_task_credential(&args)
+            .expect("mint should succeed")
+            .expect("credential should be Some");
+        assert_eq!(credential.env_name, "MY_TOKEN");
+        assert!(!credential.token.is_empty());
+        assert!(credential.expires_at_unix > 0);
+    }
+
+    #[test]
+    fn maybe_mint_task_credential_clamps_ttl() {
+        let args = ContainerArgs {
+            inject_task_token: Some(true),
+            token_ttl_secs: Some(9999),
+            token_env_name: None,
+            ..base_args("echo hi")
+        };
+        let credential = maybe_mint_task_credential(&args)
+            .expect("mint should succeed")
+            .expect("credential should be Some");
+        assert_eq!(credential.env_name, DEFAULT_TOKEN_ENV_NAME);
+        let now = unix_now_secs().expect("now");
+        assert!(credential.expires_at_unix <= now + MAX_TOKEN_TTL_SECS);
+    }
+
+    #[test]
+    fn build_shell_command_without_credential() {
+        let cmd = build_shell_command("echo hello", None);
+        assert_eq!(cmd, "echo hello");
+    }
+
+    #[test]
+    fn resolve_image_whitespace_only_image() {
+        let args = ContainerArgs {
+            image: Some("   ".to_string()),
+            skill_image: None,
+            ..base_args("echo ok")
+        };
+        assert!(resolve_image(&args).is_none());
+    }
+
+    #[test]
+    fn resolve_image_whitespace_image_with_skill_fallback() {
+        let args = ContainerArgs {
+            image: Some("  ".to_string()),
+            skill_image: Some("  python:3  ".to_string()),
+            ..base_args("echo ok")
+        };
+        assert_eq!(resolve_image(&args).as_deref(), Some("python:3"));
+    }
+
+    #[test]
+    fn resolve_image_both_whitespace_returns_none() {
+        let args = ContainerArgs {
+            image: Some("  ".to_string()),
+            skill_image: Some("  ".to_string()),
+            ..base_args("echo ok")
+        };
+        assert!(resolve_image(&args).is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mode_returns_docker_when_no_skill_name() {
+        let args = base_args("echo ok");
+        let mode = resolve_runtime_mode(&args).await.expect("mode");
+        assert_eq!(mode, RuntimeMode::Docker);
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mode_returns_error_when_workspace_missing() {
+        let args = ContainerArgs {
+            skill_name: Some("myskill".to_string()),
+            workspace_dir: None,
+            ..base_args("echo")
+        };
+        let err = resolve_runtime_mode(&args).await.expect_err("should fail");
+        assert!(err.contains("workspace_dir is required"));
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_mode_returns_error_for_missing_skill_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let args = ContainerArgs {
+            skill_name: Some("no_such_skill".to_string()),
+            workspace_dir: Some(tmp.path().to_string_lossy().to_string()),
+            ..base_args("echo")
+        };
+        let err = resolve_runtime_mode(&args).await.expect_err("should fail");
+        assert!(err.contains("SKILL.md not found"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_image_after_command_validation() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute(
+                "call-img",
+                serde_json::json!({"image":"","command":"echo hi", "timeout_secs": 1}),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("image must not be empty"));
+    }
+
+    #[test]
+    fn build_container_name_handles_empty_call_id() {
+        let name = build_container_name("");
+        assert_eq!(name, "openpista-");
+    }
+
+    #[test]
+    fn build_container_name_handles_unicode() {
+        let name = build_container_name("call-été");
+        assert!(name.starts_with("openpista-call-"));
+    }
+
+    #[test]
+    fn format_output_truncates_long_stdout() {
+        let long_stdout = "x".repeat(MAX_OUTPUT_CHARS + 100);
+        let out = format_output(&long_stdout, "", 0);
+        assert!(out.contains("truncated"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn is_valid_env_name_accepts_underscore_prefix() {
+        assert!(is_valid_env_name("_"));
+        assert!(is_valid_env_name("__DOUBLE"));
+        assert!(is_valid_env_name("a"));
+        assert!(is_valid_env_name("Z9_x"));
+    }
+
+    #[test]
+    fn shell_single_quote_no_quotes() {
+        assert_eq!(shell_single_quote("simple"), "'simple'");
+    }
+
+    #[test]
+    fn shell_single_quote_empty() {
+        assert_eq!(shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn format_output_stdout_only() {
+        let out = format_output("hello\n", "", 0);
+        assert!(out.contains("stdout:\nhello\n"));
+        assert!(out.contains("exit_code: 0"));
+        assert!(!out.contains("stderr:"));
+    }
+
+    #[test]
+    fn format_output_stderr_only() {
+        let out = format_output("", "error msg\n", 1);
+        assert!(out.contains("stderr:\nerror msg\n"));
+        assert!(out.contains("exit_code: 1"));
+        assert!(!out.contains("stdout:"));
+    }
+
+    #[test]
+    fn format_output_both_streams() {
+        let out = format_output("ok\n", "warn\n", 0);
+        assert!(out.contains("stdout:\nok\n"));
+        assert!(out.contains("stderr:\nwarn\n"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn format_output_empty_streams() {
+        let out = format_output("", "", 42);
+        assert_eq!(out, "\nexit_code: 42");
+    }
+
+    #[test]
+    fn build_task_credential_script_contains_env_vars() {
+        let cred = TaskCredential {
+            token: "my-secret-token".to_string(),
+            expires_at_unix: 1700000000,
+            env_name: "MY_TOKEN".to_string(),
+        };
+        let script = build_task_credential_script(&cred);
+        assert!(script.contains("export MY_TOKEN="));
+        assert!(script.contains("my-secret-token"));
+        assert!(script.contains("export openpista_TASK_TOKEN_EXPIRES_AT=1700000000"));
+    }
+
+    #[test]
+    fn build_task_credential_archive_produces_valid_tar() {
+        let cred = TaskCredential {
+            token: "tok".to_string(),
+            expires_at_unix: 123,
+            env_name: "ENV".to_string(),
+        };
+        let archive = build_task_credential_archive(&cred).expect("archive should build");
+        // A tar archive should be non-empty and start with the filename
+        assert!(!archive.is_empty());
+        // The archive should contain the env file name
+        let archive_str = String::from_utf8_lossy(&archive);
+        assert!(archive_str.contains(TOKEN_ENV_FILE_NAME));
+    }
+
+    #[test]
+    fn cleanup_task_credential_clears_fields() {
+        let mut cred = Some(TaskCredential {
+            token: "secret".to_string(),
+            expires_at_unix: 999,
+            env_name: "TOK".to_string(),
+        });
+        cleanup_task_credential(&mut cred);
+        assert!(cred.is_none());
+    }
+
+    #[test]
+    fn cleanup_task_credential_handles_none() {
+        let mut cred: Option<TaskCredential> = None;
+        cleanup_task_credential(&mut cred);
+        assert!(cred.is_none());
+    }
+    #[test]
+    fn build_shell_command_with_credential_prepends_source() {
+        let cred = TaskCredential {
+            token: "tok".to_string(),
+            expires_at_unix: 0,
+            env_name: "E".to_string(),
+        };
+        let cmd = build_shell_command("echo hello", Some(&cred));
+        assert!(cmd.starts_with(". "));
+        assert!(cmd.ends_with("echo hello"));
+        assert!(cmd.contains(TOKEN_MOUNT_DIR));
+        assert!(cmd.contains(TOKEN_ENV_FILE_NAME));
+    }
+
+    #[test]
+    fn sanitize_env_name_uses_default_when_none() {
+        let name = sanitize_env_name(None).unwrap();
+        assert_eq!(name, DEFAULT_TOKEN_ENV_NAME);
+    }
+
+    #[test]
+    fn sanitize_env_name_rejects_invalid() {
+        assert!(sanitize_env_name(Some("123invalid")).is_err());
+        assert!(sanitize_env_name(Some("")).is_err());
+        assert!(sanitize_env_name(Some("has space")).is_err());
+    }
+
+    #[test]
+    fn sanitize_env_name_accepts_valid() {
+        assert_eq!(sanitize_env_name(Some("MY_VAR")).unwrap(), "MY_VAR");
+        assert_eq!(sanitize_env_name(Some("_x")).unwrap(), "_x");
+    }
+
+    #[test]
+    fn non_empty_trims_and_filters() {
+        assert_eq!(non_empty("  hello  "), Some("hello"));
+        assert_eq!(non_empty("   "), None);
+        assert_eq!(non_empty(""), None);
+        assert_eq!(non_empty("world"), Some("world"));
+    }
+
+    #[test]
+    fn container_tool_metadata() {
+        let tool = ContainerTool::new();
+        assert_eq!(tool.name(), "container.run");
+        assert!(tool.description().contains("Docker"));
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["image"].is_object());
+        assert!(schema["properties"]["command"].is_object());
+    }
+
+    #[test]
+    fn container_tool_default() {
+        let _tool = ContainerTool;
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_command() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute("call-1", serde_json::json!({"image": "alpine:3"}))
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("command must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_image() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute("call-2", serde_json::json!({"command": "echo hi"}))
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("image must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_invalid_json() {
+        let tool = ContainerTool::new();
+        let result = tool
+            .execute("call-3", serde_json::json!("not an object"))
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("Invalid arguments"));
+    }
 }

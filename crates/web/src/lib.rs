@@ -104,3 +104,83 @@ impl Client {
         window.local_storage().ok()?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outgoing_message_serializes_to_json() {
+        let msg = OutgoingMessage {
+            user_message: "hello world".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("user_message"));
+        assert!(json.contains("hello world"));
+    }
+
+    #[test]
+    fn outgoing_message_serializes_special_chars() {
+        let msg = OutgoingMessage {
+            user_message: "hello \"quotes\" & <angles>".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("hello"));
+        // Verify it round-trips via serde_json
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed["user_message"].as_str().unwrap(),
+            "hello \"quotes\" & <angles>"
+        );
+    }
+
+    #[test]
+    fn outgoing_message_empty_string() {
+        let msg = OutgoingMessage {
+            user_message: String::new(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains("\"user_message\":\"\""));
+    }
+
+    // Tests below require wasm_bindgen types that only work on wasm32 targets.
+    // Client::new, send, is_connected, connect, disconnect use JsValue/WebSocket
+    // which panic in native test runners.
+    #[cfg(target_arch = "wasm32")]
+    mod wasm_only {
+        use super::*;
+
+        #[test]
+        fn client_new_stores_url_and_token() {
+            let client = Client::new("ws://localhost:3210/ws", "mytoken");
+            assert_eq!(client.url, "ws://localhost:3210/ws");
+            assert_eq!(client.token, "mytoken");
+            assert!(client.ws.is_none());
+        }
+
+        #[test]
+        fn client_new_empty_token() {
+            let client = Client::new("ws://localhost:3210/ws", "");
+            assert_eq!(client.token, "");
+        }
+
+        #[test]
+        fn client_is_connected_returns_false_when_no_ws() {
+            let client = Client::new("ws://localhost:3210/ws", "tok");
+            assert!(
+                !client.is_connected(),
+                "should not be connected without a WebSocket"
+            );
+        }
+
+        #[test]
+        fn client_send_returns_error_when_not_connected() {
+            let client = Client::new("ws://localhost:3210/ws", "tok");
+            let err = client
+                .send("hello")
+                .expect_err("should fail when disconnected");
+            let err_str = err.as_string().unwrap_or_default();
+            assert!(err_str.contains("Not connected"));
+        }
+    }
+}

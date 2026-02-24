@@ -142,4 +142,49 @@ mod tests {
         assert_eq!(event.session_id.as_str(), "telegram:99");
         assert_eq!(event.user_message, "hello");
     }
+
+    #[test]
+    fn adapter_new_creates_with_telegram_prefix() {
+        let adapter = TelegramAdapter::new("fake-token");
+        assert_eq!(adapter.channel_prefix, "telegram");
+    }
+
+    #[test]
+    fn adapter_channel_id_returns_telegram_bot() {
+        let adapter = TelegramAdapter::new("fake-token");
+        let cid = adapter.channel_id();
+        assert_eq!(cid.as_str(), "telegram:bot");
+    }
+
+    #[test]
+    fn parse_chat_id_handles_negative_ids() {
+        assert_eq!(
+            parse_chat_id("telegram:-100123").expect("negative id"),
+            -100123
+        );
+        assert_eq!(parse_chat_id("-999").expect("raw negative"), -999);
+    }
+
+    #[test]
+    fn format_response_text_preserves_content_exactly() {
+        let resp = AgentResponse::new(
+            ChannelId::from("telegram:1"),
+            SessionId::from("s1"),
+            "hello world",
+        );
+        assert_eq!(format_response_text(&resp), "hello world");
+    }
+
+    #[test]
+    fn build_channel_event_with_negative_chat_id() {
+        let event = build_channel_event(-100, "msg".to_string());
+        assert_eq!(event.channel_id.as_str(), "telegram:-100");
+        assert_eq!(event.session_id.as_str(), "telegram:-100");
+    }
+
+    #[test]
+    fn make_session_id_handles_zero() {
+        let sid = TelegramAdapter::make_session_id(0);
+        assert_eq!(sid.as_str(), "telegram:0");
+    }
 }

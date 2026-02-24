@@ -25,7 +25,7 @@ use agent::{
     ToolRegistry,
 };
 #[cfg(not(test))]
-use channels::{ChannelAdapter, CliAdapter, TelegramAdapter, WebAdapter, WhatsAppAdapter};
+use channels::{ChannelAdapter, CliAdapter, TelegramAdapter, WebAdapter};
 #[cfg(not(test))]
 use config::Config;
 #[cfg(not(test))]
@@ -100,12 +100,32 @@ enum Commands {
         #[command(subcommand)]
         command: AuthCommands,
     },
-    /// Set up WhatsApp channel (check prerequisites, install bridge, pair via QR)
-    Whatsapp,
+    /// WhatsApp channel management
+    Whatsapp {
+        #[command(subcommand)]
+        command: Option<WhatsAppCommands>,
+    },
     /// Manage Telegram channel (status, setup guide, enable)
     Telegram {
         #[command(subcommand)]
         command: TelegramCommands,
+    },
+}
+/// `whatsapp` sub-subcommands.
+#[derive(Subcommand)]
+enum WhatsAppCommands {
+    /// Set up WhatsApp (QR pairing) — same as bare `openpista whatsapp`
+    Setup,
+    /// Start WhatsApp bridge in foreground mode (bot)
+    Start,
+    /// Show WhatsApp connection status
+    Status,
+    /// Send a message to a WhatsApp number
+    Send {
+        /// Phone number (e.g. 821012345678)
+        number: String,
+        /// Message text
+        message: Vec<String>,
     },
 }
 
@@ -260,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
             Commands::Run { .. } => "run",
             Commands::Model { .. } => "model",
             Commands::Auth { .. } => "auth",
-            Commands::Whatsapp => "whatsapp",
+            Commands::Whatsapp { .. } => "whatsapp",
             Commands::Telegram { .. } => "telegram",
         };
         info!(
@@ -285,7 +305,8 @@ async fn main() -> anyhow::Result<()> {
             model_name,
             message,
         } => match model_name.as_deref() {
-            None | Some("list") => cmd_models(config).await,
+            None | Some("select") => cmd_model_select(config).await,
+            Some("list") => cmd_models(config).await,
             Some("test") => {
                 let msg = message.unwrap_or_else(|| "Hello! Please respond briefly.".to_string());
                 cmd_model_test_all(config, msg).await
@@ -318,7 +339,14 @@ async fn main() -> anyhow::Result<()> {
             AuthCommands::Logout { provider } => cmd_auth_logout(provider),
             AuthCommands::Status => cmd_auth_status(),
         },
-        Commands::Whatsapp => cmd_whatsapp(config).await,
+        Commands::Whatsapp { command } => match command {
+            None | Some(WhatsAppCommands::Setup) => cmd_whatsapp(config).await,
+            Some(WhatsAppCommands::Start) => cmd_whatsapp_start(config).await,
+            Some(WhatsAppCommands::Status) => cmd_whatsapp_status(config).await,
+            Some(WhatsAppCommands::Send { number, message }) => {
+                cmd_whatsapp_send(config, number, message.join(" ")).await
+            }
+        },
         Commands::Telegram { command } => match command {
             TelegramCommands::Status => cmd_telegram_status(&config),
             TelegramCommands::Setup { token } => cmd_telegram_setup(config, token).await,
@@ -506,7 +534,8 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
     }
 
     // WhatsApp adapter
-    let mut whatsapp_resp_adapter: Option<WhatsAppAdapter> = None;
+    let mut whatsapp_cmd_tx: Option<tokio::sync::mpsc::Sender<channels::whatsapp::BridgeCommand>> =
+        None;
     if config.channels.whatsapp.enabled {
         let wa_config = channels::whatsapp::WhatsAppAdapterConfig {
             session_dir: config.channels.whatsapp.session_dir.clone(),
@@ -514,8 +543,8 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
         };
         let tx = event_tx.clone();
         let (qr_tx, _qr_rx) = tokio::sync::mpsc::channel::<String>(8);
-        let adapter = WhatsAppAdapter::new(wa_config.clone(), resp_tx.clone(), qr_tx.clone());
-        whatsapp_resp_adapter = Some(WhatsAppAdapter::new(wa_config, resp_tx.clone(), qr_tx));
+        let adapter = channels::whatsapp::WhatsAppAdapter::new(wa_config, resp_tx.clone(), qr_tx);
+        whatsapp_cmd_tx = Some(adapter.command_sender());
         tokio::spawn(async move {
             if let Err(e) = adapter.run(tx).await {
                 error!("WhatsApp adapter error: {e}");
@@ -571,8 +600,20 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
             }
 
             if should_send_whatsapp_response(&channel_id) {
-                if let Some(adapter) = &whatsapp_resp_adapter {
-                    if let Err(e) = adapter.send_response(resp).await {
+                if let Some(cmd_tx) = &whatsapp_cmd_tx {
+                    let phone = resp
+                        .channel_id
+                        .as_str()
+                        .strip_prefix("whatsapp:")
+                        .unwrap_or(resp.channel_id.as_str())
+                        .to_string();
+                    let text = if resp.is_error {
+                        format!("❌ Error: {}", resp.content)
+                    } else {
+                        resp.content.clone()
+                    };
+                    let cmd = channels::whatsapp::BridgeCommand::Send { to: phone, text };
+                    if let Err(e) = cmd_tx.send(cmd).await {
                         error!("Failed to send WhatsApp response: {e}");
                     }
                 } else {
@@ -849,6 +890,38 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
     println!("==============");
     println!();
 
+    // Check if a model is configured
+    let effective_model = config.agent.effective_model().to_string();
+    if effective_model.is_empty() || config.agent.model.is_empty() {
+        println!(
+            "\u{26a0} No model configured. WhatsApp needs an LLM model to respond to messages."
+        );
+        println!(
+            "  Current: provider={}, model={}",
+            config.agent.provider.name(),
+            if effective_model.is_empty() {
+                "(none)"
+            } else {
+                &effective_model
+            }
+        );
+        println!();
+        println!("  Run `openpista model select` to choose a model first.");
+        println!("  Or set it in ~/.openpista/config.toml:");
+        println!("    [agent]");
+        println!("    provider = \"anthropic\"");
+        println!("    model = \"claude-sonnet-4-6\"");
+        println!();
+        print!("  Continue anyway? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+        println!();
+    }
+
     // 1. Check Node.js
     print!("Checking Node.js... ");
     let node_ok = tokio::process::Command::new("node")
@@ -982,9 +1055,435 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
         }
     }
 
-    // 6. Cleanup — kill_on_drop handles it, but be explicit
-    let _ = child.kill().await;
+    // 6. Wait for credentials to be fully persisted before shutdown
+    println!("Waiting for session to stabilize...");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // 7. Graceful shutdown — send shutdown command to bridge to preserve session
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let cmd = serde_json::json!({"type": "shutdown"});
+        let line = format!("{}\n", cmd);
+        let _ = stdin.write_all(line.as_bytes()).await;
+        let _ = stdin.flush().await;
+    }
+    // Wait for bridge to exit gracefully (up to 5s), then force kill
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = child.kill().await;
+        }
+    }
     Ok(())
+}
+
+#[cfg(not(test))]
+/// Shows WhatsApp connection status: config, session, credentials, phone number.
+async fn cmd_whatsapp_status(config: Config) -> anyhow::Result<()> {
+    println!("WhatsApp Status");
+    println!("===============");
+    println!();
+
+    let enabled = config.channels.whatsapp.enabled;
+    let session_dir = &config.channels.whatsapp.session_dir;
+    let creds_path = format!("{session_dir}/auth/creds.json");
+    let creds_exist = std::path::Path::new(&creds_path).exists();
+
+    println!(
+        "Config:      {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+    println!("Session:     {session_dir}");
+
+    if creds_exist {
+        println!("Credentials: found (auth/creds.json exists)");
+
+        // Try to extract phone number from creds.json
+        if let Ok(data) = std::fs::read_to_string(&creds_path)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
+        {
+            // me.id format: "821026865523:38@s.whatsapp.net"
+            if let Some(me_id) = json
+                .get("me")
+                .and_then(|me| me.get("id"))
+                .and_then(|id| id.as_str())
+            {
+                let phone = me_id.split(':').next().unwrap_or(me_id);
+                println!("Phone:       {phone}");
+                println!("Link:        https://wa.me/{phone}");
+            }
+        }
+    } else {
+        println!("Credentials: not found");
+    }
+
+    println!();
+    if creds_exist {
+        println!("To start the bridge: openpista whatsapp start");
+        println!("To re-pair (new QR): openpista whatsapp setup");
+    } else {
+        println!("Run `openpista whatsapp setup` to pair via QR code.");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(test))]
+/// Starts the WhatsApp bridge in foreground mode as an AI bot.
+async fn cmd_whatsapp_start(config: Config) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::signal;
+
+    println!("WhatsApp Bridge");
+    println!("===============");
+    println!();
+    println!("\u{1F4A1} Tip: If you have trouble connecting, try disabling your VPN first.");
+    println!("     VPN can block WhatsApp Web connections.");
+    println!();
+
+    // Check if a model is configured
+    let effective_model = config.agent.effective_model().to_string();
+    if effective_model.is_empty() || config.agent.model.is_empty() {
+        println!(
+            "\u{26a0} No model configured. WhatsApp needs an LLM model to respond to messages."
+        );
+        println!(
+            "  Current: provider={}, model={}",
+            config.agent.provider.name(),
+            if effective_model.is_empty() {
+                "(none)"
+            } else {
+                &effective_model
+            }
+        );
+        println!();
+        println!("  Run `openpista model select` to choose a model first.");
+        println!("  Or set it in ~/.openpista/config.toml:");
+        println!("    [agent]");
+        println!("    provider = \"anthropic\"");
+        println!("    model = \"claude-sonnet-4-6\"");
+        println!();
+        print!("  Continue anyway? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+        println!();
+    }
+
+    // Check prerequisites: Node.js
+    let node_ok = tokio::process::Command::new("node")
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_ok {
+        anyhow::bail!(
+            "Node.js is required for the WhatsApp bridge. Install it from https://nodejs.org/"
+        );
+    }
+
+    // Check bridge deps
+    if !std::path::Path::new("whatsapp-bridge/node_modules").exists() {
+        anyhow::bail!("Bridge dependencies not installed. Run `openpista whatsapp setup` first.");
+    }
+
+    // Check credentials exist
+    let session_dir = &config.channels.whatsapp.session_dir;
+    let creds_path = format!("{session_dir}/auth/creds.json");
+    if !std::path::Path::new(&creds_path).exists() {
+        anyhow::bail!(
+            "No WhatsApp session found. Run `openpista whatsapp setup` first to pair via QR code."
+        );
+    }
+
+    // Build agent runtime
+    let runtime = build_runtime(&config).await?;
+    let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
+
+    // Spawn bridge
+    let bridge_path = config
+        .channels
+        .whatsapp
+        .bridge_path
+        .clone()
+        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+
+    println!("Starting bridge...");
+    println!("Session : {session_dir}");
+    println!("Provider: {}", config.agent.provider.name());
+    println!("Model   : {effective_model}");
+    println!();
+
+    let mut child = tokio::process::Command::new("node")
+        .arg(&bridge_path)
+        .arg(session_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("bridge stdout");
+    let stderr = child.stderr.take().expect("bridge stderr");
+    let stdin = child.stdin.take().expect("bridge stdin");
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+    // Drain stderr in background — CRITICAL: without this, pino log writes
+    // block the Node.js event loop once the pipe buffer fills, causing the
+    // bridge to silently drop all incoming WhatsApp messages.
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut err_lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(err_line)) = err_lines.next_line().await {
+            tracing::debug!(target: "whatsapp_bridge", "{}", err_line);
+        }
+    });
+    // Shared stdin for writing responses back to bridge
+    let stdin_shared = Arc::new(tokio::sync::Mutex::new(stdin));
+
+    // Main event loop
+    let shutdown_result = loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
+                            match event {
+                                channels::whatsapp::BridgeEvent::Qr { data } => {
+                                    if let Some(qr_text) = tui::event::render_qr_text(&data) {
+                                        println!("{qr_text}");
+                                    }
+                                    println!("Session expired. Scan QR code to re-pair.");
+                                    println!();
+                                }
+                                channels::whatsapp::BridgeEvent::Connected { phone, name } => {
+                                    let display = name.unwrap_or_default();
+                                    println!("Connected: {phone} {display}");
+                                    println!("Bot is running. Listening for messages... (Ctrl+C to stop)");
+                                    println!();
+                                }
+                                channels::whatsapp::BridgeEvent::Message { from, text, .. } => {
+                                    println!("[IN]  {from}: {text}");
+
+                                    // Process through AI agent
+                                    let runtime = runtime.clone();
+                                    let skill_loader = skill_loader.clone();
+                                    let stdin = stdin_shared.clone();
+                                    let from_clone = from.clone();
+                                    tokio::spawn(async move {
+                                        let channel_id = ChannelId::new("whatsapp", &from_clone);
+                                        let session_id =
+                                            SessionId::from(format!("whatsapp:{from_clone}"));
+                                        let skills_ctx = skill_loader.load_context().await;
+                                        let result = runtime
+                                            .process(
+                                                &channel_id,
+                                                &session_id,
+                                                &text,
+                                                Some(&skills_ctx),
+                                            )
+                                            .await;
+
+                                        let (reply_text, token_info) = match result {
+                                            Ok((text, usage)) => (text, format!(" | tokens: {} in / {} out", usage.prompt_tokens, usage.completion_tokens)),
+                                            Err(e) => (format!("Error: {e}"), String::new()),
+                                        };
+
+                                        println!("[OUT] {from_clone}: {reply_text}{token_info}");
+
+                                        // Send response back via bridge
+                                        let jid = if from_clone.contains('@') {
+                                            from_clone.clone()
+                                        } else {
+                                            format!("{from_clone}@s.whatsapp.net")
+                                        };
+                                        let cmd = serde_json::json!({
+                                            "type": "send",
+                                            "to": jid,
+                                            "text": reply_text
+                                        });
+                                        let line = format!("{}\n", cmd);
+                                        let mut guard = stdin.lock().await;
+                                        let _ = guard.write_all(line.as_bytes()).await;
+                                        let _ = guard.flush().await;
+                                    });
+                                }
+                                channels::whatsapp::BridgeEvent::Disconnected { reason } => {
+                                    let reason = reason.unwrap_or_else(|| "unknown".to_string());
+                                    if reason == "logged out" {
+                                        eprintln!("Session logged out. Run `openpista whatsapp setup` to re-pair.");
+                                        break Ok(());
+                                    }
+                                    eprintln!("Disconnected: {reason} (bridge reconnecting...)");
+                                }
+                                channels::whatsapp::BridgeEvent::Error { message } => {
+                                    eprintln!("Bridge error: {message}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        eprintln!("Bridge process exited.");
+                        break Ok(());
+                    }
+                    Err(e) => {
+                        break Err(anyhow::anyhow!("Error reading bridge output: {e}"));
+                    }
+                }
+            }
+            _ = signal::ctrl_c() => {
+                println!();
+                println!("Shutting down gracefully...");
+                break Ok(());
+            }
+        }
+    };
+
+    // Graceful shutdown
+    {
+        let cmd = serde_json::json!({"type": "shutdown"});
+        let line = format!("{}\n", cmd);
+        let mut guard = stdin_shared.lock().await;
+        let _ = guard.write_all(line.as_bytes()).await;
+        let _ = guard.flush().await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = child.kill().await;
+        }
+    }
+
+    shutdown_result
+}
+
+#[cfg(not(test))]
+/// Send a single message to a WhatsApp number and exit.
+async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    if message.trim().is_empty() {
+        anyhow::bail!("Message cannot be empty.");
+    }
+
+    // Check prerequisites
+    let node_ok = tokio::process::Command::new("node")
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_ok {
+        anyhow::bail!("Node.js is required. Install from https://nodejs.org/");
+    }
+
+    let session_dir = &config.channels.whatsapp.session_dir;
+    let creds_path = format!("{session_dir}/auth/creds.json");
+    if !std::path::Path::new(&creds_path).exists() {
+        anyhow::bail!("No WhatsApp session. Run `openpista whatsapp setup` first.");
+    }
+
+    let bridge_path = config
+        .channels
+        .whatsapp
+        .bridge_path
+        .clone()
+        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+
+    // Spawn bridge
+    let mut child = tokio::process::Command::new("node")
+        .arg(&bridge_path)
+        .arg(session_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("bridge stdout");
+    let mut stdin = child.stdin.take().expect("bridge stdin");
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = reader.lines();
+
+    println!("Connecting to WhatsApp...");
+
+    // Wait for connection, then send message
+    let result = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
+                    match event {
+                        channels::whatsapp::BridgeEvent::Connected { .. } => {
+                            // Connected! Send the message
+                            let jid = if number.contains('@') {
+                                number.clone()
+                            } else {
+                                format!("{number}@s.whatsapp.net")
+                            };
+                            let cmd = serde_json::json!({
+                                "type": "send",
+                                "to": jid,
+                                "text": message
+                            });
+                            let json_line = format!("{}\n", cmd);
+                            stdin.write_all(json_line.as_bytes()).await?;
+                            stdin.flush().await?;
+                            println!("Message sent to {number}: {message}");
+
+                            // Brief pause to ensure message is delivered
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            break Ok(());
+                        }
+                        channels::whatsapp::BridgeEvent::Disconnected { reason } => {
+                            let r = reason.unwrap_or_else(|| "unknown".to_string());
+                            if r == "logged out" {
+                                break Err(anyhow::anyhow!(
+                                    "Session logged out. Run `openpista whatsapp setup` to re-pair."
+                                ));
+                            }
+                            // Transient — keep waiting
+                        }
+                        channels::whatsapp::BridgeEvent::Error { message } => {
+                            break Err(anyhow::anyhow!("Bridge error: {message}"));
+                        }
+                        _ => {} // QR, Message — ignore
+                    }
+                }
+            }
+            Ok(Ok(None)) => {
+                break Err(anyhow::anyhow!("Bridge exited before connecting."));
+            }
+            Ok(Err(e)) => {
+                break Err(anyhow::anyhow!("Bridge read error: {e}"));
+            }
+            Err(_) => {
+                break Err(anyhow::anyhow!("Timeout waiting for WhatsApp connection."));
+            }
+        }
+    };
+
+    // Graceful shutdown
+    let shutdown_cmd = serde_json::json!({"type": "shutdown"});
+    let _ = stdin
+        .write_all(format!("{}\n", shutdown_cmd).as_bytes())
+        .await;
+    let _ = stdin.flush().await;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = child.kill().await;
+        }
+    }
+
+    result
 }
 
 #[cfg(not(test))]
@@ -1004,7 +1503,7 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
         .await;
 
     match result {
-        Ok(text) => {
+        Ok((text, _usage)) => {
             println!("{text}");
         }
         Err(e) => {
@@ -1012,6 +1511,233 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     }
+
+    Ok(())
+}
+
+#[cfg(not(test))]
+/// Runs the interactive terminal model picker and returns the selection.
+/// Uses an alternate screen with RAII cleanup, returning the result so that
+/// printing happens after the terminal is restored.
+fn run_model_picker(
+    entries: &[model_catalog::ModelCatalogEntry],
+    current_model: &str,
+    current_provider: &str,
+) -> anyhow::Result<Option<model_catalog::ModelCatalogEntry>> {
+    use crossterm::{
+        cursor::{Hide, MoveTo, Show},
+        event::{Event, KeyCode, KeyEventKind, KeyModifiers, read},
+        execute,
+        terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode},
+    };
+    use std::io::{Write, stdout};
+
+    // RAII guard for terminal cleanup
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+        }
+    }
+
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, Hide)?;
+    let _guard = Guard;
+
+    let mut query = String::new();
+    let mut cursor: usize = 0;
+
+    loop {
+        // Filter entries by query
+        let visible: Vec<&model_catalog::ModelCatalogEntry> = entries
+            .iter()
+            .filter(|e| {
+                if query.is_empty() {
+                    return true;
+                }
+                let q = query.to_lowercase();
+                e.id.to_lowercase().contains(&q) || e.provider.to_lowercase().contains(&q)
+            })
+            .collect();
+
+        cursor = cursor.min(visible.len().saturating_sub(1));
+
+        // Render
+        let mut out = stdout();
+        execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("Select Model".to_string());
+        lines.push(String::new());
+        lines.push(format!("Search: {query}"));
+        lines.push(format!(
+            "Current: {} [{}]",
+            if current_model.is_empty() {
+                "(none)"
+            } else {
+                current_model
+            },
+            current_provider
+        ));
+        lines.push(String::new());
+
+        if visible.is_empty() {
+            lines.push(format!("No matches for '{query}'."));
+        } else {
+            // Get terminal height to limit visible entries
+            let term_height = crossterm::terminal::size()
+                .map(|(_, h)| h as usize)
+                .unwrap_or(24);
+            let max_visible = term_height.saturating_sub(9);
+
+            // Calculate scroll window
+            let scroll_start = if cursor >= max_visible {
+                cursor - max_visible + 1
+            } else {
+                0
+            };
+            let scroll_end = (scroll_start + max_visible).min(visible.len());
+
+            for (idx, entry) in visible
+                .iter()
+                .enumerate()
+                .skip(scroll_start)
+                .take(scroll_end - scroll_start)
+            {
+                let marker = if idx == cursor { ">" } else { " " };
+                let star = if entry.recommended_for_coding {
+                    "\u{2605}"
+                } else {
+                    " "
+                };
+                let current_tag = if entry.id == current_model && entry.provider == current_provider
+                {
+                    " (current)"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "{marker} {star} {:<30} [{provider}]{current_tag}",
+                    entry.id,
+                    provider = entry.provider
+                ));
+            }
+            if scroll_end < visible.len() {
+                lines.push(format!("  ... and {} more", visible.len() - scroll_end));
+            }
+        }
+
+        lines.push(String::new());
+        lines.push(format!(
+            "{} model(s) | Up/Down move | Enter select | Type search | Esc cancel",
+            visible.len()
+        ));
+
+        let width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+        for line in &lines {
+            let display: String = line.chars().take(width).collect();
+            out.write_all(display.as_bytes())?;
+            out.write_all(b"\r\n")?;
+        }
+        out.flush()?;
+
+        // Handle input
+        let event = read()?;
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
+                return Ok(None);
+            }
+            (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                cursor = cursor.saturating_sub(1);
+            }
+            (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                if !visible.is_empty() {
+                    cursor = (cursor + 1).min(visible.len().saturating_sub(1));
+                }
+            }
+            (_, KeyCode::Backspace) => {
+                query.pop();
+                cursor = 0;
+            }
+            (_, KeyCode::Enter) => {
+                if visible.is_empty() {
+                    continue;
+                }
+                return Ok(Some(visible[cursor].clone()));
+            }
+            (_, KeyCode::Char(c)) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                query.push(c);
+                cursor = 0;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(not(test))]
+/// Interactive model selector: loads catalog, runs picker, saves selection.
+async fn cmd_model_select(mut config: Config) -> anyhow::Result<()> {
+    println!("Loading model catalog...");
+    let providers = collect_providers_for_test(&config).await;
+    let catalog = model_catalog::load_catalog_multi(&providers).await;
+
+    // Filter to available models, sort: recommended first, then by provider, then by id
+    let mut entries: Vec<model_catalog::ModelCatalogEntry> = catalog
+        .entries
+        .into_iter()
+        .filter(|e| e.available)
+        .collect();
+    entries.sort_by(|a, b| {
+        b.recommended_for_coding
+            .cmp(&a.recommended_for_coding)
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    if entries.is_empty() {
+        anyhow::bail!(
+            "No models available. Check your provider credentials with `openpista auth status`."
+        );
+    }
+
+    let current_model = config.agent.effective_model().to_string();
+    let current_provider = config.agent.provider.name().to_string();
+
+    // Run interactive picker (returns after terminal is restored)
+    let selected = run_model_picker(&entries, &current_model, &current_provider)?;
+
+    let Some(selected) = selected else {
+        println!("Model selection cancelled.");
+        return Ok(());
+    };
+
+    // Save to config
+    if let Ok(preset) = selected.provider.parse::<config::ProviderPreset>() {
+        config.agent.provider = preset;
+    }
+    config.agent.model = selected.id.clone();
+
+    if let Err(e) = config.save() {
+        eprintln!("Warning: failed to save config: {e}");
+    } else {
+        println!("Model set: {} [{}]", selected.id, selected.provider);
+        println!("Saved to ~/.openpista/config.toml");
+    }
+
+    // Also save to TUI state for consistency
+    let tui_state = config::TuiState {
+        last_model: selected.id,
+        last_provider: selected.provider,
+    };
+    let _ = tui_state.save();
 
     Ok(())
 }
@@ -1120,7 +1846,7 @@ async fn cmd_model_test(
     let elapsed = start.elapsed();
 
     match result {
-        Ok(text) => {
+        Ok((text, _usage)) => {
             println!("OK ({:.1}s)\n{text}", elapsed.as_secs_f64());
             info!(model = %model_name, elapsed_ms = %elapsed.as_millis(), "Model test passed");
         }
@@ -1181,7 +1907,7 @@ async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<(
         let elapsed = start.elapsed();
 
         match result {
-            Ok(text) => {
+            Ok((text, _usage)) => {
                 let preview: String = text.chars().take(50).collect();
                 let preview = preview.replace('\n', " ");
                 println!(
@@ -1450,10 +2176,12 @@ fn should_send_web_response(channel_id: &ChannelId) -> bool {
 /// Builds an outbound response from runtime result.
 fn build_agent_response(
     event: &ChannelEvent,
-    result: Result<String, proto::Error>,
+    result: Result<(String, agent::TokenUsage), proto::Error>,
 ) -> AgentResponse {
     match result {
-        Ok(text) => AgentResponse::new(event.channel_id.clone(), event.session_id.clone(), text),
+        Ok((text, _usage)) => {
+            AgentResponse::new(event.channel_id.clone(), event.session_id.clone(), text)
+        }
         Err(e) => AgentResponse::error(
             event.channel_id.clone(),
             event.session_id.clone(),
@@ -1491,7 +2219,7 @@ mod tests {
     #[test]
     fn should_send_whatsapp_response_checks_prefix() {
         assert!(should_send_whatsapp_response(&ChannelId::from(
-            "whatsapp:123"
+            "whatsapp:+15550001234"
         )));
         assert!(!should_send_whatsapp_response(&ChannelId::from(
             "cli:local"
@@ -1500,14 +2228,17 @@ mod tests {
 
     #[test]
     fn should_send_web_response_checks_prefix() {
-        assert!(should_send_web_response(&ChannelId::from("web:conn1")));
+        assert!(should_send_web_response(&ChannelId::from("web:browser")));
         assert!(!should_send_web_response(&ChannelId::from("telegram:123")));
     }
 
     #[test]
     fn build_agent_response_maps_success_and_error() {
         let event = ChannelEvent::new(ChannelId::from("cli:local"), SessionId::from("s1"), "msg");
-        let ok = build_agent_response(&event, Ok("done".to_string()));
+        let ok = build_agent_response(
+            &event,
+            Ok(("done".to_string(), agent::TokenUsage::default())),
+        );
         assert_eq!(ok.content, "done");
         assert!(!ok.is_error);
 
