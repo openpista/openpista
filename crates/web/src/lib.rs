@@ -115,8 +115,7 @@ mod tests {
             user_message: "hello world".to_string(),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
-        assert!(json.contains("user_message"));
-        assert!(json.contains("hello world"));
+        assert_eq!(json, r#"{"user_message":"hello world"}"#);
     }
 
     #[test]
@@ -125,7 +124,7 @@ mod tests {
             user_message: "hello \"quotes\" & <angles>".to_string(),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
-        assert!(json.contains("hello"));
+        assert_eq!(json, r#"{"user_message":"hello \"quotes\" & <angles>"}"#);
         // Verify it round-trips via serde_json
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(
@@ -140,17 +139,20 @@ mod tests {
             user_message: String::new(),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
-        assert!(json.contains("\"user_message\":\"\""));
+        assert_eq!(json, r#"{"user_message":""}"#);
     }
 
     // Tests below require wasm_bindgen types that only work on wasm32 targets.
     // Client::new, send, is_connected, connect, disconnect use JsValue/WebSocket
     // which panic in native test runners.
     #[cfg(target_arch = "wasm32")]
-    mod wasm_only {
+    pub mod wasm_only {
         use super::*;
+        use wasm_bindgen_test::*;
 
-        #[test]
+        wasm_bindgen_test_configure!(run_in_browser);
+
+        #[wasm_bindgen_test]
         fn client_new_stores_url_and_token() {
             let client = Client::new("ws://localhost:3210/ws", "mytoken");
             assert_eq!(client.url, "ws://localhost:3210/ws");
@@ -158,13 +160,13 @@ mod tests {
             assert!(client.ws.is_none());
         }
 
-        #[test]
+        #[wasm_bindgen_test]
         fn client_new_empty_token() {
             let client = Client::new("ws://localhost:3210/ws", "");
             assert_eq!(client.token, "");
         }
 
-        #[test]
+        #[wasm_bindgen_test]
         fn client_is_connected_returns_false_when_no_ws() {
             let client = Client::new("ws://localhost:3210/ws", "tok");
             assert!(
@@ -173,7 +175,7 @@ mod tests {
             );
         }
 
-        #[test]
+        #[wasm_bindgen_test]
         fn client_send_returns_error_when_not_connected() {
             let client = Client::new("ws://localhost:3210/ws", "tok");
             let err = client

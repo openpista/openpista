@@ -467,8 +467,8 @@ mod tests {
     #[test]
     fn default_constants_are_reasonable() {
         assert_eq!(DEFAULT_TIMEOUT_SECS, 30);
-        const { assert!(WASM_MEMORY_LIMIT_BYTES > 0) };
-        const { assert!(WASM_FUEL_LIMIT > 0) };
-        const { assert!(PIPE_CAPACITY_BYTES > 0) };
+        assert!(WASM_MEMORY_LIMIT_BYTES > 0);
+        assert!(WASM_FUEL_LIMIT > 0);
+        assert!(PIPE_CAPACITY_BYTES > 0);
     }
 }

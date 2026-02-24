@@ -81,7 +81,26 @@ const msgRetryCounterCache = {
 let currentSock = null;
 let shuttingDown = false;
 let connectedPhone = ""; // own phone number, set on connect — used to resolve @lid reply JIDs
-const sentMessageIds = new Set(); // Track bot-sent message IDs to prevent loops
+const sentMessageIds = new Map(); // msgId -> sentAtMs, used to prevent loops with TTL eviction
+const SENT_MESSAGE_ID_TTL_MS = Math.max(
+  5 * 60_000,
+  Number(process.env.SENT_MESSAGE_ID_TTL_MS || 15 * 60_000)
+);
+
+function purgeExpiredSentMessageIds(now = Date.now()) {
+  for (const [id, sentAt] of sentMessageIds.entries()) {
+    if (now - sentAt > SENT_MESSAGE_ID_TTL_MS) {
+      sentMessageIds.delete(id);
+    }
+  }
+}
+
+const sentMessageCleanupTimer = setInterval(() => {
+  purgeExpiredSentMessageIds();
+}, 60_000);
+if (typeof sentMessageCleanupTimer.unref === "function") {
+  sentMessageCleanupTimer.unref();
+}
 
 // Message store for WhatsApp retry mechanism (prevents "암호화 대기중").
 // When the phone fails to decrypt a message it sends a retry request;
@@ -125,7 +144,7 @@ rl.on("line", async (line) => {
         const sent = await currentSock.sendMessage(jid, { text: cmd.text });
         // Track sent message ID to prevent self-chat infinite loops
         if (sent?.key?.id) {
-          sentMessageIds.add(sent.key.id);
+          sentMessageIds.set(sent.key.id, Date.now());
           // Also cache in sentMsgStore for phone retry / re-encryption
           if (sent.message) {
             sentMsgStore.set(sent.key.id, sent.message);
@@ -280,9 +299,10 @@ async function start() {
       return;
     }
     // Resolve self JID for self-chat detection
-    const selfPhone = sock.user?.id?.split(":")[0] || sock.user?.id?.split("@")[0] || "";
+    const selfId = sock.user?.id || sock.authState?.creds?.me?.id || "";
+    const selfPhone = selfId.split(":")[0] || selfId.split("@")[0] || "";
     const selfJid = selfPhone ? `${selfPhone}@s.whatsapp.net` : "";
-    const selfLid = sock.user?.id || "";
+    const selfLid = sock.user?.lid || sock.authState?.creds?.me?.lid || "";
     // Cache ALL messages for retry mechanism (must run before any filtering).
     // When the phone fails to decrypt it sends a retry; getMessage() returns
     // the cached proto so Baileys can re-encrypt and re-deliver.
@@ -298,6 +318,7 @@ async function start() {
       if (msg.key.remoteJid === "status@broadcast") continue;
       if (msg.key.remoteJid?.endsWith("@broadcast")) continue;
       if (msg.message?.reactionMessage) continue;
+      purgeExpiredSentMessageIds();
       // Skip bot's own sent messages (prevent infinite loops)
       if (sentMessageIds.has(msg.key.id)) {
         sentMessageIds.delete(msg.key.id);
@@ -305,13 +326,14 @@ async function start() {
       }
       const remoteJid = msg.key.remoteJid || "";
       const isFromMe = Boolean(msg.key.fromMe);
-      // Newer WhatsApp versions use @lid (Linked ID) for self-chat
-      // instead of @s.whatsapp.net — must check both formats
+      const normalizedRemote = remoteJid.split(":")[0];
+      const normalizedSelfLid = selfLid.split(":")[0];
+      // Newer WhatsApp versions may use @lid for self-chat.
+      // Match exact self identifiers instead of broad suffix checks.
       const isSelfChat = isFromMe && (
         remoteJid === selfJid ||
-        remoteJid === selfLid ||
-        remoteJid.split("@")[0] === selfPhone ||
-        remoteJid.endsWith("@lid")
+        (selfLid && (remoteJid === selfLid || normalizedRemote === normalizedSelfLid)) ||
+        (selfPhone && remoteJid.split("@")[0] === selfPhone)
       );
       // fromMe but NOT self-chat => outbound sync, skip
       if (isFromMe && !isSelfChat) {
