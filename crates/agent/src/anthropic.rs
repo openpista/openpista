@@ -176,9 +176,12 @@ impl LlmProvider for AnthropicProvider {
             tools = %anthropic_req.tools.len(),
             "Sending request to Anthropic"
         );
+        let request_body_len = serde_json::to_string(&anthropic_req)
+            .map(|json| json.len())
+            .unwrap_or_default();
         trace!(
-            "Anthropic request body: {}",
-            serde_json::to_string(&anthropic_req).unwrap_or_default()
+            request_body_len,
+            "Anthropic request body prepared (content omitted)"
         );
 
         let mut req_builder = self
@@ -236,8 +239,8 @@ impl LlmProvider for AnthropicProvider {
         }
 
         trace!(
-            "Anthropic response body: {}",
-            body.chars().take(2000).collect::<String>()
+            response_body_len = body.len(),
+            "Anthropic response body received (content omitted)"
         );
 
         let anthropic_resp: AnthropicResponse = serde_json::from_str(&body).map_err(|e| {
