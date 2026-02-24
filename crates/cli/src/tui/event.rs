@@ -314,6 +314,84 @@ fn format_whatsapp_status(config: &Config) -> String {
     lines.join("\n")
 }
 
+/// Parsed sub-command for the `/telegram` slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramCommand {
+    /// `/telegram` or `/telegram setup` — show setup instructions.
+    Setup,
+    /// `/telegram start` — start the Telegram adapter.
+    Start,
+    /// `/telegram status` — show current Telegram configuration.
+    Status,
+    /// Invalid sub-command.
+    Invalid(String),
+}
+
+fn parse_telegram_command(raw: &str) -> Option<TelegramCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/telegram" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("setup") => Some(TelegramCommand::Setup),
+        Some("start") => Some(TelegramCommand::Start),
+        Some("status") => Some(TelegramCommand::Status),
+        Some(_) => Some(TelegramCommand::Invalid(
+            "Usage: /telegram [setup|start|status]".to_string(),
+        )),
+    }
+}
+
+fn format_telegram_status(config: &Config) -> String {
+    let tg = &config.channels.telegram;
+    let mut lines = vec!["Telegram Configuration Status".to_string(), "".to_string()];
+    lines.push(format!(
+        "  Enabled:     {}",
+        if tg.enabled { "Yes" } else { "No" }
+    ));
+    lines.push(format!(
+        "  Token:       {}",
+        if tg.token.is_empty() {
+            "(not set)"
+        } else {
+            "(set)"
+        }
+    ));
+    lines.push("".to_string());
+    if tg.enabled && !tg.token.is_empty() {
+        lines.push("  Status: Ready".to_string());
+    } else if !tg.token.is_empty() {
+        lines.push("  Status: Token set but adapter disabled".to_string());
+        lines.push(
+            "  → Set `enabled = true` in [channels.telegram] or run `openpista start`".to_string(),
+        );
+    } else {
+        lines.push("  Status: Not configured".to_string());
+        lines.push("  → Run /telegram setup for instructions".to_string());
+    }
+    lines.join("\n")
+}
+
+fn format_telegram_setup_guide() -> String {
+    let lines = vec![
+        "Telegram Bot Setup Guide".to_string(),
+        "".to_string(),
+        "  1. Open Telegram and message @BotFather".to_string(),
+        "  2. Send /newbot and follow the prompts".to_string(),
+        "  3. Copy the bot token (e.g. 123456:ABC-DEF...)".to_string(),
+        "  4. Add to config.toml:".to_string(),
+        "".to_string(),
+        "     [channels.telegram]".to_string(),
+        "     enabled = true".to_string(),
+        "     token = \"YOUR_BOT_TOKEN\"".to_string(),
+        "".to_string(),
+        "  Or set the environment variable:".to_string(),
+        "     TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN".to_string(),
+        "".to_string(),
+        "  5. Run `openpista start` to launch the daemon with Telegram enabled".to_string(),
+    ];
+    lines.join("\n")
+}
 
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -901,6 +979,36 @@ pub async fn run_tui(
                                             "Web adapter is not enabled. Set [channels.web] enabled = true in config.toml"
                                                 .to_string(),
                                         ));
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
+                                if let Some(tg_cmd) = parse_telegram_command(&message) {
+                                    match tg_cmd {
+                                        TelegramCommand::Setup => {
+                                            let guide = format_telegram_setup_guide();
+                                            app.update(Action::PushAssistantMessage(guide));
+                                        }
+                                        TelegramCommand::Start => {
+                                            let tg = &config.channels.telegram;
+                                            if tg.enabled && !tg.token.is_empty() {
+                                                app.update(Action::PushAssistantMessage(
+                                                    "Telegram adapter is configured. Run `openpista start` to launch the daemon with all enabled channels.".to_string(),
+                                                ));
+                                            } else {
+                                                app.update(Action::PushError(
+                                                    "Telegram is not configured. Run /telegram setup for instructions.".to_string(),
+                                                ));
+                                            }
+                                        }
+                                        TelegramCommand::Status => {
+                                            let status = format_telegram_status(&config);
+                                            app.update(Action::PushAssistantMessage(status));
+                                        }
+                                        TelegramCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
                                     }
                                     app.update(Action::ScrollToBottom);
                                     continue;
@@ -2511,5 +2619,71 @@ mod tests {
         for (name, _url, _key) in &providers {
             assert!(!name.is_empty(), "provider name must not be empty");
         }
+    }
+
+    #[test]
+    fn parse_telegram_command_supports_all_variants() {
+        assert_eq!(
+            parse_telegram_command("/telegram"),
+            Some(TelegramCommand::Setup)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram setup"),
+            Some(TelegramCommand::Setup)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram start"),
+            Some(TelegramCommand::Start)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram status"),
+            Some(TelegramCommand::Status)
+        );
+        assert!(matches!(
+            parse_telegram_command("/telegram foo"),
+            Some(TelegramCommand::Invalid(_))
+        ));
+        assert_eq!(parse_telegram_command("/model"), None);
+        assert_eq!(parse_telegram_command("/help"), None);
+    }
+
+    #[test]
+    fn format_telegram_status_not_configured() {
+        let config = Config::default();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("Telegram Configuration Status"));
+        assert!(status.contains("Enabled:"));
+        assert!(status.contains("(not set)"));
+        assert!(status.contains("Not configured"));
+    }
+
+    #[test]
+    fn format_telegram_status_configured() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("Yes"));
+        assert!(status.contains("(set)"));
+        assert!(status.contains("Ready"));
+    }
+
+    #[test]
+    fn format_telegram_status_token_but_disabled() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = false;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("No"));
+        assert!(status.contains("Token set but adapter disabled"));
+    }
+
+    #[test]
+    fn format_telegram_setup_guide_content() {
+        let guide = format_telegram_setup_guide();
+        assert!(guide.contains("@BotFather"));
+        assert!(guide.contains("/newbot"));
+        assert!(guide.contains("[channels.telegram]"));
+        assert!(guide.contains("TELEGRAM_BOT_TOKEN"));
     }
 }

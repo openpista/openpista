@@ -2706,6 +2706,15 @@ mod tests {
         assert!(!should_send_cli_response(&ChannelId::from("telegram:123")));
     }
 
+    fn should_send_whatsapp_response_checks_prefix() {
+        assert!(should_send_whatsapp_response(&ChannelId::from(
+            "whatsapp:123"
+        )));
+        assert!(!should_send_whatsapp_response(&ChannelId::from(
+            "cli:local"
+        )));
+    }
+
     #[test]
     fn should_send_web_response_checks_prefix() {
         assert!(should_send_web_response(&ChannelId::from("web:abc")));
