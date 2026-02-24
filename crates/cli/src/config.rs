@@ -450,8 +450,10 @@ pub struct Config {
     pub skills: SkillsConfig,
 }
 
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 25;
+
 fn default_max_tool_rounds() -> usize {
-    30
+    DEFAULT_MAX_TOOL_ROUNDS
 }
 
 fn default_web_shared_session_id() -> String {
@@ -543,7 +545,7 @@ impl Default for AgentConfig {
             provider: ProviderPreset::default(),
             model: String::new(),
             api_key: String::new(),
-            max_tool_rounds: 30,
+            max_tool_rounds: default_max_tool_rounds(),
             base_url: None,
             oauth_client_id: String::new(),
         }
@@ -1826,5 +1828,82 @@ static_dir = "/tmp/web"
     #[test]
     fn openrouter_default_model_is_set() {
         assert_eq!(ProviderPreset::OpenRouter.default_model(), "openai/gpt-4o");
+    }
+
+    #[test]
+    fn load_applies_whatsapp_env_overrides() {
+        with_locked_env(|| {
+            set_env_var("WHATSAPP_SESSION_DIR", "/tmp/test-wa-session");
+            set_env_var("WHATSAPP_BRIDGE_PATH", "/usr/local/bin/bridge.js");
+            let cfg = Config::load(None).expect("config load");
+            assert!(cfg.channels.whatsapp.enabled);
+            assert_eq!(cfg.channels.whatsapp.session_dir, "/tmp/test-wa-session");
+            assert_eq!(
+                cfg.channels.whatsapp.bridge_path,
+                Some("/usr/local/bin/bridge.js".to_string())
+            );
+            remove_env_var("WHATSAPP_SESSION_DIR");
+            remove_env_var("WHATSAPP_BRIDGE_PATH");
+        });
+    }
+
+    #[test]
+    fn load_applies_web_env_overrides() {
+        with_locked_env(|| {
+            set_env_var("openpista_WEB_TOKEN", "test-web-secret");
+            set_env_var("openpista_WEB_PORT", "8080");
+            let cfg = Config::load(None).expect("config load");
+            assert!(cfg.channels.web.enabled);
+            assert_eq!(cfg.channels.web.token, "test-web-secret");
+            assert_eq!(cfg.channels.web.port, 8080);
+            remove_env_var("openpista_WEB_TOKEN");
+            remove_env_var("openpista_WEB_PORT");
+        });
+    }
+
+    #[test]
+    fn config_save_writes_toml_file() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            set_env_var("HOME", tmp.path().to_str().unwrap());
+
+            let cfg = Config::default();
+            cfg.save().expect("save should succeed");
+
+            let saved_path = tmp.path().join(".openpista").join("config.toml");
+            assert!(saved_path.exists());
+            let content = std::fs::read_to_string(&saved_path).expect("read");
+            assert!(content.contains("[agent]"));
+
+            match original_home {
+                Some(home) => set_env_var("HOME", &home),
+                None => remove_env_var("HOME"),
+            }
+        });
+    }
+
+    #[test]
+    fn tui_state_save_and_load_via_default_path() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            set_env_var("HOME", tmp.path().to_str().unwrap());
+
+            let state = TuiState {
+                last_model: "test-model".to_string(),
+                last_provider: "test-provider".to_string(),
+            };
+            state.save().expect("save");
+
+            let loaded = TuiState::load();
+            assert_eq!(loaded.last_model, "test-model");
+            assert_eq!(loaded.last_provider, "test-provider");
+
+            match original_home {
+                Some(home) => set_env_var("HOME", &home),
+                None => remove_env_var("HOME"),
+            }
+        });
     }
 }
