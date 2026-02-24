@@ -67,6 +67,179 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Error responses clearly surfaced to the user
  - [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
 
+### Telegram Channel Adapter
+
+> Telegram uses the teloxide framework with long-polling for message delivery. The adapter supports MarkdownV2 formatting, automatic message splitting for long responses, and an optional user whitelist for security — critical since openpista has OS-level tool access.
+
+- [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
+- [x] Stable session mapping: `telegram:{chat_id}` channel ID and session routing
+- [x] `TelegramConfig` — `[channels.telegram]` config section: `enabled`, `token`, `allowed_users`
+- [x] Environment variable overrides: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USERS`
+- [x] Text message parsing and `ChannelEvent` construction
+- [x] Response routing: Telegram responses → Bot API `send_message`
+- [x] Error responses clearly surfaced to the user (❌ prefix, consistent with other adapters)
+- [x] Typing indicator (`ChatAction::Typing`) sent on message receipt
+- [x] MarkdownV2 formatting with automatic plain-text fallback on parse failure
+- [x] Long message splitting (4096 char limit) — splits on paragraph, line, then hard boundary
+- [x] User whitelist security: `allowed_users` restricts who can interact (empty = allow all)
+- [x] Unit tests: session ID, chat ID parsing, response formatting, message splitting, MarkdownV2 escaping, whitelist logic
+
+#### Baseline Pre-requisites
+
+> These foundational enhancements must land before the tasks below — several tasks depend on them.
+
+- [ ] `TelegramConfig` expansion: `allowed_users: Vec<i64>`, `webhook_url: Option<String>`, `webhook_port: u16`, `webhook_secret: Option<String>`, `confirm_actions: bool`
+- [ ] `TELEGRAM_ALLOWED_USERS` env var parsing (comma-separated `i64` list)
+- [ ] `send_chunked(bot, chat_id, text)` helper: split → try MarkdownV2 → fallback to plain text per chunk
+- [ ] Typing indicator fire-and-forget pattern (log `warn` on error, never propagate)
+
+#### Upcoming Tasks
+
+- [ ] **Bot commands registration** (`/start`, `/help`, `/status`) via `BotCommands` derive
+  - Add `BotCmd` enum with `#[derive(BotCommands, Clone)]` and `rename_rule = "lowercase"`
+  - Call `Bot::set_my_commands::<BotCmd>()` at startup — registers Telegram's "/" popup menu
+  - Add command handler branch to `dptree` via `filter_command::<BotCmd>()` alongside text handler
+  - `/status` calls `bot.get_me()` to display bot username and ID; fetch and store `bot_username: Arc<String>` at startup for reuse in group chat filter
+  - Unit tests: static responses for `/start`, `/help`; `get_me` response for `/status`
+
+- [ ] **Retry logic** with exponential backoff for transient Bot API failures
+  - `send_with_retry<F>(f: F, max_attempts: u32)` generic wrapper around any bot API call
+  - `RequestError::RetryAfter(secs)` → sleep exact duration, then retry
+  - Network/5xx transient errors → exponential backoff starting at 500 ms, doubling, capped at 30 s
+  - Non-retryable (`BadRequest`, `Unauthorized`) propagate immediately without retry
+  - Wrap `send_message` in `send_response`; wrap `send_chat_action` typing call with max 1 retry
+  - Unit tests: mock `RetryAfter` behavior, verify backoff cap
+
+- [ ] **Group chat support**: reply-to-bot filtering, thread-based sessions
+  - `is_message_for_bot(msg, bot_username)` — private chats always pass; groups require reply-to-bot or `@mention` in text
+  - Fetch `bot_username` via `bot.get_me()` once at startup, store as `Arc<String>` (shared with bot commands task)
+  - Thread-aware session ID: `telegram:{chat_id}:{thread_id}` for supergroup forum topics, fall back to `telegram:{chat_id}`
+  - Wire filter as `dptree::filter(move |msg: Message| is_message_for_bot(&msg, &bot_username))`
+  - Unit tests: private vs. group filter, forum thread session ID generation, `@mention` detection
+
+- [ ] **Media message handling**: photo, document, voice, video note forwarding to agent context
+  - Add `dptree` branches for `msg.photo()`, `msg.document()`, `msg.voice()`, `msg.video_note()`
+  - Small files (< 5 MB): `bot.get_file(file_id)` → download via `reqwest` → base64-encode into `ChannelEvent.metadata`
+  - Large files: describe as agent-readable text in `user_message` (filename, MIME type, size in bytes)
+  - Caption forwarded as `user_message`; structured `MediaInfo` JSON stored in `metadata: Option<serde_json::Value>`
+  - Apply whitelist + group bot-mention filter to all media handler branches
+  - Unit tests: `format_media_description` for each variant; base64 encoding round-trip
+
+- [ ] **Rate limiting**: respect Telegram's 30 msg/sec per chat, 20 msg/min to same group
+  - Per-chat `governor::RateLimiter` stored in `DashMap<i64, Arc<RateLimiter<...>>>` on the adapter struct
+  - Private chats: `Quota::per_second(nonzero!(30u32))`; groups (negative `chat_id`): additional `Quota::per_minute(nonzero!(20u32))`
+  - Before each chunk send, acquire permit; if limiter prescribes a wait, `tokio::time::sleep` that duration
+  - Add `governor = "0.6"` to workspace `Cargo.toml` and `crates/channels/Cargo.toml`
+  - Unit tests: group vs. private chat quota selection; rate state isolation across chat IDs
+
+- [ ] **Inline keyboard support**: interactive tool confirmations and menu navigation
+  - `parse_inline_keyboard(text) -> (String, Option<InlineKeyboardMarkup>)` DSL: `[[label|callback_data]]` markers → button rows + cleaned text
+  - `Update::filter_callback_query()` branch in `dptree` → `handle_callback_query` endpoint
+  - `handle_callback_query`: `bot.answer_callback_query(query.id)`, emit `ChannelEvent` with `[callback:{data}]` as `user_message`
+  - `confirm_actions: bool` in `TelegramConfig` gates DSL parsing in `send_response` (default `false`)
+  - Unit tests: DSL parser layout, multi-row buttons, callback event construction
+
+- [ ] **Webhook mode** (`teloxide::dispatching::update_listeners::webhooks`) for production deployments
+  - `TelegramConfig` fields: `webhook_url: Option<String>`, `webhook_port: u16` (default 8443), `webhook_secret: Option<String>`
+  - Env overrides: `TELEGRAM_WEBHOOK_URL`, `TELEGRAM_WEBHOOK_PORT`
+  - Add `webhooks-axum` feature to teloxide in workspace `Cargo.toml`
+  - `run()` branches on `config.webhook_url`: `webhooks::axum(bot, Options::new(addr, url))` vs long-polling fallback
+  - Lifecycle: `set_webhook` on startup, `delete_webhook` on shutdown — allows clean revert to polling
+  - Long-polling remains default; webhook is opt-in via config
+  - Sub-tasks: TLS termination via reverse proxy (nginx/caddy); document deployment pattern in `TELEGRAM.md`
+
+- [ ] **`/telegram status` TUI command** — show bot info, webhook/polling mode, connected chats
+  - Follows `/whatsapp status` pattern in `crates/cli/src/tui/event.rs`
+  - `parse_telegram_command(raw) -> Option<TelegramCommand>` and `format_telegram_status(config) -> String`
+  - Display: enabled, token presence, polling vs. webhook mode, webhook URL, allowed users count
+  - Add `"/telegram"` and `"/telegram status"` entries to `SLASH_COMMANDS` in `app.rs`
+  - Implement after `TelegramConfig` is stabilised (all new fields present)
+
+- [ ] **Integration test**: end-to-end message → `ChannelEvent` → `AgentResponse` → Telegram send flow
+  - Use `Bot::new(token).set_api_url(mock_url)` to redirect HTTP calls to a `wiremock` mock server
+  - Mock endpoints: `getMe`, `setMyCommands`, `sendChatAction`, `sendMessage` with canned JSON responses
+  - Test cases: text → event, media → event with metadata, MarkdownV2 fallback, whitelist rejection, retry on 429, group `@mention` filter
+  - Add `wiremock = "0.6"` as dev-dependency in `crates/channels/Cargo.toml`
+  - Written last when implementation is frozen
+
+#### Implementation Order
+
+```
+Baseline (config expansion → send_chunked → typing indicator)
+    │
+    ├── Bot Commands (S) ── fetch bot_username at startup
+    │       │
+    │       └── Group Chat (M) ── reuse bot_username; update session IDs
+    │               │
+    │               └── Media (M) ── reuse group filter closure
+    │
+    ├── Retry Logic (S) ── wrap send_chunked
+    │       │
+    │       └── Rate Limiting (M) ── wrap retry-wrapped send
+    │               │
+    │               └── Inline Keyboard (M) ── add callback query branch
+    │
+    ├── Webhook Mode (L) ── orthogonal dispatch path (add after group/command tasks)
+    │
+    ├── /telegram status TUI (S) ── once TelegramConfig fields are stable
+    │
+    └── Integration Test (M) ── written last when implementation is frozen
+```
+
+#### Reference Open-Source Projects
+
+> **teloxide ecosystem**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`teloxide`](https://github.com/teloxide/teloxide) | Primary Telegram bot framework for Rust — dialogue system, `dptree` dispatcher, command parsing, inline queries. openpista's adapter is built on this. |
+> | [`teloxide-core`](https://github.com/teloxide/teloxide-core) | Low-level Telegram Bot API bindings — all types, methods, and request builders. Used internally by teloxide. |
+> | [`teloxide-macros`](https://github.com/teloxide/teloxide/tree/master/crates/teloxide-macros) | `#[derive(BotCommands)]` macro — strongly-typed command parsing with auto-generated `bot_commands()` registration vector. Key for bot commands task. |
+> | [`dptree`](https://github.com/teloxide/dptree) | Dependency-injection handler tree — teloxide's message routing engine. Understanding this helps extend the adapter. |
+>
+> **teloxide official examples**
+>
+> | Example | Description |
+> |---------|-------------|
+> | [`dispatching_features.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/dispatching_features.rs) | Advanced `dptree` branching — handles both commands and `CallbackQuery` in one dispatcher. Direct reference for inline keyboard task. |
+> | [`purchase.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/purchase.rs) | Inline keyboard + callback query in a dialogue state machine — shows `InlineKeyboardMarkup`, `answer_callback_query`, and state transitions. |
+> | [`ngrok_ping_pong.rs`](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/ngrok_ping_pong.rs) | Minimal webhook mode example using `webhooks::axum` with an ngrok tunnel — reference for webhook task. |
+> | [teloxide examples](https://github.com/teloxide/teloxide/tree/master/crates/teloxide/examples) | Full collection: dialogues, inline keyboards, webhooks (axum), purchase bot, command handlers. |
+>
+> **Group chat & production bots (Rust)**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`grpmr-rs`](https://github.com/dracarys18/grpmr-rs) | Production group management bot in Rust + teloxide — demonstrates group-scoped event handling, reply filtering, moderation actions, and MongoDB persistence. Reference for group chat task. |
+> | [`frankenstein`](https://github.com/ayrat555/frankenstein) | Type-safe Telegram Bot API client with sync/async support — useful reference for raw API coverage. |
+> | [`tbot`](https://github.com/tbot-rs/tbot) | Opinionated Telegram bot framework — interesting for its event loop and middleware patterns. |
+>
+> **Rate limiting & retry**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`governor`](https://github.com/antifuchs/governor) | Token-bucket / GCRA rate limiter crate — used to implement per-chat and per-group send quotas. Zero unsafe, `tokio`-compatible. |
+> | [`telegram-rate-limiter`](https://github.com/mediv0/telegram-rate-limiter) | Purpose-built per-chat rate limiter for Telegram bots — reference for the quota model (30/s global, 20/min group). |
+>
+> **Integration testing**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`wiremock`](https://github.com/LukeMathWalker/wiremock-rs) | HTTP mock server for Rust — used with `Bot::set_api_url(mock_url)` to intercept Telegram API calls in integration tests without hitting real servers. |
+>
+> **AI agent + Telegram patterns**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`zeroclaw`](https://github.com/zeroclaw-labs/zeroclaw) | Trait-based `Channel` pattern nearly identical to openpista's `ChannelAdapter`. Multi-channel including Telegram. |
+> | [`llm-chain`](https://github.com/sobelio/llm-chain) | LLM orchestration framework with agent patterns — reference for ReAct loop + chat adapter integration. |
+>
+> **Webhook + axum patterns**
+>
+> | Resource | Description |
+> |----------|-------------|
+> | [teloxide axum webhook example](https://github.com/teloxide/teloxide/blob/master/crates/teloxide/examples/axum_webhook.rs) | Official axum webhook example — reference for production webhook mode with TLS termination. |
+
 
 ### WhatsApp Channel Adapter
 
