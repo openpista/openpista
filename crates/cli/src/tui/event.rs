@@ -393,6 +393,40 @@ fn format_telegram_setup_guide() -> String {
     lines.join("\n")
 }
 
+fn handle_telegram_command(app: &mut TuiApp, config: &Config, message: &str) -> bool {
+    let Some(tg_cmd) = parse_telegram_command(message) else {
+        return false;
+    };
+
+    match tg_cmd {
+        TelegramCommand::Setup => {
+            let guide = format_telegram_setup_guide();
+            app.update(super::action::Action::PushAssistantMessage(guide));
+        }
+        TelegramCommand::Start => {
+            let tg = &config.channels.telegram;
+            if tg.enabled && !tg.token.is_empty() {
+                app.update(super::action::Action::PushAssistantMessage(
+                    "Telegram adapter is configured. Run `openpista start` to launch the daemon with all enabled channels.".to_string(),
+                ));
+            } else {
+                app.update(super::action::Action::PushError(
+                    "Telegram is not configured. Run /telegram setup for instructions.".to_string(),
+                ));
+            }
+        }
+        TelegramCommand::Status => {
+            let status = format_telegram_status(config);
+            app.update(super::action::Action::PushAssistantMessage(status));
+        }
+        TelegramCommand::Invalid(msg) => {
+            app.update(super::action::Action::PushError(msg));
+        }
+    }
+    app.update(super::action::Action::ScrollToBottom);
+    true
+}
+
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelTaskMode {
@@ -984,35 +1018,7 @@ pub async fn run_tui(
                                     continue;
                                 }
 
-                                if let Some(tg_cmd) = parse_telegram_command(&message) {
-                                    match tg_cmd {
-                                        TelegramCommand::Setup => {
-                                            let guide = format_telegram_setup_guide();
-                                            app.update(Action::PushAssistantMessage(guide));
-                                        }
-                                        TelegramCommand::Start => {
-                                            let tg = &config.channels.telegram;
-                                            if tg.enabled && !tg.token.is_empty() {
-                                                app.update(Action::PushAssistantMessage(
-                                                    "Telegram adapter is configured. Run `openpista start` to launch the daemon with all enabled channels.".to_string(),
-                                                ));
-                                            } else {
-                                                app.update(Action::PushError(
-                                                    "Telegram is not configured. Run /telegram setup for instructions.".to_string(),
-                                                ));
-                                            }
-                                        }
-                                        TelegramCommand::Status => {
-                                            let status = format_telegram_status(&config);
-                                            app.update(Action::PushAssistantMessage(status));
-                                        }
-                                        TelegramCommand::Invalid(msg) => {
-                                            app.update(Action::PushError(msg));
-                                        }
-                                    }
-                                    app.update(Action::ScrollToBottom);
-                                    continue;
-                                }
+                                if handle_telegram_command(&mut app, &config, &message) { continue; }
 
 
                                 if let Some(web_cmd) = parse_web_command(&message) {
@@ -1843,6 +1849,16 @@ pub async fn run_tui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::TuiMessage;
+
+    fn make_app() -> TuiApp {
+        TuiApp::new(
+            "gpt-4o",
+            SessionId::from("s-event-test"),
+            ChannelId::from("cli:local"),
+            "openai",
+        )
+    }
 
     fn restore_home_env(original_home: Option<String>) {
         match original_home {
@@ -2285,6 +2301,70 @@ mod tests {
         assert!(qr.is_some());
     }
 
+    fn handle_telegram_command_returns_false_for_non_telegram_message() {
+        let mut app = make_app();
+        let config = Config::default();
+        let handled = handle_telegram_command(&mut app, &config, "/model");
+        assert!(!handled);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn handle_telegram_command_setup_pushes_guide_and_scrolls() {
+        let mut app = make_app();
+        let config = Config::default();
+        let handled = handle_telegram_command(&mut app, &config, "/telegram setup");
+        assert!(handled);
+        assert_eq!(app.history_scroll, u16::MAX);
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Assistant(text)) if text.contains("Telegram Bot Setup Guide")
+        ));
+    }
+
+    #[test]
+    fn handle_telegram_command_start_reports_configured_or_not() {
+        let mut app = make_app();
+        let config = Config::default();
+        let handled = handle_telegram_command(&mut app, &config, "/telegram start");
+        assert!(handled);
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Error(text)) if text.contains("not configured")
+        ));
+
+        let mut app = make_app();
+        let mut configured = Config::default();
+        configured.channels.telegram.enabled = true;
+        configured.channels.telegram.token = "123456:ABC".to_string();
+        let handled = handle_telegram_command(&mut app, &configured, "/telegram start");
+        assert!(handled);
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Assistant(text)) if text.contains("openpista start")
+        ));
+    }
+
+    #[test]
+    fn handle_telegram_command_status_and_invalid_paths() {
+        let mut app = make_app();
+        let config = Config::default();
+        let handled = handle_telegram_command(&mut app, &config, "/telegram status");
+        assert!(handled);
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Assistant(text)) if text.contains("Telegram Configuration Status")
+        ));
+
+        let mut app = make_app();
+        let handled = handle_telegram_command(&mut app, &config, "/telegram nope");
+        assert!(handled);
+        assert!(matches!(
+            app.messages.last(),
+            Some(TuiMessage::Error(text)) if text.contains("Usage: /telegram")
+        ));
+    }
+
     #[test]
     fn detect_local_ip_returns_non_empty_string() {
         let ip = detect_local_ip();
@@ -2573,6 +2653,51 @@ mod tests {
         let loaded = load_credentials(&path);
         let saved = loaded.get("test-provider").expect("should exist");
         assert_eq!(saved.access_token, "tok");
+    }
+
+    #[test]
+    fn persist_credential_returns_error_when_path_is_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred = crate::auth::ProviderCredential {
+            access_token: "tok".into(),
+            refresh_token: None,
+            expires_at: None,
+            endpoint: None,
+            id_token: None,
+        };
+
+        let err = persist_credential("test-provider".to_string(), cred, tmp.path().to_path_buf())
+            .unwrap_err();
+        assert!(!err.is_empty(), "expected an io error string");
+    }
+
+    #[tokio::test]
+    async fn persist_auth_api_key_completes_before_timeout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cred_path = tmp.path().join("credentials.toml");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            persist_auth_with_path(
+                Config::default(),
+                AuthLoginIntent {
+                    provider: "together".to_string(),
+                    auth_method: AuthMethodChoice::ApiKey,
+                    endpoint: None,
+                    api_key: Some("tok-timeout-check".to_string()),
+                },
+                OAUTH_CALLBACK_PORT,
+                OAUTH_TIMEOUT_SECS,
+                cred_path,
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "persist_auth_with_path should finish within timeout"
+        );
+        assert!(result.unwrap().is_ok());
     }
 
     #[test]

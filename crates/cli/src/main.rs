@@ -1385,7 +1385,7 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
     println!();
     println!("Starting agent runtime...");
 
-    let runtime = build_runtime(&config).await?;
+    let runtime = build_runtime(&config, Arc::new(AutoApproveHandler)).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ChannelEvent>(128);

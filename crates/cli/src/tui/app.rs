@@ -4276,6 +4276,24 @@ mod tests {
     }
 
     #[test]
+    fn handle_slash_command_whatsapp_is_consumed_without_local_side_effect() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/whatsapp");
+        assert!(handled);
+        assert!(app.messages.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn handle_slash_command_telegram_is_consumed_without_local_side_effect() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/telegram");
+        assert!(handled);
+        assert!(app.messages.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
     fn handle_slash_command_returns_false_for_plain_message() {
         let mut app = make_app();
         let handled = app.handle_slash_command("hello");
