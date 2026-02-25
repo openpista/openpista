@@ -1119,23 +1119,16 @@ mod tests {
     #[test]
     fn trim_session_history_aligns_to_next_user_boundary() {
         let session = SessionId::from("trim-user-boundary");
-        let mut history = Vec::new();
-        history.push(AgentMessage::new(session.clone(), Role::User, "old-user"));
-        history.push(AgentMessage::new(
-            session.clone(),
-            Role::Assistant,
-            "assistant-before-boundary",
-        ));
-        history.push(AgentMessage::new(
-            session.clone(),
-            Role::Tool,
-            "tool-before-boundary",
-        ));
-        history.push(AgentMessage::new(
-            session.clone(),
-            Role::User,
-            "boundary-user",
-        ));
+        let mut history = vec![
+            AgentMessage::new(session.clone(), Role::User, "old-user"),
+            AgentMessage::new(
+                session.clone(),
+                Role::Assistant,
+                "assistant-before-boundary",
+            ),
+            AgentMessage::new(session.clone(), Role::Tool, "tool-before-boundary"),
+            AgentMessage::new(session.clone(), Role::User, "boundary-user"),
+        ];
         for idx in 0..(MAX_CONTEXT_MESSAGES - 3) {
             history.push(AgentMessage::new(
                 session.clone(),
