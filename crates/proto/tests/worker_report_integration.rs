@@ -25,11 +25,27 @@ fn worker_report_metadata_round_trip_contract() {
     );
     event.metadata = Some(serde_json::to_value(&report).expect("serialize report"));
 
-    let metadata = event.metadata.expect("metadata should exist");
+    let serialized_event = serde_json::to_string(&event).expect("serialize channel event");
+    let deserialized_event: ChannelEvent =
+        serde_json::from_str(&serialized_event).expect("deserialize channel event");
+    assert_eq!(
+        deserialized_event.channel_id,
+        ChannelId::new("cli", "local")
+    );
+    assert_eq!(deserialized_event.session_id, SessionId::from("session-a"));
+    assert_eq!(deserialized_event.user_message, "run");
+
+    let metadata = deserialized_event.metadata.expect("metadata should exist");
     let parsed: WorkerReport = serde_json::from_value(metadata).expect("parse worker report");
     assert_eq!(parsed.kind, WORKER_REPORT_KIND);
     assert_eq!(parsed.call_id, "call-42");
-    assert!(parsed.is_worker_report());
+    assert_eq!(parsed.worker_id, "worker-1");
+    assert_eq!(parsed.image, "alpine:3.20");
+    assert_eq!(parsed.command, "echo ok");
+    assert_eq!(parsed.exit_code, 0);
+    assert_eq!(parsed.stdout, "ok\n");
+    assert_eq!(parsed.stderr, "");
+    assert_eq!(parsed.output, "stdout:\nok\n");
 }
 
 #[test]
