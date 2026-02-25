@@ -76,6 +76,26 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Delete a session by ID",
     },
     SlashCommand {
+        name: "/whatsapp",
+        description: "Configure WhatsApp channel",
+    },
+    SlashCommand {
+        name: "/whatsapp status",
+        description: "Show WhatsApp config status",
+    },
+    SlashCommand {
+        name: "/telegram",
+        description: "Telegram bot setup guide",
+    },
+    SlashCommand {
+        name: "/telegram status",
+        description: "Show Telegram config status",
+    },
+    SlashCommand {
+        name: "/telegram start",
+        description: "Start Telegram adapter info",
+    },
+    SlashCommand {
         name: "/qr",
         description: "Show QR code for Web UI URL",
     },
@@ -510,7 +530,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/telegram - Telegram bot setup guide\n/telegram status - show Telegram config status\n/telegram start - start Telegram adapter info\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -527,6 +547,12 @@ impl TuiApp {
                     "Loading model catalog... (inside browser: s or / to search, r to refresh)"
                         .to_string(),
                 );
+            }
+            "/whatsapp" => {
+                // "status" subcommand is handled in event.rs; bare /whatsapp opens wizard
+            }
+            "/telegram" => {
+                // Subcommands are handled in event.rs
             }
             "/qr" => {
                 // QR code generation is handled in event.rs (needs config access)
@@ -3919,6 +3945,24 @@ mod tests {
         let handled = app.handle_slash_command("/nope");
         assert!(handled);
         assert!(matches!(&app.messages[0], TuiMessage::Error(_)));
+    }
+
+    #[test]
+    fn handle_slash_command_whatsapp_is_consumed_without_local_side_effect() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/whatsapp");
+        assert!(handled);
+        assert!(app.messages.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn handle_slash_command_telegram_is_consumed_without_local_side_effect() {
+        let mut app = make_app();
+        let handled = app.handle_slash_command("/telegram");
+        assert!(handled);
+        assert!(app.messages.is_empty());
+        assert!(!app.should_quit);
     }
 
     #[test]
