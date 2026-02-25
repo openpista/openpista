@@ -530,7 +530,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/telegram - Telegram bot setup guide\n/telegram status - show Telegram config status\n/telegram start - start Telegram adapter info\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
