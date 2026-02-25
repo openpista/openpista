@@ -12,3 +12,6 @@ web-sys = { workspace = true }
 js-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

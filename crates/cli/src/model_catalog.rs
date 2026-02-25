@@ -1535,4 +1535,50 @@ mod tests {
         assert!(matches_query("gpt-4o-mini-2025", "4o-mini"));
         assert!(!matches_query("gpt-4o", "gpt-5"));
     }
+
+    // ── seed_models_for_provider additional branches ──────────────────
+
+    #[test]
+    fn seed_models_for_openai_provider() {
+        let entries = seed_models_for_provider("openai");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|e| e.provider == "openai"));
+        assert!(entries.iter().any(|e| e.id == "gpt-5.3-codex"));
+        assert!(entries.iter().any(|e| e.id == "gpt-4o"));
+        assert!(entries.iter().any(|e| e.id == "o3"));
+        assert!(entries.iter().any(|e| e.id == "gpt-4.1"));
+        assert!(entries.iter().any(|e| e.recommended_for_coding));
+        assert!(entries.iter().any(|e| !e.recommended_for_coding));
+    }
+
+    #[test]
+    fn seed_models_for_openrouter_provider() {
+        let entries = seed_models_for_provider("openrouter");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "openrouter");
+        assert_eq!(entries[0].id, "openai/gpt-4o");
+        assert!(entries[0].recommended_for_coding);
+        assert!(entries[0].available);
+    }
+
+    #[test]
+    fn seed_models_for_ollama_provider() {
+        let entries = seed_models_for_provider("ollama");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "ollama");
+        assert_eq!(entries[0].id, "llama3.2");
+        assert!(entries[0].recommended_for_coding);
+        assert_eq!(entries[0].status, ModelStatus::Stable);
+        assert_eq!(entries[0].source, ModelSource::Docs);
+    }
+
+    #[test]
+    fn seed_models_for_github_copilot_provider() {
+        let entries = seed_models_for_provider("github-copilot");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|e| e.provider == "github-copilot"));
+        assert!(entries.iter().any(|e| e.id == "gpt-4o"));
+        assert!(entries.iter().any(|e| e.id == "claude-3.5-sonnet"));
+        assert!(entries.iter().any(|e| e.recommended_for_coding));
+    }
 }

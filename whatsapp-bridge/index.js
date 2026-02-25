@@ -29,6 +29,7 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  Browsers,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { createInterface } = require("readline");
@@ -59,6 +60,130 @@ if (!sessionDir) {
 // Ensure session directory exists
 fs.mkdirSync(sessionDir, { recursive: true });
 
+// ── Module-level state ─────────────────────────────────────
+
+let cachedVersion;
+async function getVersion() {
+  if (!cachedVersion) {
+    const { version } = await fetchLatestBaileysVersion();
+    cachedVersion = version;
+  }
+  return cachedVersion;
+}
+
+const msgRetryCounterCache = {
+  _cache: new Map(),
+  get(key) { return this._cache.get(key); },
+  set(key, val) { this._cache.set(key, val); },
+  del(key) { this._cache.delete(key); },
+};
+
+let currentSock = null;
+let shuttingDown = false;
+let connectedPhone = ""; // own phone number, set on connect — used to resolve @lid reply JIDs
+const sentMessageIds = new Map(); // msgId -> sentAtMs, used to prevent loops with TTL eviction
+const SENT_MESSAGE_ID_TTL_MS = Math.max(
+  5 * 60_000,
+  Number(process.env.SENT_MESSAGE_ID_TTL_MS || 15 * 60_000)
+);
+
+function purgeExpiredSentMessageIds(now = Date.now()) {
+  for (const [id, sentAt] of sentMessageIds.entries()) {
+    if (now - sentAt > SENT_MESSAGE_ID_TTL_MS) {
+      sentMessageIds.delete(id);
+    }
+  }
+}
+
+const sentMessageCleanupTimer = setInterval(() => {
+  purgeExpiredSentMessageIds();
+}, 60_000);
+if (typeof sentMessageCleanupTimer.unref === "function") {
+  sentMessageCleanupTimer.unref();
+}
+
+// Message store for WhatsApp retry mechanism (prevents "암호화 대기중").
+// When the phone fails to decrypt a message it sends a retry request;
+// Baileys then calls getMessage() to re-encrypt and re-send the payload.
+const sentMsgStore = new Map(); // msgId → proto message object
+
+const rl = createInterface({ input: process.stdin });
+
+rl.on("line", async (line) => {
+  line = line.trim();
+  if (!line) return;
+
+  let cmd;
+  try {
+    cmd = JSON.parse(line);
+  } catch (e) {
+    emit({ type: "error", message: `Invalid JSON command: ${e.message}` });
+    return;
+  }
+
+  if (!currentSock) {
+    emit({ type: "error", message: "Socket not connected yet" });
+    return;
+  }
+
+  switch (cmd.type) {
+    case "send": {
+      // @lid is receive-only in WhatsApp's multi-device protocol.
+      // Replies must be sent to the real phone-number JID (@s.whatsapp.net).
+      const resolvedTo = (cmd.to.endsWith("@lid") && connectedPhone)
+        ? `${connectedPhone}@s.whatsapp.net`
+        : cmd.to;
+      const jid = resolvedTo.includes("@") ? resolvedTo : `${resolvedTo}@s.whatsapp.net`;
+      try {
+        // Force-refresh Signal session before every send to prevent "암호화 대기중".
+        // assertSessions(jids, true) triggers a fresh SKDM (Sender-Key Distribution
+        // Message) so the phone always has the current sender key before delivery.
+        if (currentSock?.assertSessions) {
+          await currentSock.assertSessions([jid], true);
+        }
+        const sent = await currentSock.sendMessage(jid, { text: cmd.text });
+        // Track sent message ID to prevent self-chat infinite loops
+        if (sent?.key?.id) {
+          sentMessageIds.set(sent.key.id, Date.now());
+          // Also cache in sentMsgStore for phone retry / re-encryption
+          if (sent.message) {
+            sentMsgStore.set(sent.key.id, sent.message);
+            setTimeout(() => sentMsgStore.delete(sent.key.id), 86_400_000);
+          }
+        }
+      } catch (e) {
+        emit({
+          type: "error",
+          message: `Failed to send message to ${cmd.to}: ${e.message}`,
+        });
+      }
+      break;
+    }
+
+    case "disconnect": {
+      await currentSock.logout().catch(() => {});
+      process.exit(0);
+      break;
+    }
+
+    case "shutdown": {
+      shuttingDown = true;
+      if (currentSock) {
+        currentSock.ws.close();
+      }
+      setTimeout(() => process.exit(0), 2000);
+      break;
+    }
+
+    default:
+      emit({ type: "error", message: `Unknown command type: ${cmd.type}` });
+  }
+});
+
+rl.on("close", () => {
+  process.exit(0);
+});
+
 // ── Main ───────────────────────────────────────────────────
 
 async function start() {
@@ -66,7 +191,7 @@ async function start() {
     path.join(sessionDir, "auth")
   );
 
-  const { version } = await fetchLatestBaileysVersion();
+  const version = await getVersion();
 
   const sock = makeWASocket({
     version,
@@ -75,13 +200,27 @@ async function start() {
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
     logger,
-    browser: ["openpista", "Chrome", "120.0.0"],
-    printQRInTerminal: false, // We handle QR ourselves
+    browser: Browsers.macOS("Chrome"),
+    printQRInTerminal: false,
     generateHighQualityLinkPreview: false,
     syncFullHistory: false,
-    markOnlineOnConnect: false,
+    markOnlineOnConnect: true,
     defaultQueryTimeoutMs: 60_000,
+    connectTimeoutMs: 60_000,
+    keepAliveIntervalMs: 25_000,
+    msgRetryCounterCache,
+    // Baileys has a double-increment bug in the retry counter, so the effective
+    // number of resends is floor(maxMsgRetryCount / 2).  Setting 10 → ~5 actual
+    // resends, enough to survive the initial session-establishment window.
+    maxMsgRetryCount: 10,
+    // CRITICAL: lets Baileys re-encrypt messages on phone retry requests.
+    // Without this callback "암호화 대기중" never resolves after a retry.
+    getMessage: async (key) => {
+      return sentMsgStore.get(key.id) || undefined;
+    },
   });
+
+  currentSock = sock;
 
   // ── QR code event ───────────────────────────────────────
   sock.ev.on("connection.update", (update) => {
@@ -95,7 +234,29 @@ async function start() {
       const me = sock.user;
       const phone = me?.id?.split(":")[0] || me?.id?.split("@")[0] || "";
       const name = me?.name || null;
+      connectedPhone = phone; // store for @lid → @s.whatsapp.net resolution in send handler
       emit({ type: "connected", phone, name });
+      // Mark as available so WhatsApp pushes messages to this device
+      sock.sendPresenceUpdate("available").catch((e) => {
+        logger.warn({ err: e.message }, "Failed to send presence update");
+      });
+      // Pre-warm Signal sessions for own devices to prevent "암호화 대기중".
+      // We assert both the @s.whatsapp.net JID and (if known) the @lid JID so
+      // that Baileys sends a fresh SKDM to the phone on first connect.
+      setTimeout(async () => {
+        try {
+          const myJid = `${connectedPhone}@s.whatsapp.net`;
+          const lidJid = sock.user?.lid || sock.authState?.creds?.me?.lid || null;
+          const jidsToWarm = [myJid];
+          if (lidJid && lidJid !== myJid) jidsToWarm.push(lidJid);
+          if (sock?.assertSessions) {
+            await sock.assertSessions(jidsToWarm, true);
+            logger.info({ jidsToWarm }, "Signal sessions pre-warmed");
+          }
+        } catch (e) {
+          logger.warn({ err: e.message }, "Failed to pre-warm Signal sessions");
+        }
+      }, 1000); // 1 s — session must be ready before the first retry storm (~2 s)
     }
 
     if (connection === "close") {
@@ -114,6 +275,12 @@ async function start() {
         }
         process.exit(0);
       } else {
+        try { sock.ev.removeAllListeners(); } catch (_) {}
+        // If shutting down gracefully, don't reconnect
+        if (shuttingDown) {
+          emit({ type: "disconnected", reason: "shutdown" });
+          return;
+        }
         // Transient disconnect — notify and attempt reconnect
         emit({ type: "disconnected", reason });
         logger.info({ statusCode, reason }, "Reconnecting...");
@@ -126,74 +293,66 @@ async function start() {
   sock.ev.on("creds.update", saveCreds);
 
   // ── Incoming messages ───────────────────────────────────
-  sock.ev.on("messages.upsert", ({ messages }) => {
+  sock.ev.on("messages.upsert", ({ messages, type }) => {
+    // Only process new incoming messages, not history sync
+    if (type !== "notify") {
+      return;
+    }
+    // Resolve self JID for self-chat detection
+    const selfId = sock.user?.id || sock.authState?.creds?.me?.id || "";
+    const selfPhone = selfId.split(":")[0] || selfId.split("@")[0] || "";
+    const selfJid = selfPhone ? `${selfPhone}@s.whatsapp.net` : "";
+    const selfLid = sock.user?.lid || sock.authState?.creds?.me?.lid || "";
+    // Cache ALL messages for retry mechanism (must run before any filtering).
+    // When the phone fails to decrypt it sends a retry; getMessage() returns
+    // the cached proto so Baileys can re-encrypt and re-deliver.
     for (const msg of messages) {
-      // Skip status broadcasts, reactions, and our own messages
-      if (msg.key.remoteJid === "status@broadcast") continue;
-      if (msg.key.fromMe) continue;
-      if (msg.message?.reactionMessage) continue;
+      if (msg.key?.id && msg.message) {
+        sentMsgStore.set(msg.key.id, msg.message);
+        setTimeout(() => sentMsgStore.delete(msg.key.id), 86_400_000); // 24 h TTL
+      }
+    }
 
+    for (const msg of messages) {
+      // Skip status broadcasts and reactions
+      if (msg.key.remoteJid === "status@broadcast") continue;
+      if (msg.key.remoteJid?.endsWith("@broadcast")) continue;
+      if (msg.message?.reactionMessage) continue;
+      purgeExpiredSentMessageIds();
+      // Skip bot's own sent messages (prevent infinite loops)
+      if (sentMessageIds.has(msg.key.id)) {
+        sentMessageIds.delete(msg.key.id);
+        continue;
+      }
+      const remoteJid = msg.key.remoteJid || "";
+      const isFromMe = Boolean(msg.key.fromMe);
+      const normalizedRemote = remoteJid.split(":")[0];
+      const normalizedSelfLid = selfLid.split(":")[0];
+      // Newer WhatsApp versions may use @lid for self-chat.
+      // Match exact self identifiers instead of broad suffix checks.
+      const isSelfChat = isFromMe && (
+        remoteJid === selfJid ||
+        (selfLid && (remoteJid === selfLid || normalizedRemote === normalizedSelfLid)) ||
+        (selfPhone && remoteJid.split("@")[0] === selfPhone)
+      );
+      // fromMe but NOT self-chat => outbound sync, skip
+      if (isFromMe && !isSelfChat) {
+        continue;
+      }
+      // Extract text content
       const text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
         null;
-
-      if (!text) continue; // Skip non-text messages for now
-
-      const from = msg.key.remoteJid?.split("@")[0] || "";
+      if (!text) {
+        continue;
+      }
+      const from = remoteJid; // preserve full JID (@lid, @s.whatsapp.net, etc.) for correct reply routing
       const timestamp = msg.messageTimestamp
         ? Number(msg.messageTimestamp)
         : undefined;
-
-      emit({ type: "message", from, text, timestamp });
+      emit({ type: "message", from, text, timestamp, selfChat: isSelfChat });
     }
-  });
-
-  // ── Stdin command handler ───────────────────────────────
-  const rl = createInterface({ input: process.stdin });
-
-  rl.on("line", async (line) => {
-    line = line.trim();
-    if (!line) return;
-
-    let cmd;
-    try {
-      cmd = JSON.parse(line);
-    } catch (e) {
-      emit({ type: "error", message: `Invalid JSON command: ${e.message}` });
-      return;
-    }
-
-    switch (cmd.type) {
-      case "send": {
-        const jid = cmd.to.includes("@") ? cmd.to : `${cmd.to}@s.whatsapp.net`;
-        try {
-          await sock.sendMessage(jid, { text: cmd.text });
-        } catch (e) {
-          emit({
-            type: "error",
-            message: `Failed to send message to ${cmd.to}: ${e.message}`,
-          });
-        }
-        break;
-      }
-
-      case "disconnect": {
-        logger.info("Disconnect command received");
-        await sock.logout().catch(() => {});
-        process.exit(0);
-        break;
-      }
-
-      default:
-        emit({ type: "error", message: `Unknown command type: ${cmd.type}` });
-    }
-  });
-
-  rl.on("close", () => {
-    logger.info("stdin closed, shutting down");
-    sock.end(undefined);
-    process.exit(0);
   });
 }
 

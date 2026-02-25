@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, trace};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider};
+use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -44,6 +44,18 @@ struct ResponsesTool {
 #[derive(Debug, Deserialize)]
 struct ResponsesResponse {
     output: Vec<OutputItem>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ResponsesUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +235,7 @@ impl LlmProvider for ResponsesApiProvider {
             output_items = %responses_resp.output.len(),
             "Responses API response parsed"
         );
+        let usage = token_usage_from_response(&responses_resp);
         // Check for function calls first.
         let tool_calls: Vec<ToolCall> = responses_resp
             .output
@@ -248,7 +261,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect();
         if !tool_calls.is_empty() {
-            return Ok(ChatResponse::ToolCalls(tool_calls));
+            return Ok(ChatResponse::ToolCalls(tool_calls, usage));
         }
         // Collect text from message output items.
         let text: String = responses_resp
@@ -269,7 +282,7 @@ impl LlmProvider for ResponsesApiProvider {
             })
             .collect::<Vec<_>>()
             .join("");
-        Ok(ChatResponse::Text(text))
+        Ok(ChatResponse::Text(text, usage))
     }
 }
 
@@ -341,6 +354,17 @@ fn convert_tool(t: &ToolDefinition) -> ResponsesTool {
 /// Parses tool call argument JSON with empty-object fallback.
 fn parse_tool_arguments(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or(Value::Object(Default::default()))
+}
+
+fn token_usage_from_response(resp: &ResponsesResponse) -> TokenUsage {
+    let Some(usage) = &resp.usage else {
+        return TokenUsage::default();
+    };
+    let _ = usage.total_tokens;
+    TokenUsage {
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
+    }
 }
 
 /// Sanitizes a tool name so it matches the OpenAI `^[a-zA-Z0-9_-]+$` pattern.
@@ -431,7 +455,15 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
             } else {
                 &wrapper
             };
-            if let Ok(resp) = serde_json::from_value::<ResponsesResponse>(response_obj.clone()) {
+            if let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(response_obj.clone())
+            {
+                resp.usage = resp.usage.or_else(|| {
+                    response_obj
+                        .get("usage")
+                        .cloned()
+                        .or_else(|| wrapper.get("usage").cloned())
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
         }
@@ -446,14 +478,27 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
             // Check wrapped format first (non-destructive borrow)
             if let Some(response) = parsed.get("response")
                 && response.get("output").is_some()
-                && let Ok(resp) = serde_json::from_value::<ResponsesResponse>(response.clone())
+                && let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(response.clone())
             {
+                resp.usage = resp.usage.or_else(|| {
+                    response
+                        .get("usage")
+                        .cloned()
+                        .or_else(|| parsed.get("usage").cloned())
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
             // Check if this is a complete response with output
             if parsed.get("output").is_some()
-                && let Ok(resp) = serde_json::from_value::<ResponsesResponse>(parsed)
+                && let Ok(mut resp) = serde_json::from_value::<ResponsesResponse>(parsed.clone())
             {
+                resp.usage = resp.usage.or_else(|| {
+                    parsed
+                        .get("usage")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ResponsesUsage>(value).ok())
+                });
                 return Ok(resp);
             }
         }
@@ -629,6 +674,25 @@ mod tests {
         let json = r#"{"output":[]}"#;
         let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
         assert!(resp.output.is_empty());
+    }
+
+    #[test]
+    fn parses_top_level_usage_from_response() {
+        let json =
+            r#"{"output":[],"usage":{"input_tokens":12,"output_tokens":7,"total_tokens":19}}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        let usage = token_usage_from_response(&resp);
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 7);
+    }
+
+    #[test]
+    fn token_usage_from_response_defaults_when_usage_missing() {
+        let json = r#"{"output":[]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        let usage = token_usage_from_response(&resp);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
     }
 
     #[test]
@@ -819,6 +883,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_response_extracts_usage_from_wrapper() {
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"wrapped\"}]}]},\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("should parse wrapped response with usage");
+        let usage = token_usage_from_response(&resp);
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 2);
+    }
+
+    #[test]
     fn parse_sse_response_trailing_event_without_blank_line() {
         // No trailing blank line — the code has a special case for this.
         let body = concat!(
@@ -851,5 +928,82 @@ mod tests {
         );
         let resp = parse_sse_response(body).expect("fallback direct output");
         assert_eq!(resp.output.len(), 1);
+    }
+
+    // ── sanitize_tool_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_tool_name_replaces_dots() {
+        assert_eq!(sanitize_tool_name("system.run"), "system_run");
+    }
+
+    #[test]
+    fn sanitize_tool_name_preserves_valid_chars() {
+        assert_eq!(sanitize_tool_name("my-tool_v2"), "my-tool_v2");
+    }
+
+    #[test]
+    fn sanitize_tool_name_replaces_special_chars() {
+        assert_eq!(sanitize_tool_name("a@b#c$d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_tool_name_empty_string() {
+        assert_eq!(sanitize_tool_name(""), "");
+    }
+
+    #[test]
+    fn sanitize_tool_name_all_special() {
+        assert_eq!(sanitize_tool_name("..."), "___");
+    }
+
+    // ── convert_messages edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn tool_result_without_call_id_uses_unknown() {
+        let mut msg = ChatMessage::tool_result("tc1", "tool", "output");
+        msg.tool_call_id = None;
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["call_id"], "unknown");
+    }
+
+    #[test]
+    fn convert_messages_empty_input() {
+        let converted = convert_messages(&[]);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn convert_messages_multiple_system_messages_all_skipped() {
+        let msgs = vec![
+            ChatMessage::system("sys1"),
+            ChatMessage::system("sys2"),
+            ChatMessage::user("hello"),
+        ];
+        let converted = convert_messages(&msgs);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+    }
+
+    // ── parse_tool_arguments edge cases ──────────────────────────────────────
+
+    #[test]
+    fn parse_tool_arguments_empty_string() {
+        let result = parse_tool_arguments("");
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn parse_tool_arguments_null_json() {
+        let result = parse_tool_arguments("null");
+        // null is valid JSON but not an object, so it returns null
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn parse_tool_arguments_nested_object() {
+        let result = parse_tool_arguments(r#"{"a":{"b":1}}"#);
+        assert_eq!(result["a"]["b"], 1);
     }
 }

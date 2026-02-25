@@ -182,4 +182,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn screen_tool_default_matches_new() {
+        let a = ScreenTool::new();
+        let b = ScreenTool;
+        assert_eq!(a.name(), b.name());
+        assert_eq!(a.description(), b.description());
+    }
+
+    #[test]
+    fn screen_tool_schema_has_display_property() {
+        let tool = ScreenTool::new();
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"]["display"].is_object());
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[tokio::test]
+    async fn execute_with_empty_args_uses_default_display() {
+        let tool = ScreenTool::new();
+        let result = tool.execute("call-4", serde_json::json!({})).await;
+        assert_eq!(result.call_id, "call-4");
+        assert_eq!(result.tool_name, "screen.capture");
+        // Either succeeds (display available) or errors (no display) — both are valid
+        assert!(!result.output.is_empty());
+    }
 }

@@ -277,4 +277,84 @@ mod tests {
         assert!(out.contains("stderr:\nwarn"));
         assert!(out.contains("exit_code: 2"));
     }
+
+    #[test]
+    fn bash_tool_default_matches_new() {
+        let a = BashTool::new();
+        let b = BashTool::default();
+        assert_eq!(a.default_timeout, b.default_timeout);
+    }
+
+    #[test]
+    fn bash_tool_with_timeout_stores_custom_duration() {
+        let tool = BashTool::with_timeout(120);
+        assert_eq!(tool.default_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn bash_tool_metadata_is_stable() {
+        let tool = BashTool::new();
+        assert_eq!(tool.name(), "system.run");
+        assert!(tool.description().contains("bash"));
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["command"].is_object());
+        assert!(schema["properties"]["timeout_secs"].is_object());
+        assert!(schema["properties"]["working_dir"].is_object());
+    }
+
+    #[test]
+    fn format_output_stdout_only() {
+        let out = format_output("hello\n", "", 0);
+        assert!(out.contains("stdout:\nhello"));
+        assert!(!out.contains("stderr:"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn format_output_stderr_only() {
+        let out = format_output("", "error\n", 1);
+        assert!(!out.contains("stdout:"));
+        assert!(out.contains("stderr:\nerror"));
+        assert!(out.contains("exit_code: 1"));
+    }
+
+    #[test]
+    fn format_output_empty_both() {
+        let out = format_output("", "", 0);
+        assert!(!out.contains("stdout:"));
+        assert!(!out.contains("stderr:"));
+        assert!(out.contains("exit_code: 0"));
+    }
+
+    #[test]
+    fn format_output_appends_newline_when_missing() {
+        let out = format_output("no-newline", "also-no-newline", 0);
+        assert!(out.contains("stdout:\nno-newline\n"));
+        assert!(out.contains("stderr:\nalso-no-newline\n"));
+    }
+
+    #[test]
+    fn truncate_str_exact_boundary() {
+        assert_eq!(truncate_str("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_str_empty_input() {
+        assert_eq!(truncate_str("", 10), "");
+    }
+
+    #[tokio::test]
+    async fn execute_with_large_timeout_succeeds() {
+        let tool = BashTool::new();
+        // Large timeout values should not break successful command execution.
+        let result = tool
+            .execute(
+                "c6",
+                serde_json::json!({"command": "echo ok", "timeout_secs": 999}),
+            )
+            .await;
+        assert!(!result.is_error);
+        assert!(result.output.contains("exit_code: 0"));
+    }
 }

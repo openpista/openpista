@@ -23,6 +23,8 @@ pub enum BridgeCommand {
     Send { to: String, text: String },
     /// Gracefully disconnect the bridge.
     Disconnect,
+    /// Graceful shutdown — closes WebSocket without logging out.
+    Shutdown,
 }
 
 /// Events received from Bridge → Rust (JSON lines on stdout).
@@ -35,15 +37,29 @@ pub enum BridgeEvent {
     Connected { phone: String, name: Option<String> },
     /// Incoming text message.
     Message {
+        /// Phone number of the sender.
         from: String,
+        /// Plain-text message body.
         text: String,
         #[allow(dead_code)]
+        /// Unix timestamp of the message, if provided by the bridge.
         timestamp: Option<u64>,
+        #[serde(default)]
+        #[serde(rename = "selfChat")]
+        #[allow(dead_code)]
+        /// Whether the message was sent by the authenticated user (self-chat).
+        self_chat: bool,
     },
     /// Disconnected from WhatsApp Web.
-    Disconnected { reason: Option<String> },
+    Disconnected {
+        /// Human-readable reason for the disconnect, if available.
+        reason: Option<String>,
+    },
     /// Bridge-level error.
-    Error { message: String },
+    Error {
+        /// Error message from the bridge.
+        message: String,
+    },
 }
 
 // ─── Adapter config ────────────────────────────────────────
@@ -121,12 +137,15 @@ impl WhatsAppAdapter {
 
 // ─── ChannelAdapter impl ───────────────────────────────────
 
+/// [`ChannelAdapter`] implementation for the WhatsApp bridge adapter.
 #[async_trait]
 impl ChannelAdapter for WhatsAppAdapter {
+    /// Returns the stable [`ChannelId`] identifying this adapter (`whatsapp:bridge`).
     fn channel_id(&self) -> ChannelId {
         ChannelId::new("whatsapp", "bridge")
     }
 
+    /// Starts the WhatsApp bridge subprocess and processes events until the bridge exits.
     async fn run(mut self, tx: mpsc::Sender<ChannelEvent>) -> Result<(), ChannelError> {
         let bridge_script = self.bridge_script();
         info!(
@@ -219,8 +238,12 @@ impl ChannelAdapter for WhatsAppAdapter {
                         }
                     }
                     Ok(BridgeEvent::Disconnected { reason }) => {
-                        warn!(reason = ?reason, "WhatsApp Web disconnected");
-                        break;
+                        let reason_str = reason.as_deref().unwrap_or("unknown");
+                        if reason_str == "logged out" {
+                            warn!("WhatsApp session logged out — adapter stopping");
+                            break;
+                        }
+                        warn!(reason = %reason_str, "WhatsApp transient disconnect (bridge reconnecting)");
                     }
                     Ok(BridgeEvent::Error { message }) => {
                         error!(message = %message, "WhatsApp bridge error");
@@ -283,6 +306,7 @@ impl ChannelAdapter for WhatsAppAdapter {
         Ok(())
     }
 
+    /// Sends an [`AgentResponse`] to a WhatsApp phone number via the bridge.
     async fn send_response(&self, resp: AgentResponse) -> Result<(), ChannelError> {
         let phone = parse_phone_from_channel_id(resp.channel_id.as_str())?;
         let text = format_response_text(&resp);
@@ -376,6 +400,12 @@ mod tests {
     }
 
     #[test]
+    fn bridge_command_shutdown_serializes() {
+        let cmd = BridgeCommand::Shutdown;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"shutdown"#));
+    }
+    #[test]
     fn bridge_event_qr_deserializes() {
         let json = r#"{"type":"qr","data":"2@ABC123"}"#;
         let event: BridgeEvent = serde_json::from_str(json).unwrap();
@@ -402,6 +432,15 @@ mod tests {
     }
 
     #[test]
+    fn bridge_event_message_self_chat_deserializes() {
+        let json = r#"{"type":"message","from":"15551234567","text":"Hi","timestamp":1234567890,"selfChat":true}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Message { from, text, self_chat, .. } if from == "15551234567" && text == "Hi" && self_chat)
+        );
+    }
+
+    #[test]
     fn bridge_event_disconnected_deserializes() {
         let json = r#"{"type":"disconnected","reason":"logged out"}"#;
         let event: BridgeEvent = serde_json::from_str(json).unwrap();
@@ -415,5 +454,123 @@ mod tests {
         let json = r#"{"type":"error","message":"connection failed"}"#;
         let event: BridgeEvent = serde_json::from_str(json).unwrap();
         assert!(matches!(event, BridgeEvent::Error { message } if message == "connection failed"));
+    }
+
+    #[test]
+    fn adapter_constructor_and_channel_id() {
+        let config = WhatsAppAdapterConfig {
+            session_dir: "/tmp/wa-session".to_string(),
+            bridge_path: None,
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        assert_eq!(adapter.channel_id().as_str(), "whatsapp:bridge");
+    }
+
+    #[test]
+    fn bridge_script_defaults_to_bundled_path() {
+        let config = WhatsAppAdapterConfig {
+            session_dir: "/tmp".to_string(),
+            bridge_path: None,
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        assert_eq!(adapter.bridge_script(), "whatsapp-bridge/index.js");
+    }
+
+    #[test]
+    fn bridge_script_uses_custom_path_when_set() {
+        let config = WhatsAppAdapterConfig {
+            session_dir: "/tmp".to_string(),
+            bridge_path: Some("/custom/bridge.js".to_string()),
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        assert_eq!(adapter.bridge_script(), "/custom/bridge.js");
+    }
+
+    #[test]
+    fn command_sender_returns_working_sender() {
+        let config = WhatsAppAdapterConfig {
+            session_dir: "/tmp".to_string(),
+            bridge_path: None,
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        let _sender = adapter.command_sender();
+    }
+
+    #[test]
+    fn bridge_event_disconnected_without_reason() {
+        let json = r#"{"type":"disconnected"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, BridgeEvent::Disconnected { reason } if reason.is_none()));
+    }
+
+    #[test]
+    fn bridge_event_connected_without_name() {
+        let json = r#"{"type":"connected","phone":"123"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Connected { phone, name } if phone == "123" && name.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn run_handles_transient_disconnect_then_stops_on_logged_out() {
+        let node_check = tokio::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .await
+            .expect("node is required to run WhatsApp bridge tests");
+        assert!(node_check.status.success(), "node --version should succeed");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let script_path = tmp.path().join("bridge_test.js");
+        std::fs::write(
+            &script_path,
+            r#"
+console.log(JSON.stringify({ type: "disconnected", reason: "network" }));
+console.log(JSON.stringify({ type: "disconnected", reason: "logged out" }));
+"#,
+        )
+        .expect("write bridge script");
+
+        let config = WhatsAppAdapterConfig {
+            session_dir: tmp.path().join("wa-session").to_string_lossy().to_string(),
+            bridge_path: Some(script_path.to_string_lossy().to_string()),
+        };
+        let (resp_tx, _resp_rx) = mpsc::channel(1);
+        let (qr_tx, _qr_rx) = mpsc::channel(1);
+        let adapter = WhatsAppAdapter::new(config, resp_tx, qr_tx);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), adapter.run(event_tx))
+            .await
+            .expect("adapter run timed out");
+        assert!(result.is_ok(), "run should complete cleanly: {result:?}");
+    }
+
+    #[test]
+    fn bridge_event_message_without_timestamp() {
+        let json = r#"{"type":"message","from":"123","text":"hi"}"#;
+        let event: BridgeEvent = serde_json::from_str(json).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Message { from, text, timestamp, .. } if from == "123" && text == "hi" && timestamp.is_none())
+        );
+    }
+
+    #[test]
+    fn parse_phone_handles_raw_number() {
+        assert_eq!(parse_phone_from_channel_id("5551234").unwrap(), "5551234");
+    }
+
+    #[test]
+    fn parse_phone_rejects_bare_empty() {
+        assert!(parse_phone_from_channel_id("").is_err());
     }
 }

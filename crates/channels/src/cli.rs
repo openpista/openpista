@@ -168,4 +168,42 @@ mod tests {
         let out = format_prompted_response(&err);
         assert!(out.contains("Error: boom"));
     }
+
+    #[test]
+    fn default_creates_same_as_new() {
+        let adapter = CliAdapter::default();
+        assert_eq!(adapter.channel_id.as_str(), "cli:local");
+    }
+
+    #[test]
+    fn channel_id_returns_cli_local() {
+        let adapter = CliAdapter::new();
+        let cid = adapter.channel_id();
+        assert_eq!(cid.as_str(), "cli:local");
+    }
+
+    #[test]
+    fn normalize_input_line_preserves_content() {
+        assert_eq!(normalize_input_line("  /quit  "), Some("/quit".to_string()));
+        assert_eq!(
+            normalize_input_line("hello world"),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn is_quit_command_rejects_non_quit() {
+        assert!(!is_quit_command("/quit "));
+        assert!(!is_quit_command("quit"));
+        assert!(!is_quit_command(""));
+    }
+
+    #[test]
+    fn format_prompted_response_includes_newlines() {
+        let resp = AgentResponse::new(ChannelId::from("cli:local"), SessionId::from("s1"), "test");
+        let out = format_prompted_response(&resp);
+        assert!(out.starts_with('\n'));
+        assert!(out.contains("test"));
+        assert!(out.ends_with("openpista> "));
+    }
 }
