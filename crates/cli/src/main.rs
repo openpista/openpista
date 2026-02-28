@@ -33,7 +33,7 @@ use agent::{
 #[cfg(not(test))]
 use channels::{
     ChannelAdapter, CliAdapter, SessionLoader, TelegramAdapter, WebAdapter, WebModelEntry,
-    WebSessionEntry,
+    WebSessionEntry, WhatsAppAdapter,
 };
 use config::Config;
 #[cfg(not(test))]
@@ -2053,6 +2053,10 @@ fn should_send_telegram_response(channel_id: &ChannelId) -> bool {
 /// Returns whether a response should be routed to CLI.
 fn should_send_cli_response(channel_id: &ChannelId) -> bool {
     channel_id.as_str().starts_with("cli:")
+}
+
+fn should_send_whatsapp_response(channel_id: &ChannelId) -> bool {
+    channel_id.as_str().starts_with("whatsapp:")
 }
 
 fn should_send_web_response(channel_id: &ChannelId) -> bool {

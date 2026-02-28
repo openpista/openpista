@@ -809,17 +809,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Persist the current configuration to `~/.openpista/config.toml`.
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home).join(".openpista").join("config.toml");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(&path, content)
-    }
-
     /// Resolves the API key to use for the configured provider.
     ///
     /// Priority:
