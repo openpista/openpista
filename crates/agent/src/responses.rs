@@ -28,6 +28,13 @@ struct ResponsesRequest {
     /// complete `ResponsesResponse`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningConfig {
+    effort: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +64,16 @@ enum OutputItem {
         name: String,
         arguments: String,
     },
+    /// ChatGPT reasoning output — contains the model's chain-of-thought summary.
+    /// We capture it but skip it when extracting user-visible text.
+    Reasoning {
+        /// Reasoning summary items (opaque JSON values).
+        #[serde(default, rename = "summary")]
+        _summary: Vec<serde_json::Value>,
+    },
+    /// Catch-all for any future output types we don't yet handle.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +175,13 @@ impl LlmProvider for ResponsesApiProvider {
         let tools: Vec<ResponsesTool> = req.tools.iter().map(convert_tool).collect();
 
         let is_stream = self.is_chatgpt_backend();
+        let reasoning = if is_reasoning_model(&req.model) {
+            Some(ReasoningConfig {
+                effort: "high".to_string(),
+            })
+        } else {
+            None
+        };
         let responses_req = ResponsesRequest {
             model: req.model.clone(),
             instructions,
@@ -165,6 +189,7 @@ impl LlmProvider for ResponsesApiProvider {
             tools,
             store: false,
             stream: is_stream,
+            reasoning,
         };
 
         let url = format!("{}/responses", self.base_url);
@@ -219,10 +244,25 @@ impl LlmProvider for ResponsesApiProvider {
                 ))
             })?
         };
-        debug!(
-            output_items = %responses_resp.output.len(),
-            "Responses API response parsed"
-        );
+        let output_len = responses_resp.output.len();
+        debug!(output_items = %output_len, "Responses API response parsed");
+
+        // ChatGPT backend returns HTTP 200 with an empty output array when the
+        // session token is expired or the account lacks access to the model.
+        // However, if the conversation already contains tool results, empty output
+        // is more likely caused by a format issue (e.g. switching models mid-session)
+        // — return empty text to avoid cascading errors.
+        if output_len == 0 && self.is_chatgpt_backend() {
+            let has_tool_history = req.messages.iter().any(|m| m.role == proto::Role::Tool);
+            if has_tool_history {
+                return Ok(ChatResponse::Text(String::new()));
+            }
+            return Err(LlmError::AuthRequired(format!(
+                "ChatGPT 세션 토큰이 만료됐거나 '{}' 모델에 대한 접근 권한이 없습니다.",
+                req.model
+            )));
+        }
+
         // Check for function calls first.
         let tool_calls: Vec<ToolCall> = responses_resp
             .output
@@ -271,6 +311,14 @@ impl LlmProvider for ResponsesApiProvider {
             .join("");
         Ok(ChatResponse::Text(text))
     }
+}
+
+/// Returns true if the model supports the reasoning effort parameter.
+fn is_reasoning_model(model: &str) -> bool {
+    model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.contains("codex")
 }
 
 // ── Conversion helpers ─────────────────────────────────────────────────────────
@@ -378,7 +426,7 @@ fn parse_api_error(body: &str, status: reqwest::StatusCode) -> LlmError {
         {
             " Try /model to select a different model."
         } else if msg.to_lowercase().contains("auth") {
-            " Use /login to re-authenticate."
+            " /login으로 재인증하세요."
         } else {
             ""
         };
@@ -851,5 +899,109 @@ mod tests {
         );
         let resp = parse_sse_response(body).expect("fallback direct output");
         assert_eq!(resp.output.len(), 1);
+    }
+
+    // ── Reasoning / Unknown output item tests ────────────────────────────────
+
+    #[test]
+    fn parses_reasoning_and_message_output() {
+        // Simulates a real ChatGPT response: reasoning item followed by message
+        let json = r#"{"output":[
+            {"type":"reasoning","id":"rs_1","summary":[]},
+            {"type":"message","id":"msg_1","status":"completed","content":[
+                {"type":"output_text","text":"Hi! How can I help?"}]}
+        ]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(resp.output.len(), 2);
+        assert!(matches!(&resp.output[0], OutputItem::Reasoning { .. }));
+        assert!(matches!(&resp.output[1], OutputItem::Message { .. }));
+
+        // Extract text the same way the provider does — reasoning is skipped.
+        let text: String = resp
+            .output
+            .into_iter()
+            .filter_map(|item| {
+                if let OutputItem::Message { content } = item {
+                    let texts: Vec<String> = content
+                        .into_iter()
+                        .map(|c| match c {
+                            MessageContent::OutputText { text } => text,
+                        })
+                        .collect();
+                    Some(texts.join(""))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text, "Hi! How can I help?");
+    }
+
+    #[test]
+    fn reasoning_only_output_yields_empty_text() {
+        let json = r#"{"output":[{"type":"reasoning","summary":[{"text":"thinking..."}]}]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(resp.output.len(), 1);
+        assert!(matches!(&resp.output[0], OutputItem::Reasoning { .. }));
+
+        let text: String = resp
+            .output
+            .into_iter()
+            .filter_map(|item| {
+                if let OutputItem::Message { content } = item {
+                    Some(
+                        content
+                            .into_iter()
+                            .map(|c| match c {
+                                MessageContent::OutputText { text } => text,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(""),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn unknown_output_type_parsed_without_error() {
+        let json = r#"{"output":[
+            {"type":"some_future_type","data":123},
+            {"type":"message","content":[{"type":"output_text","text":"ok"}]}
+        ]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse unknown type");
+        assert_eq!(resp.output.len(), 2);
+        assert!(matches!(&resp.output[0], OutputItem::Unknown));
+        assert!(matches!(&resp.output[1], OutputItem::Message { .. }));
+    }
+
+    #[test]
+    fn reasoning_summary_defaults_to_empty_vec() {
+        // Reasoning item without the `summary` field at all
+        let json = r#"{"output":[{"type":"reasoning"}]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).expect("parse");
+        if let OutputItem::Reasoning { _summary } = &resp.output[0] {
+            assert!(_summary.is_empty());
+        } else {
+            panic!("expected Reasoning variant");
+        }
+    }
+
+    #[test]
+    fn parse_sse_with_reasoning_output() {
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"output\":[{\"type\":\"reasoning\",\"summary\":[]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}]}\n",
+            "\n",
+        );
+        let resp = parse_sse_response(body).expect("SSE with reasoning");
+        assert_eq!(resp.output.len(), 2);
+        assert!(matches!(&resp.output[0], OutputItem::Reasoning { .. }));
+        assert!(matches!(&resp.output[1], OutputItem::Message { .. }));
     }
 }

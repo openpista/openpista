@@ -1,12 +1,18 @@
 //! Runtime orchestration loop for conversation, tools, and memory.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use proto::{AgentMessage, ChannelId, LlmError, Role, SessionId};
+use proto::{
+    AgentMessage, ChannelId, LlmError, Role, SessionId, ToolApprovalDecision, ToolApprovalRequest,
+    ToolResult,
+};
 use serde_json::Value;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::{
+    approval::ToolApprovalHandler,
     llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider},
     memory::SqliteMemory,
     tool_registry::ToolRegistry,
@@ -16,6 +22,9 @@ const DEFAULT_SYSTEM_PROMPT: &str = r#"You are openpista, an OS Gateway AI Agent
 You can interact with the operating system through available tools.
 Be helpful, concise, and safe. Always confirm before running potentially destructive commands."#;
 
+/// Maximum total character size of conversation context sent to the LLM.
+/// Roughly 150K tokens (1 token ≈ 4 chars), leaving room for the response.
+const MAX_CONTEXT_CHARS: usize = 600_000;
 /// The main agent runtime: manages the ReAct loop
 pub struct AgentRuntime {
     llm: std::sync::RwLock<Arc<dyn LlmProvider>>,
@@ -25,10 +34,14 @@ pub struct AgentRuntime {
     memory: Arc<SqliteMemory>,
     model: std::sync::RwLock<String>,
     max_tool_rounds: usize,
+    /// Handler for requesting user approval before tool execution.
+    approval_handler: std::sync::RwLock<Arc<dyn ToolApprovalHandler>>,
+    /// Tools approved per session via "Allow for session", keyed by session ID.
+    session_allowed_tools: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl AgentRuntime {
-    /// Creates a new agent runtime with LLM provider, tools, and memory.
+    /// Creates a new agent runtime with LLM provider, tools, memory, and approval handler.
     pub fn new(
         llm: Arc<dyn LlmProvider>,
         tools: Arc<ToolRegistry>,
@@ -36,6 +49,7 @@ impl AgentRuntime {
         provider_name: &str,
         model: impl Into<String>,
         max_tool_rounds: usize,
+        approval_handler: Arc<dyn ToolApprovalHandler>,
     ) -> Self {
         let mut providers = std::collections::HashMap::new();
         providers.insert(provider_name.to_string(), Arc::clone(&llm));
@@ -47,7 +61,17 @@ impl AgentRuntime {
             memory,
             model: std::sync::RwLock::new(model.into()),
             max_tool_rounds,
+            approval_handler: std::sync::RwLock::new(approval_handler),
+            session_allowed_tools: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Replaces the approval handler at runtime (e.g. after constructing a web adapter).
+    pub fn set_approval_handler(&self, handler: Arc<dyn ToolApprovalHandler>) {
+        *self
+            .approval_handler
+            .write()
+            .expect("approval_handler lock") = handler;
     }
 
     pub fn memory(&self) -> &Arc<SqliteMemory> {
@@ -98,6 +122,56 @@ impl AgentRuntime {
         names
     }
 
+    /// Checks whether a tool call is approved for execution.
+    ///
+    /// If the tool has been previously approved for the session via
+    /// [`ToolApprovalDecision::AllowForSession`], it is auto-approved.
+    /// Otherwise the configured [`ToolApprovalHandler`] is consulted.
+    /// A 60-second timeout applies; if the handler does not respond in time
+    /// the call is rejected.
+    async fn check_tool_approval(
+        &self,
+        session_id: &SessionId,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> ToolApprovalDecision {
+        // Fast path: already allowed for this session
+        {
+            let allowed = self.session_allowed_tools.lock().await;
+            if let Some(tools) = allowed.get(session_id.as_str())
+                && tools.contains(tool_name)
+            {
+                return ToolApprovalDecision::Approve;
+            }
+        }
+
+        let req = ToolApprovalRequest {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.clone(),
+        };
+
+        // 60-second timeout — reject if no response
+        let handler = Arc::clone(&*self.approval_handler.read().expect("approval_handler lock"));
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            handler.request_approval(req),
+        )
+        .await
+        .unwrap_or(ToolApprovalDecision::Reject);
+
+        if decision == ToolApprovalDecision::AllowForSession {
+            let mut allowed = self.session_allowed_tools.lock().await;
+            allowed
+                .entry(session_id.as_str().to_string())
+                .or_default()
+                .insert(tool_name.to_string());
+        }
+
+        decision
+    }
+
     /// Process a user message and return the agent's final text response
     pub async fn process(
         &self,
@@ -140,15 +214,19 @@ impl AgentRuntime {
                     messages.push(assistant);
                 }
                 Role::Tool => {
+                    let sanitized = sanitize_tool_output_for_llm(&msg.content);
                     messages.push(ChatMessage::tool_result(
                         msg.tool_call_id.as_deref().unwrap_or(""),
                         msg.tool_name.as_deref().unwrap_or(""),
-                        &msg.content,
+                        &sanitized,
                     ));
                 }
                 Role::System => {} // skip stored system messages
             }
         }
+
+        // Truncate history if it exceeds the context budget.
+        truncate_messages_to_fit(&mut messages);
 
         // ReAct loop
         let tool_defs = self.tools.definitions();
@@ -172,8 +250,32 @@ impl AgentRuntime {
             debug!("LLM call (round {round}) for session {session_id}");
             let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
             let t0 = std::time::Instant::now();
-            let response = llm.chat(req).await.map_err(proto::Error::Llm)?;
+            let response = llm.chat(req).await;
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
+
+            // Surface authentication failures as a human-readable agent reply.
+            let response = match response {
+                Err(LlmError::AuthRequired(msg)) => {
+                    let text = format!(
+                        "**인증 필요**: {msg}\n\n\
+                         - **TUI**: `openpista auth login` 실행 또는 `/login` 명령 사용\n\
+                         - **웹**: 좌측 사이드바 상단의 로그인 버튼 클릭",
+                    );
+                    info!("Auth required for session {session_id}, returning re-login hint");
+                    let assistant_msg =
+                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
+                    self.memory
+                        .save_message(&assistant_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+                    self.memory
+                        .touch_session(session_id)
+                        .await
+                        .map_err(proto::Error::Database)?;
+                    return Ok(text);
+                }
+                other => other.map_err(proto::Error::Llm)?,
+            };
 
             match response {
                 ChatResponse::Text(text) => {
@@ -223,7 +325,19 @@ impl AgentRuntime {
                     for tc in &tool_calls {
                         let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
-                        let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
+                        // Check approval before execution
+                        let decision = self
+                            .check_tool_approval(session_id, &tc.id, &tc.name, &tool_args)
+                            .await;
+                        let result = match decision {
+                            ToolApprovalDecision::Approve
+                            | ToolApprovalDecision::AllowForSession => {
+                                self.tools.execute(&tc.id, &tc.name, tool_args).await
+                            }
+                            ToolApprovalDecision::Reject => {
+                                ToolResult::error(&tc.id, &tc.name, "Tool call rejected by user")
+                            }
+                        };
 
                         // Save tool result message to memory
                         let tool_msg = AgentMessage::tool_result(
@@ -238,7 +352,8 @@ impl AgentRuntime {
                             .map_err(proto::Error::Database)?;
 
                         // Add to in-memory conversation
-                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                        let llm_output = sanitize_tool_output_for_llm(&result.output);
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &llm_output));
                     }
 
                     round += 1;
@@ -294,15 +409,19 @@ impl AgentRuntime {
                     messages.push(assistant);
                 }
                 Role::Tool => {
+                    let sanitized = sanitize_tool_output_for_llm(&msg.content);
                     messages.push(ChatMessage::tool_result(
                         msg.tool_call_id.as_deref().unwrap_or(""),
                         msg.tool_name.as_deref().unwrap_or(""),
-                        &msg.content,
+                        &sanitized,
                     ));
                 }
                 Role::System => {} // skip stored system messages
             }
         }
+
+        // Truncate history if it exceeds the context budget.
+        truncate_messages_to_fit(&mut messages);
 
         // ReAct loop with progress events
         let tool_defs = self.tools.definitions();
@@ -329,8 +448,32 @@ impl AgentRuntime {
             debug!("LLM call (round {round}) for session {session_id}");
             let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
             let t0 = std::time::Instant::now();
-            let response = llm.chat(req).await.map_err(proto::Error::Llm)?;
+            let response = llm.chat(req).await;
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
+
+            // Surface authentication failures as a human-readable agent reply.
+            let response = match response {
+                Err(LlmError::AuthRequired(msg)) => {
+                    let text = format!(
+                        "**인증 필요**: {msg}\n\n\
+                         - **TUI**: `openpista auth login` 실행 또는 `/login` 명령 사용\n\
+                         - **웹**: 좌측 사이드바 상단의 로그인 버튼 클릭",
+                    );
+                    info!("Auth required for session {session_id}, returning re-login hint");
+                    let assistant_msg =
+                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
+                    self.memory
+                        .save_message(&assistant_msg)
+                        .await
+                        .map_err(proto::Error::Database)?;
+                    self.memory
+                        .touch_session(session_id)
+                        .await
+                        .map_err(proto::Error::Database)?;
+                    return Ok(text);
+                }
+                other => other.map_err(proto::Error::Llm)?,
+            };
 
             match response {
                 ChatResponse::Text(text) => {
@@ -387,7 +530,19 @@ impl AgentRuntime {
 
                         let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
-                        let result = self.tools.execute(&tc.id, &tc.name, tool_args).await;
+                        // Check approval before execution
+                        let decision = self
+                            .check_tool_approval(session_id, &tc.id, &tc.name, &tool_args)
+                            .await;
+                        let result = match decision {
+                            ToolApprovalDecision::Approve
+                            | ToolApprovalDecision::AllowForSession => {
+                                self.tools.execute(&tc.id, &tc.name, tool_args).await
+                            }
+                            ToolApprovalDecision::Reject => {
+                                ToolResult::error(&tc.id, &tc.name, "Tool call rejected by user")
+                            }
+                        };
 
                         // Progress: tool call finished
                         let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallFinished {
@@ -410,7 +565,8 @@ impl AgentRuntime {
                             .map_err(proto::Error::Database)?;
 
                         // Add to in-memory conversation
-                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result.output));
+                        let llm_output = sanitize_tool_output_for_llm(&result.output);
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &llm_output));
                     }
 
                     round += 1;
@@ -447,6 +603,101 @@ fn prepare_tool_args(tool_name: &str, args: Value) -> Value {
     Value::Object(object)
 }
 
+/// Strips large base64 image payloads from tool output before sending to the LLM.
+/// The full output is already saved to memory; this only affects what the LLM sees.
+fn sanitize_tool_output_for_llm(output: &str) -> String {
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(output)
+        && let Some(obj) = val.as_object_mut()
+        && obj.contains_key("data_b64")
+        && obj
+            .get("mime")
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.starts_with("image/"))
+    {
+        obj.remove("data_b64");
+        obj.insert(
+            "note".to_string(),
+            serde_json::Value::String(
+                "Image data captured successfully. Base64 data omitted from context.".to_string(),
+            ),
+        );
+        if let Ok(s) = serde_json::to_string(&val) {
+            return s;
+        }
+    }
+    output.to_string()
+}
+
+/// Estimates the character count of a single [`ChatMessage`] for context
+/// size budgeting. Counts `content` plus serialized tool call arguments.
+fn estimate_message_chars(msg: &ChatMessage) -> usize {
+    let mut chars = msg.content.len();
+    if let Some(calls) = &msg.tool_calls {
+        for tc in calls {
+            chars += tc.name.len();
+            chars += tc.arguments.to_string().len();
+        }
+    }
+    chars
+}
+
+/// Truncates conversation messages so total context stays within
+/// [`MAX_CONTEXT_CHARS`]. The system message (first) and the most recent
+/// messages are always preserved; the oldest middle messages are dropped
+/// when the budget is exceeded.
+fn truncate_messages_to_fit(messages: &mut Vec<ChatMessage>) {
+    let total: usize = messages.iter().map(estimate_message_chars).sum();
+    if total <= MAX_CONTEXT_CHARS {
+        return;
+    }
+
+    // Always keep at least the system prompt (index 0) and the last few messages.
+    const MIN_KEEP_TAIL: usize = 4;
+    let keep_tail = MIN_KEEP_TAIL.min(messages.len().saturating_sub(1));
+    let keep_head: usize = 1; // system prompt
+
+    if messages.len() <= keep_head + keep_tail {
+        // Nothing we can safely drop.
+        return;
+    }
+
+    // Budget for head and tail.
+    let head_chars: usize = messages[..keep_head]
+        .iter()
+        .map(estimate_message_chars)
+        .sum();
+    let tail_chars: usize = messages[messages.len() - keep_tail..]
+        .iter()
+        .map(estimate_message_chars)
+        .sum();
+
+    let remaining_budget = MAX_CONTEXT_CHARS.saturating_sub(head_chars + tail_chars);
+
+    // Walk from the tail-end of the middle section toward the head, keeping
+    // messages until the remaining budget is exhausted.
+    let middle = &messages[keep_head..messages.len() - keep_tail];
+    let mut keep_from_middle: usize = 0;
+    let mut middle_chars: usize = 0;
+
+    for msg in middle.iter().rev() {
+        let c = estimate_message_chars(msg);
+        if middle_chars + c > remaining_budget {
+            break;
+        }
+        middle_chars += c;
+        keep_from_middle += 1;
+    }
+
+    let drop_count = middle.len() - keep_from_middle;
+    if drop_count > 0 {
+        warn!(
+            "Conversation context too large ({total} chars > {MAX_CONTEXT_CHARS}); \
+             dropping {drop_count} oldest messages to fit"
+        );
+        messages.drain(keep_head..keep_head + drop_count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::VecDeque, sync::Mutex};
@@ -455,6 +706,7 @@ mod tests {
     use proto::{LlmError, ToolCall, ToolResult};
 
     use super::*;
+    use crate::approval::AutoApproveHandler;
 
     struct MockLlm {
         queue: Mutex<VecDeque<ChatResponse>>,
@@ -546,6 +798,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             4,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-1");
@@ -583,6 +836,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             4,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-2");
@@ -621,6 +875,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             1,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-3");
@@ -646,6 +901,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             2,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-llm-error");
@@ -676,6 +932,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             2,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-llm-timeout");
@@ -700,6 +957,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             4,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-progress-1");
@@ -737,6 +995,7 @@ mod tests {
             "mock-provider",
             "mock-model",
             4,
+            Arc::new(AutoApproveHandler),
         );
         let channel = ChannelId::from("cli:local");
         let session = SessionId::from("session-progress-2");
@@ -827,7 +1086,15 @@ mod tests {
             "from-second".to_string(),
         )]));
         let memory = open_temp_memory().await;
-        let runtime = AgentRuntime::new(llm1, build_registry(), memory, "first", "mock-model", 4);
+        let runtime = AgentRuntime::new(
+            llm1,
+            build_registry(),
+            memory,
+            "first",
+            "mock-model",
+            4,
+            Arc::new(AutoApproveHandler),
+        );
         assert_eq!(runtime.active_provider_name(), "first");
 
         runtime.register_provider("second", llm2);
@@ -850,7 +1117,15 @@ mod tests {
         let llm = Arc::new(MockLlm::new(vec![]));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let memory = rt.block_on(open_temp_memory());
-        let runtime = AgentRuntime::new(llm, build_registry(), memory, "default", "m", 1);
+        let runtime = AgentRuntime::new(
+            llm,
+            build_registry(),
+            memory,
+            "default",
+            "m",
+            1,
+            Arc::new(AutoApproveHandler),
+        );
         let err = runtime.switch_provider("nonexistent");
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("unknown provider"));
@@ -862,9 +1137,176 @@ mod tests {
         let llm2 = Arc::new(MockLlm::new(vec![]));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let memory = rt.block_on(open_temp_memory());
-        let runtime = AgentRuntime::new(llm1, build_registry(), memory, "alpha", "m", 1);
+        let runtime = AgentRuntime::new(
+            llm1,
+            build_registry(),
+            memory,
+            "alpha",
+            "m",
+            1,
+            Arc::new(AutoApproveHandler),
+        );
         runtime.register_provider("beta", llm2);
         let names = runtime.registered_providers();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn sanitize_tool_output_strips_base64_image_data() {
+        let output = serde_json::json!({
+            "mime": "image/png",
+            "data_b64": "iVBORw0KGgoAAAANSUhEUg".repeat(1000)
+        })
+        .to_string();
+        let sanitized = sanitize_tool_output_for_llm(&output);
+        assert!(!sanitized.contains("iVBORw0KGgo"));
+        assert!(sanitized.contains("Base64 data omitted from context"));
+    }
+
+    #[test]
+    fn sanitize_tool_output_preserves_non_image_output() {
+        let output = r#"{"status":"ok","files":["a.txt"]}"#;
+        let sanitized = sanitize_tool_output_for_llm(output);
+        assert_eq!(sanitized, output);
+    }
+
+    #[test]
+    fn truncate_messages_drops_oldest_middle_when_over_budget() {
+        let system = ChatMessage::system("system");
+        let big = "x".repeat(MAX_CONTEXT_CHARS / 2);
+        let old_user = ChatMessage::user(&big);
+        let old_assistant = ChatMessage::assistant(&big);
+        // Need > MIN_KEEP_TAIL + keep_head messages so middle exists.
+        let recent1 = ChatMessage::user("recent q1");
+        let recent2 = ChatMessage::assistant("recent a1");
+        let recent3 = ChatMessage::user("recent q2");
+        let recent4 = ChatMessage::assistant("latest answer");
+
+        let mut messages = vec![
+            system,
+            old_user,
+            old_assistant,
+            recent1,
+            recent2,
+            recent3,
+            recent4,
+        ];
+        let original_len = messages.len();
+        truncate_messages_to_fit(&mut messages);
+
+        // System (first) and latest messages must survive.
+        assert_eq!(messages.first().unwrap().role, proto::Role::System);
+        assert_eq!(messages.last().unwrap().content, "latest answer");
+        assert!(
+            messages.len() < original_len,
+            "should have dropped middle messages"
+        );
+    }
+
+    #[test]
+    fn truncate_messages_is_noop_when_within_budget() {
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("world"),
+        ];
+        let before = messages.len();
+        truncate_messages_to_fit(&mut messages);
+        assert_eq!(messages.len(), before);
+    }
+
+    /// LLM spy that checks whether raw base64 data leaks into the prompt.
+    struct AssertNoBase64Llm {
+        marker: String,
+        found_marker: std::sync::Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AssertNoBase64Llm {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            for msg in &req.messages {
+                if msg.content.contains(&self.marker) {
+                    *self.found_marker.lock().unwrap() = true;
+                }
+            }
+            Ok(ChatResponse::Text("ok".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn process_sanitizes_base64_tool_results_from_history() {
+        // Phase 1: seed history with a base64 tool result.
+        let marker = "FAKE_BASE64_SCREENSHOT_DATA_MARKER";
+        let fake_b64 = marker.repeat(100);
+        let base64_output = serde_json::json!({
+            "mime": "image/png",
+            "data_b64": fake_b64
+        })
+        .to_string();
+
+        let memory = open_temp_memory().await;
+        let session = SessionId::from("session-sanitize");
+        let channel = ChannelId::from("cli:local");
+        memory
+            .ensure_session(&session, channel.as_str())
+            .await
+            .unwrap();
+
+        memory
+            .save_message(&AgentMessage::new(
+                session.clone(),
+                Role::User,
+                "take screenshot",
+            ))
+            .await
+            .unwrap();
+
+        let tc = ToolCall {
+            id: "tc-1".to_string(),
+            name: "browser.screenshot".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        memory
+            .save_message(&AgentMessage::assistant_tool_calls(
+                session.clone(),
+                vec![tc],
+            ))
+            .await
+            .unwrap();
+
+        memory
+            .save_message(&AgentMessage::tool_result(
+                session.clone(),
+                "tc-1",
+                "browser.screenshot",
+                &base64_output,
+            ))
+            .await
+            .unwrap();
+
+        // Phase 2: new user message triggers history reload.
+        // AssertNoBase64Llm checks that the marker never appears in messages.
+        let llm = Arc::new(AssertNoBase64Llm {
+            marker: marker.to_string(),
+            found_marker: std::sync::Mutex::new(false),
+        });
+        let runtime = AgentRuntime::new(
+            Arc::clone(&llm) as Arc<dyn LlmProvider>,
+            build_registry(),
+            memory,
+            "mock",
+            "mock-model",
+            4,
+            Arc::new(AutoApproveHandler),
+        );
+
+        let _ = runtime
+            .process(&channel, &session, "what did you see?", None)
+            .await;
+
+        assert!(
+            !*llm.found_marker.lock().unwrap(),
+            "LLM received raw base64 data that should have been sanitized"
+        );
     }
 }

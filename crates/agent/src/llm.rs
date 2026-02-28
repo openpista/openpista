@@ -108,6 +108,12 @@ pub trait LlmProvider: Send + Sync {
 }
 
 /// OpenAI-compatible provider (works with OpenAI, together.ai, etc.)
+///
+/// **Note:** For reasoning models (o1, o3, o4-mini, codex), use the
+/// [`ResponsesApiProvider`](super::responses::ResponsesApiProvider) which
+/// supports the `reasoning.effort` parameter. This ChatCompletions-based
+/// provider is used for non-reasoning models and third-party endpoints
+/// (Together, Ollama, etc.) that don't support the reasoning parameter.
 pub struct OpenAiProvider {
     client: Client<OpenAIConfig>,
 }
