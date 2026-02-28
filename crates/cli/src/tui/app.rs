@@ -385,6 +385,8 @@ pub struct TuiApp {
     pub session_browser_new_requested: bool,
     /// Pending web config from completed wizard (consumed by event loop).
     pending_web_config: Option<crate::config::WebConfig>,
+    /// Pending tool approval request awaiting user decision (Y/N/A).
+    pub pending_approval: Option<super::approval::PendingApproval>,
 }
 
 /// Generates QR code lines using Unicode half-block characters.
@@ -460,6 +462,7 @@ impl TuiApp {
             chat_scroll_clamped: 0,
             session_browser_new_requested: false,
             pending_web_config: None,
+            pending_approval: None,
         }
     }
 
@@ -1148,6 +1151,28 @@ impl TuiApp {
                     self.state = AppState::Idle;
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        // ── Tool Approval prompt ────────────────────────────
+        if self.pending_approval.is_some() {
+            let decision = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Some(proto::ToolApprovalDecision::Approve)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(proto::ToolApprovalDecision::Reject)
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Some(proto::ToolApprovalDecision::AllowForSession)
+                }
+                _ => None,
+            };
+            if let Some(decision) = decision
+                && let Some(pending) = self.pending_approval.take()
+            {
+                let _ = pending.reply_tx.send(decision);
             }
             return;
         }
@@ -2018,7 +2043,6 @@ impl TuiApp {
                 Command::None
             }
 
-
             // ── Web config wizard ──────────────────────────────
             Action::WebConfigKey(key) => {
                 use crossterm::event::{KeyCode, KeyModifiers};
@@ -2085,7 +2109,8 @@ impl TuiApp {
                                 *step = WebConfigStep::CorsOrigins;
                                 *input_buffer = cors_origins.clone();
                                 self.push_assistant(
-                                    "Step 4/6: CORS origins (comma-separated, or \"*\"):".to_string(),
+                                    "Step 4/6: CORS origins (comma-separated, or \"*\"):"
+                                        .to_string(),
                                 );
                             }
                             KeyCode::Char(c) => {
@@ -2101,9 +2126,7 @@ impl TuiApp {
                                 *cors_origins = input_buffer.clone();
                                 *step = WebConfigStep::StaticDir;
                                 *input_buffer = static_dir.clone();
-                                self.push_assistant(
-                                    "Step 5/6: Static file directory:".to_string(),
-                                );
+                                self.push_assistant("Step 5/6: Static file directory:".to_string());
                             }
                             KeyCode::Char(c) => {
                                 input_buffer.push(c);
@@ -2125,7 +2148,11 @@ impl TuiApp {
                                      static_dir: {}\n\
                                      Save? (y/n)",
                                     enabled,
-                                    if token.is_empty() { "(none)" } else { token.as_str() },
+                                    if token.is_empty() {
+                                        "(none)"
+                                    } else {
+                                        token.as_str()
+                                    },
                                     port,
                                     cors_origins,
                                     static_dir,
@@ -2150,6 +2177,8 @@ impl TuiApp {
                                     port: port.parse::<u16>().unwrap_or(3210),
                                     cors_origins: cors_origins.clone(),
                                     static_dir: static_dir.clone(),
+                                    shared_session_id: crate::config::WebConfig::default()
+                                        .shared_session_id,
                                 };
                                 self.pending_web_config = Some(web_cfg);
                                 self.push_assistant("Web config saved.".to_string());
@@ -2449,7 +2478,6 @@ impl TuiApp {
         if matches!(self.state, AppState::SessionBrowsing { .. }) {
             return vec![Action::SessionBrowserKey(key)];
         }
-
 
         if matches!(self.state, AppState::WebConfiguring { .. }) {
             return vec![Action::WebConfigKey(key)];
@@ -2795,6 +2823,72 @@ impl TuiApp {
                         )
                         .wrap(Wrap { trim: false });
                     frame.render_widget(qr_widget, popup_area);
+                }
+
+                // ── Tool Approval overlay ────────────────────
+                if let Some(pending) = &self.pending_approval {
+                    let tool_name = &pending.request.tool_name;
+                    let args_str = serde_json::to_string_pretty(&pending.request.arguments)
+                        .unwrap_or_else(|_| pending.request.arguments.to_string());
+                    let args_preview: String = args_str.chars().take(200).collect();
+
+                    let popup_width = 60u16.min(area.width.saturating_sub(4));
+                    let popup_height = 9u16.min(area.height.saturating_sub(2));
+                    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+                    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+                    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+                    frame.render_widget(Clear, popup_area);
+                    let dialog = Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            " Tool Approval Required ",
+                            Style::default()
+                                .fg(THEME.warning)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" Tool: {tool_name}"),
+                            Style::default().fg(THEME.fg),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" Args: {args_preview}"),
+                            Style::default().fg(THEME.fg_dim),
+                        )),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                " y",
+                                Style::default()
+                                    .fg(THEME.success)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(": approve  ", Style::default().fg(THEME.fg_muted)),
+                            Span::styled(
+                                "n",
+                                Style::default()
+                                    .fg(THEME.error)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(": reject  ", Style::default().fg(THEME.fg_muted)),
+                            Span::styled(
+                                "a",
+                                Style::default()
+                                    .fg(THEME.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                ": allow for session",
+                                Style::default().fg(THEME.fg_muted),
+                            ),
+                        ]),
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(THEME.warning)),
+                    )
+                    .wrap(Wrap { trim: false });
+                    frame.render_widget(dialog, popup_area);
                 }
             }
         }

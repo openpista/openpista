@@ -3,11 +3,11 @@
 use super::app::{AppState, TuiApp};
 use super::theme::THEME;
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 
 /// Braille-pattern spinner frames for the status bar animation.
@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::auth_picker::LoginBrowseStep;
     use proto::{ChannelId, SessionId};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     fn make_app() -> TuiApp {
         TuiApp::new(

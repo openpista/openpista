@@ -85,6 +85,19 @@ pub enum LoginAuthMode {
     None,
 }
 
+impl LoginAuthMode {
+    /// Returns the canonical string representation used by web clients.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth => "oauth",
+            Self::ApiKey => "api_key",
+            Self::EndpointAndKey => "endpoint_and_key",
+            Self::None => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Provider classification for picker badges.
 pub enum ProviderCategory {
@@ -438,7 +451,11 @@ pub struct Config {
 }
 
 fn default_max_tool_rounds() -> usize {
-    10
+    30
+}
+
+fn default_web_shared_session_id() -> String {
+    "shared-main".to_string()
 }
 
 impl std::str::FromStr for ProviderPreset {
@@ -526,7 +543,7 @@ impl Default for AgentConfig {
             provider: ProviderPreset::default(),
             model: String::new(),
             api_key: String::new(),
-            max_tool_rounds: 10,
+            max_tool_rounds: 30,
             base_url: None,
             oauth_client_id: String::new(),
         }
@@ -653,6 +670,9 @@ pub struct WebConfig {
     /// Directory for serving WASM bundle and H5 static assets.
     #[serde(default = "default_web_static_dir")]
     pub static_dir: String,
+    /// Shared session id used by Web and TUI when no explicit session is provided.
+    #[serde(default = "default_web_shared_session_id")]
+    pub shared_session_id: String,
 }
 
 fn default_web_port() -> u16 {
@@ -672,6 +692,7 @@ impl Default for WebConfig {
             port: default_web_port(),
             cors_origins: String::new(),
             static_dir: default_web_static_dir(),
+            shared_session_id: default_web_shared_session_id(),
         }
     }
 }
@@ -1068,9 +1089,7 @@ impl Config {
         use std::io::Write;
 
         let config_path = {
-            let cwd = std::env::current_dir()
-                .ok()
-                .map(|d| d.join("config.toml"));
+            let cwd = std::env::current_dir().ok().map(|d| d.join("config.toml"));
             if cwd.as_ref().is_some_and(|p| p.exists()) {
                 cwd.unwrap()
             } else {
@@ -1083,9 +1102,9 @@ impl Config {
         let mut doc: toml::Value =
             toml::from_str(&content).unwrap_or_else(|_| toml::Value::Table(Default::default()));
 
-        let root = doc.as_table_mut().ok_or_else(|| {
-            ConfigError::Toml("config root is not a table".to_string())
-        })?;
+        let root = doc
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::Toml("config root is not a table".to_string()))?;
 
         let channels = root
             .entry("channels")
@@ -1097,15 +1116,40 @@ impl Config {
             .map_err(|e| ConfigError::Toml(e.to_string()))?;
         channels.insert("web".to_string(), web_value);
 
-        let serialized = toml::to_string_pretty(&doc)
-            .map_err(|e| ConfigError::Toml(e.to_string()))?;
+        let serialized =
+            toml::to_string_pretty(&doc).map_err(|e| ConfigError::Toml(e.to_string()))?;
 
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
         }
         let mut f = std::fs::File::create(&config_path).map_err(ConfigError::Io)?;
-        f.write_all(serialized.as_bytes()).map_err(ConfigError::Io)?;
+        f.write_all(serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
         Ok(())
+    }
+
+    /// Persists the full config to the default config path.
+    ///
+    /// Path resolution follows the same rule as `save_web_section`:
+    /// prefer `./config.toml` when present, otherwise `~/.openpista/config.toml`.
+    #[cfg(not(test))]
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let config_path = {
+            let cwd = std::env::current_dir().ok().map(|d| d.join("config.toml"));
+            if cwd.as_ref().is_some_and(|p| p.exists()) {
+                cwd.unwrap()
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".openpista").join("config.toml")
+            }
+        };
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(config_path, content)
     }
 }
 
@@ -1175,9 +1219,10 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.agent.provider, ProviderPreset::OpenAi);
         assert_eq!(cfg.agent.effective_model(), "gpt-4o");
-        assert_eq!(cfg.agent.max_tool_rounds, 10);
+        assert_eq!(cfg.agent.max_tool_rounds, 30);
         assert!(!cfg.database.url.is_empty());
         assert!(cfg.channels.cli.enabled);
+        assert_eq!(cfg.channels.web.shared_session_id, "shared-main");
     }
 
     #[test]
@@ -1381,6 +1426,40 @@ api_key = "tg-key"
                 cfg.agent.effective_base_url(),
                 Some("https://api.together.xyz/v1")
             );
+        });
+    }
+
+    #[test]
+    fn web_config_deserializes_legacy_without_shared_session_id() {
+        let web: WebConfig = toml::from_str(
+            r#"
+enabled = true
+token = "token"
+port = 3210
+cors_origins = "*"
+static_dir = "/tmp/web"
+"#,
+        )
+        .expect("legacy web config should deserialize");
+        assert_eq!(web.shared_session_id, "shared-main");
+    }
+
+    #[test]
+    fn save_web_section_persists_shared_session_id() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            set_env_var("HOME", tmp.path().to_string_lossy().as_ref());
+
+            let mut cfg = Config::default();
+            cfg.channels.web.enabled = true;
+            cfg.channels.web.shared_session_id = "team-room".to_string();
+            cfg.save_web_section().expect("save web section");
+
+            let config_path = tmp.path().join(".openpista").join("config.toml");
+            let content = std::fs::read_to_string(&config_path).expect("read saved config");
+            assert!(content.contains("shared_session_id = \"team-room\""));
+
+            remove_env_var("HOME");
         });
     }
 

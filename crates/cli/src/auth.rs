@@ -84,6 +84,12 @@ impl Credentials {
         }
         let content = toml::to_string(self).context("failed to serialize credentials")?;
         std::fs::write(path, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
         debug!(path = %path.display(), providers = %self.providers.len(), "Credentials saved");
         Ok(())
     }
@@ -753,6 +759,8 @@ pub struct PendingOAuthCodeDisplay {
     pub token_url: String,
     /// OAuth client identifier.
     pub client_id: String,
+    /// Timestamp when the flow was initiated; used for TTL enforcement.
+    pub created_at: std::time::Instant,
 }
 
 /// Extracts the scheme+host origin from a URL (e.g. `https://example.com`).
@@ -800,6 +808,7 @@ pub fn start_code_display_flow(
         redirect_uri,
         token_url: endpoints.token_url.to_string(),
         client_id: client_id.to_string(),
+        created_at: std::time::Instant::now(),
     }
 }
 
@@ -823,6 +832,7 @@ pub fn start_code_display_flow(
         ),
         token_url: endpoints.token_url.to_string(),
         client_id: client_id.to_string(),
+        created_at: std::time::Instant::now(),
     }
 }
 

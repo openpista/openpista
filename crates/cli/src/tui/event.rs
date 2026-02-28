@@ -194,7 +194,6 @@ fn parse_session_command(raw: &str) -> Option<SessionCommand> {
     }
 }
 
-
 /// Parsed sub-command for the `/web` slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WebCommand {
@@ -626,6 +625,7 @@ pub async fn run_tui(
     mut session_id: SessionId,
     model_name: String,
     mut config: Config,
+    mut approval_rx: mpsc::Receiver<super::approval::PendingApproval>,
 ) -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
@@ -744,6 +744,31 @@ pub async fn run_tui(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         use crossterm::event::KeyCode;
                         let mut pending_async_cmd = Command::None;
+
+                        // Handle tool approval prompt keys first
+                        if app.pending_approval.is_some() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Approve);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Reject);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('a') | KeyCode::Char('A') => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::AllowForSession);
+                                    }
+                                    continue;
+                                }
+                                _ => continue, // Ignore other keys while approval is pending
+                            }
+                        }
                         if key.code == KeyCode::Enter {
                             // Step 1: resolve palette if active
                             if app.is_palette_active() {
@@ -1574,6 +1599,11 @@ pub async fn run_tui(
                 }
                 model_task = None;
                 app.update(super::action::Action::ScrollToBottom);
+            }
+
+            // ── Branch: tool approval request ─────────────────────────
+            Some(pending) = approval_rx.recv() => {
+                app.pending_approval = Some(pending);
             }
 
             // ── Branch 6: spinner tick ─────────────────────────────────

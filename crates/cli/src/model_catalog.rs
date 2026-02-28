@@ -236,22 +236,6 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
             },
             ModelCatalogEntry {
                 id: "gpt-4.1-nano".to_string(),
-                provider: p.clone(),
-                recommended_for_coding: false,
-                status: ModelStatus::Stable,
-                source: ModelSource::Docs,
-                available: true,
-            },
-            ModelCatalogEntry {
-                id: "gpt-4o".to_string(),
-                provider: p.clone(),
-                recommended_for_coding: false,
-                status: ModelStatus::Stable,
-                source: ModelSource::Docs,
-                available: true,
-            },
-            ModelCatalogEntry {
-                id: "gpt-4o-mini".to_string(),
                 provider: p,
                 recommended_for_coding: false,
                 status: ModelStatus::Stable,
@@ -269,14 +253,6 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
         }],
         "openrouter" => vec![ModelCatalogEntry {
             id: "openai/gpt-4o".to_string(),
-            provider: p,
-            recommended_for_coding: true,
-            status: ModelStatus::Stable,
-            source: ModelSource::Docs,
-            available: true,
-        }],
-        "ollama" => vec![ModelCatalogEntry {
-            id: "llama3.2".to_string(),
             provider: p,
             recommended_for_coding: true,
             status: ModelStatus::Stable,
@@ -709,7 +685,7 @@ mod tests {
         assert!(by_id["gpt-5-codex"].available);
         assert!(by_id["claude-sonnet-4-6"].available);
         // Docs-sourced seed model are always available regardless of remote response.
-        assert!(by_id["gpt-4o"].available);
+        assert!(by_id["gpt-4.1"].available);
         // Api-sourced (remote-only) model are also available.
         assert_eq!(by_id["gpt-5.2-codex"].source, ModelSource::Api);
         assert!(by_id["gpt-5.2-codex"].available);
@@ -1318,7 +1294,7 @@ mod tests {
     #[test]
     fn seed_models_openai_count() {
         let entries = seed_models_for_provider("openai");
-        assert_eq!(entries.len(), 11);
+        assert_eq!(entries.len(), 9);
         assert!(entries.iter().all(|e| e.provider == "openai"));
     }
 
@@ -1327,13 +1303,6 @@ mod tests {
         let entries = seed_models_for_provider("openrouter");
         assert_eq!(entries.len(), 1);
         assert!(entries.iter().all(|e| e.provider == "openrouter"));
-    }
-
-    #[test]
-    fn seed_models_ollama_count() {
-        let entries = seed_models_for_provider("ollama");
-        assert_eq!(entries.len(), 1);
-        assert!(entries.iter().all(|e| e.provider == "ollama"));
     }
 
     #[test]
@@ -1406,7 +1375,6 @@ mod tests {
             "openai",
             "together",
             "openrouter",
-            "ollama",
             "github-copilot",
         ] {
             let entries = seed_models_for_provider(provider);
