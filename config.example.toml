@@ -73,6 +73,7 @@ token = ""        # 또는 환경 변수 openpista_WEB_TOKEN
 port = 3210       # 또는 환경 변수 openpista_WEB_PORT
 cors_origins = "*"
 static_dir = "~/.openpista/web"
+shared_session_id = "shared-main"   # 빈 문자열이면 기존 web:<client_id> 동작
 
 # ─────────────────────────────────────────────
 # 데이터베이스 / 스킬 경로
