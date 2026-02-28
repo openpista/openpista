@@ -4,8 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>openpista</title>
-    <link rel="stylesheet" href="/style.css?v=20260227c" />
-  </head>
+    <link rel="stylesheet" href="/style-257a49cd6e5a64e.css" integrity="sha384-Gd3FmYS1wmS3530/jXTUxAb+EQfMp4iL+nEP/PjFUZP7LTm0YJY7BLaYtQo4gY4v"/>
+    
+<script type="module">
+import init, * as bindings from '/openpista-web-6d4eefd3688e72fd.js';
+const wasm = await init({ module_or_path: '/openpista-web-6d4eefd3688e72fd_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <link rel="modulepreload" href="/openpista-web-6d4eefd3688e72fd.js" crossorigin="anonymous" integrity="sha384-kkw5K0sUZQSJHEKq9nc6r49aUPFh+R5B+oBzE6p4evC0KrU/c9VfL1Vy5ZQMJkO2"><link rel="preload" href="/openpista-web-6d4eefd3688e72fd_bg.wasm" crossorigin="anonymous" integrity="sha384-dRZ7Rt6nSTxFikBzT1WfZFezvvBxfvY7RBOJ7MMl0Z32t8uSLQb9Qy1M7qpS3Ekl" as="fetch" type="application/wasm"></head>
   <body>
     <main id="app-shell" class="app-shell sidebar-open" aria-label="openpista web chat">
       <aside class="sidebar" id="sidebar" aria-label="Session navigation">
@@ -112,7 +124,7 @@
     <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
 
     <!-- Provider Auth Modal -->
-    <div id="providerAuthModal" class="modal-overlay hidden">
+    <div id="providerAuthModal" class="modal-overlay" style="display:none">
       <div class="modal-content provider-auth-modal">
         <div class="modal-header">
           <h2>🔑 Provider Authentication</h2>
@@ -126,6 +138,7 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260228a"></script>
+    
+    <script src="/app.js"></script>
   </body>
 </html>

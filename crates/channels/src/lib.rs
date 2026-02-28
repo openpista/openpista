@@ -13,6 +13,6 @@ pub use cli::CliAdapter;
 /// Telegram adapter implementation.
 pub use telegram::TelegramAdapter;
 /// Web adapter implementation.
-pub use web::WebAdapter;
+pub use web::{SessionLoader, WebAdapter, WebHistoryMessage, WebModelEntry, WebSessionEntry};
 /// WhatsApp adapter implementation.
 pub use whatsapp::WhatsAppAdapter;

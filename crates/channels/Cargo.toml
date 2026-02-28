@@ -20,3 +20,9 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio-tungstenite = "0.28"

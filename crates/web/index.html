@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>openpista</title>
-    <link rel="stylesheet" href="/style.css?v=20260227c" />
+    <link data-trunk rel="css" href="style.css" />
+    <link data-trunk rel="rust" data-wasm-opt="z" />
   </head>
   <body>
     <main id="app-shell" class="app-shell sidebar-open" aria-label="openpista web chat">
@@ -112,7 +113,7 @@
     <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
 
     <!-- Provider Auth Modal -->
-    <div id="providerAuthModal" class="modal-overlay hidden">
+    <div id="providerAuthModal" class="modal-overlay" style="display:none">
       <div class="modal-content provider-auth-modal">
         <div class="modal-header">
           <h2>🔑 Provider Authentication</h2>
@@ -126,6 +127,7 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260228a"></script>
+    <link data-trunk rel="copy-file" href="app.js" />
+    <script src="/app.js"></script>
   </body>
 </html>
