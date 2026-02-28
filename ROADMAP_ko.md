@@ -13,7 +13,7 @@
 - [x] 에이전트 ReAct 루프 (LLM → 도구 호출 → 결과 → LLM → 텍스트 답변)
 - [x] OpenAI 호환 어댑터(`async-openai`)가 있는 `LlmProvider` 트레잇(trait)
 - [x] `ToolRegistry` — 동적 도구 등록 및 디스패치
-- [x] 무한 루프 방지를 위한 구성 가능한 최대 도구 라운드 (기본값: 10)
+- [x] 무한 루프 방지를 위한 구성 가능한 최대 도구 라운드 (기본값: 30)
 - [x] 모든 요청 시 시스템 프롬프트에 스킬 문맥(context) 주입
 
 ### 에이전트 프로바이더 (Agent Providers)
@@ -39,34 +39,6 @@
 - [x] `ChannelRouter` — `DashMap` 기반 채널-투-세션 매핑을 갖춘 프로세스 내(in-process) 게이트웨이
 - [x] `CronScheduler` — `tokio-cron-scheduler`를 통한 예약된 메시지 디스패치
 
-> **아키텍처 노트**
->
-> 모든 채널 어댑터는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 프로세스 내 게이트웨이로 브릿지합니다.
->
-> ```
-> CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
-> TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
-> ```
-
-> **아키텍처 노트 — QUIC이 사용되는 곳**
->
-> openpista에서 QUIC은 두 가지 역할을 수행합니다:
->
-> | 역할 | 컴포넌트 | 설명 |
-> |------|----------|------|
-> | 게이트웨이 전송 | `QuicServer` / `AgentSession` | 외부 클라이언트(또는 워커 컨테이너)가 게이트웨이 QUIC 엔드포인트(포트 4433)에 연결합니다. 각 연결은 양방향 스트림을 통해 길이 접두사(length-prefixed) JSON을 교환하는 `AgentSession`을 생성합니다. |
-> | 모바일 채널 | `MobileAdapter` | QUIC을 네이티브로 사용하는 유일한 채널 어댑터입니다. 모바일 앱은 토큰 기반 인증과 0-RTT를 통해 QUIC으로 직접 연결합니다. |
-> | 웹 채널 | `WebAdapter` | 브라우저 기반 채널 어댑터. Rust→WASM 클라이언트 번들과 H5 채팅 UI를 HTTP로 서빙하고, WebSocket으로 실시간 에이전트 통신을 수행합니다. 네이티브 앱 필요 없이 모든 폰 브라우저에서 작동합니다. |
->
-> 다른 채널 어댑터(CLI, Telegram, Web)는 각자의 네이티브 프로토콜(stdin, HTTP 폴링, WebSocket)을 사용하며, `tokio::mpsc` 채널을 통해 게이트웨이로 브릿지합니다 — QUIC을 직접 사용하지 않습니다.
->
-> ```
-> CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
-> TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← 브라우저의 Rust→WASM 클라이언트
-> MobileAdapter ──── QUIC ────────→ mpsc ──→ Gateway ← 워커로부터도 QUIC 수신
-> ```
 
 ### 메모리 및 지속성 (Memory & Persistence)
 
@@ -151,35 +123,62 @@
 #### 서버 (axum)
 
  - [x] `WebAdapter` — axum HTTP 서버: WebSocket 업그레이드 + WASM 번들용 정적 파일 서빙
- - [x] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `WsMessage` 봉투 (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`)
- - [x] WebSocket 핸드쉐이크 시 토큰 기반 인증 (쿼리 파람 `?token=`)
+ - [x] WebSocket 메시지 프레이밍: WS 텍스트 프레임 위의 JSON `WsMessage` 봉투 (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`, `ModelChange`, `ModelChanged`, `ModelList`, `ProviderAuthRequest`, `ProviderAuthStatus`, `ProviderLogin`)
+ - [x] 2단계 인증: `POST /auth` 세션 토큰 발급 + `?session_token=`을 통한 WebSocket 업그레이드; 레거시 `?token=` 쿼리 파라미터 폴백
  - [x] `WebConfig` — `[channels.web]` 설정 섹션: `port`, `token`, `cors_origins`, `static_dir`
  - [x] 환경 변수 재정의: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
  - [x] 세션 매핑: 인증된 클라이언트별 안정적인 세션을 가진 `web:{client_id}` 채널 ID
- [ ] 자동 재연결 지원: `Ping`/`Pong` 메시지 정의 완료; 클라이언트 측 재연결 루프 및 서버 측 타임아웃 감지 구현 예정
+ - [x] 자동 재연결 지원: `Ping`/`Pong` 킵얼라이브 + 클라이언트 측 지수 백오프 재연결 루프; 만료 토큰 복구
+ - [x] URL 기반 세션 라우팅: `GET /s/{session_id}`로 직접 세션 접근을 위한 `index.html` 서빙
  - [x] 크로스 오리진 브라우저 접근을 위한 CORS 설정
- [ ] 리버스 프록시 또는 `axum-server` + `rustls`를 통한 WSS (TLS) 지원
+ - [x] 웹 OAuth PKCE 프로바이더 인증: 브라우저에서 시작하는 OpenAI, Anthropic, OpenRouter, GitHub Copilot OAuth; Together, Ollama, custom 프로바이더의 API 키 입력
+ - [x] WebSocket을 통한 런타임 모델 전환: 세션 연결 해제 없이 `model_change` → `model_changed`
+ - [x] 에이전트 처리 타임아웃: `runtime.process()`에 120초 `tokio::time::timeout` 래퍼 적용으로 무응답 방지
+ - [x] `DashMap` 기반 클라이언트별 응답 라우팅 — 클론된 센더 패턴 (lock-across-await 방지)
  - [x] WASM 번들 및 H5 에셋을 위한 구성 가능한 정적 파일 디렉토리
+ - [x] 도구 호출 승인 시스템: 모든 채널에서 채팅 내 인라인 승인 UI; `ToolApprovalRequest` / `ToolApprovalResponse` WebSocket 메시지 쌍; 세션별 "모두 허용" 토글
+ - [x] 대화 히스토리 검증: 프로바이더 전환 시 고아 `tool_use` 블록 제거; 도구 이력 존재 시 빈 출력 ≠ 인증 오류 처리
+ - [x] 화면 캡처 데이터 정제: LLM 전송 전 수 MB 크기 `data_b64` 필드 제거; 프론트엔드에서 인라인 이미지 렌더링을 위해 원본 데이터 보존
+ - [ ] 리버스 프록시 또는 `axum-server` + `rustls`를 통한 WSS (TLS) 지원
 
 #### 클라이언트 (Rust→WASM)
 
  - [x] `wasm-pack`을 통해 `wasm32-unknown-unknown`으로 컴파일되는 Rust 클라이언트 크레이트 (`crates/web/`)
  - [x] `wasm-bindgen` JS 인터롭: WebSocket API, DOM 조작, localStorage
- - [ ] WebSocket 연결 관리자: 연결 ✅, 재연결 ◻, 하트비트 ◻, 버퍼링된 전송 큐 ◻
+ - [x] WebSocket 연결 관리자: 연결, 지수 백오프 자동 재연결 (1초~30초, 최대 10회), `Ping`/`Pong` 하트비트
  - [x] 메시지 직렬화: `ChannelEvent` / `AgentResponse`를 위한 WASM 내 `serde_json`
- - [x] 세션 지속성: 페이지 새로고침 시 클라이언트 ID와 인증 토큰 유지를 위한 `localStorage` (`static/app.js`)
+ - [x] 세션 지속성: 페이지 새로고침 시 클라이언트 ID, 인증 토큰, 세션 토큰 유지를 위한 `localStorage`
+ - [x] 토큰 영속 저장: 디바이스당 한 번 인증; 저장된 토큰으로 페이지 로드 시 자동 연결
  - [x] H5 채팅 UI: 모바일 대응 채팅 인터페이스 (`static/index.html` + `style.css` + `app.js`; 바닐라 JS, Rust→WASM 미전환)
- [ ] 스트리밍 응답 표시: 에이전트 출력 생성 시 점진적 텍스트 렌더링
- [ ] 슬래시 명령어 지원: 웹 UI 입력에서 `/model`, `/session`, `/clear`, `/help`
- [ ] 미디어 첨부 지원: 이미지 업로드 → base64 인코딩 → 에이전트 컨텍스트
- [ ] PWA 매니페스트: 홈 화면 앱으로 설치 가능 (오프라인 셸 + 온라인 WebSocket)
- [ ] CI에서 `wasm-pack build --target web` 빌드 파이프라인
+ - [x] 세션 관리: 사이드바 세션 목록 — 새 대화 생성(New Chat), Claude 스타일 ⋯ 컨텍스트 메뉴 (이름 변경 / 확인 대화상자 포함 삭제)
+ - [x] 세션 이름 커스터마이징: localStorage 영속 저장을 통한 인라인 편집; 기본값은 세션 ID 축약형
+ - [x] URL 기반 세션 접근: `/s/{session_id}` 경로 라우팅으로 자동 세션 로드
+ - [x] 모델 선택기: 네비게이션 바의 드롭다운으로 프로바이더별 그룹화된 모델 표시; 인증된 프로바이더의 모델만 필터링
+ - [x] 동적 모델 전환: 활성 세션 내에서 재연결 없이 모델 변경; 서버 측 모델 교체가 대화를 유지
+ - [x] 마크다운 렌더링: 에이전트 응답을 HTML로 렌더링 (제목, 코드 블록, 목록, 테이블, 인용문, 링크, 강조)
+ - [x] 반응형 스크롤 채팅 레이아웃: 새 메시지 및 에이전트 생각 중 자동 하단 스크롤
+ - [x] 생각 중 표시기: 에이전트 처리 중 표시되는 바운싱 점 애니메이션
+ - [x] 토스트 알림: 비침습적 시스템 이벤트 메시지 (연결 상태, 모델 변경, 인증 결과)
+ - [x] 프로바이더 인증 모달: 11개 프로바이더의 인증 상태 표시; OAuth 로그인, API 키 입력, 엔드포인트+키 설정, 인증 코드 입력 지원
+ - [x] 인증 기반 모델 필터링: 인증된 프로바이더의 모델만 표시하는 서버 측 필터링; 인증 상태 변경 시 모델 목록 자동 갱신
+ - [x] 생성 중지 기능: Claude 스타일 원형 중지 버튼 + ESC 키 취소; 백엔드에서 클라이언트 응답 채널을 드롭하여 에이전트 중단; `CancelGeneration` / `GenerationCancelled` WebSocket 메시지 쌍
+ - [x] 보안 강화: Unix에서 자격증명 파일 `chmod 600`; OAuth 팝업에 `noopener,noreferrer` 적용; 대기 중인 PKCE 흐름에 10분 TTL 적용
+ - [x] 인라인 도구 승인: 도구 호출 승인이 채팅 흐름 내에서 렌더링 (모달 오버레이 아님); 허용 / 거부 / 모두 허용 버튼과 부드러운 스타일링; 승인 대기 중 타임아웃 일시 정지
+ - [x] 인라인 이미지 렌더링: `screen.capture` base64 데이터가 채팅에서 `<img>` 태그로 렌더링; 정제된 도구 출력으로 base64 범람 방지
+ - [x] 자동화된 Trunk 빌드 파이프라인: `scripts/build-web.sh` — 정적 파일 동기화 → JS 유효성 검증 (`node -c`) → `trunk build --release` → `~/.openpista/web/`에 배포; 선택적 `--restart` 플래그
+ - [x] 레거시 모델 정리: 카탈로그에서 더 이상 사용되지 않는 모델 항목 제거; 모든 모델에 최대 추론 노력 및 사고 모드 활성화 구성
+ - [x] 크로스 프로바이더 대화 수정: 프로바이더 전환 시 `tool_use` ID 불일치 오류 방지를 위한 대화 히스토리 검증; 도구 이력 존재 시 빈 LLM 출력 올바르게 처리
+ - [ ] 스트리밍 응답 표시: 에이전트 출력 생성 시 점진적 텍스트 렌더링
+ - [ ] 슬래시 명령어 지원: 웹 UI 입력에서 `/model`, `/session`, `/clear`, `/help`
+ - [ ] 미디어 첨부 지원: 이미지 업로드 → base64 인코딩 → 에이전트 컨텍스트
+ - [ ] PWA 매니페스트: 홈 화면 앱으로 설치 가능 (오프라인 셸 + 온라인 WebSocket)
+ - [ ] CI에서 `wasm-pack build --target web` 빌드 파이프라인
 
 #### 품질 (Quality)
 
- - [x] 유닛 테스트: WebSocket 핸드쉐이크, 토큰 인증, 메시지 프레이밍, ping/pong, CORS, 세션 매핑 — 11개 테스트 (`channels/src/web.rs`)
- [ ] 통합 테스트: 브라우저 → WebSocket → `ChannelEvent` → `AgentResponse` → 브라우저 렌더
- [ ] WASM 번들 크기 최적화: `wasm-opt`, 트리 셰이킹, gzip/brotli 서빙
+ - [x] 유닛 테스트: WebSocket 핸드쉐이크, 세션 토큰 인증, 메시지 프레이밍, ping/pong, CORS, 세션 매핑, 응답 라우팅, 브로드캐스트 폴백 — 25개 이상 테스트 (`channels/src/web.rs`)
+ - [ ] 통합 테스트: 브라우저 → WebSocket → `ChannelEvent` → `AgentResponse` → 브라우저 렌더
+ - [ ] WASM 번들 크기 최적화: `wasm-opt`, 트리 셰이킹, gzip/brotli 서빙
 
 #### 참고 오픈소스 프로젝트 (Reference Open-Source Projects)
 
@@ -303,7 +302,7 @@
 
 ### 품질 및 CI (Quality & CI)
 
-- [x] 모든 크레이트에 걸친 699개의 유닛 + 통합 테스트 (`cargo test --workspace`)
+- [x] 모든 크레이트에 걸친 755개의 유닛 + 통합 테스트 (`cargo test --workspace`)
 - [x] 클리피(clippy) 경고 제로: `cargo clippy --workspace -- -D warnings`
 - [x] 일관된 포맷팅: `cargo fmt --all`
 - [x] `main` 브랜치에 대한 `push` / `pull_request` 시 GitHub Actions CI 워크플로우

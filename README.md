@@ -345,6 +345,32 @@ The daemon:
  Starts all enabled channel adapters
  Writes a PID file to `~/.openpista/openpista.pid`
  Handles `SIGTERM` / `Ctrl-C` for graceful shutdown
+
+### Web server commands
+
+Use dedicated web lifecycle commands when you only want the web adapter:
+
+```bash
+# 1) Configure [channels.web] and install static assets to static_dir
+#    On first setup, a secure web token is generated automatically.
+openpista web setup --enable --port 3210
+
+# Optional token controls
+openpista web setup --regenerate-token          # force issue a new token
+openpista web setup --yes                       # auto-confirm regenerate prompt
+openpista web setup --token "manual-token"      # set token explicitly
+
+# 2) Start web-only daemon
+openpista web start
+
+# 3) Inspect config + runtime status (pid/health)
+openpista web status
+```
+
+`openpista web setup` copies files from `crates/channels/static` into your configured
+`channels.web.static_dir` (default `~/.openpista/web`) and persists the web section to config.
+If a token already exists, setup asks whether to regenerate it (interactive terminals only).
+In non-interactive runs, the existing token is kept unless `--regenerate-token` is passed.
 ### Skills
 
 Place a `SKILL.md` in your workspace to extend the agent's capabilities:

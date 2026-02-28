@@ -13,7 +13,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Agent ReAct loop (LLM → tool call → result → LLM → text response)
 - [x] `LlmProvider` trait with OpenAI-compatible adapter (`async-openai`)
 - [x] `ToolRegistry` — dynamic tool registration and dispatch
-- [x] Configurable max tool rounds to prevent infinite loops (default: 10)
+ - [x] Configurable max tool rounds to prevent infinite loops (default: 30)
 - [x] Skill context injection into the system prompt on every request
 
 ### Agent Providers
@@ -131,35 +131,62 @@ The first public release establishes the core autonomous loop: the LLM receives 
 #### Server (axum)
 
  - [x] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
- - [x] WebSocket message framing: JSON `WsMessage` envelope (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`) over WS text frames
- - [x] Token-based authentication on WebSocket handshake (query param `?token=`)
+ - [x] WebSocket message framing: JSON `WsMessage` envelope (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`, `ModelChange`, `ModelChanged`, `ModelList`, `ProviderAuthRequest`, `ProviderAuthStatus`, `ProviderLogin`) over WS text frames
+ - [x] Two-phase authentication: `POST /auth` with session tokens + WebSocket upgrade with `?session_token=`; legacy `?token=` query param fallback
  - [x] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
  - [x] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
  - [x] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
- [ ] Auto-reconnect support: `Ping`/`Pong` messages defined; full client-side reconnect loop and server-side timeout detection pending
+ - [x] Auto-reconnect support: `Ping`/`Pong` keepalive with client-side exponential backoff reconnect loop; stale token recovery
+ - [x] URL-based session routing: `GET /s/{session_id}` serves `index.html` for direct session access
  - [x] CORS configuration for cross-origin browser access
- [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
+ - [x] Web OAuth PKCE provider authentication: browser-initiated OAuth for OpenAI, Anthropic, OpenRouter, GitHub Copilot; API key input for Together, Ollama, custom providers
+ - [x] Runtime model switching via WebSocket: `model_change` → `model_changed` without session disconnect
+ - [x] Agent processing timeout: 120-second `tokio::time::timeout` wrapper on `runtime.process()` to prevent silent response drops
+ - [x] Per-client response routing via `DashMap` with cloned sender pattern (no lock-across-await)
  - [x] Configurable static file directory for WASM bundle and H5 assets
+ - [x] Tool call approval system: inline approval UI in chat for all channels; `ToolApprovalRequest` / `ToolApprovalResponse` WebSocket message pair; per-session "allow all" toggle
+ - [x] Conversation history validation: strip orphaned `tool_use` blocks when switching providers mid-conversation; empty output ≠ auth error when tool history exists
+ - [x] Screen capture sanitization: strip multi-MB `data_b64` fields from tool output before sending to LLM; full data preserved in frontend for inline image rendering
+ - [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
 
 #### Client (Rust→WASM)
 
  - [x] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
  - [x] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
- - [ ] WebSocket connection manager: connect ✅, reconnect ◻, heartbeat ◻, buffered send queue ◻
+ - [x] WebSocket connection manager: connect, auto-reconnect with exponential backoff (1s–30s, max 10 attempts), `Ping`/`Pong` heartbeat
  - [x] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
- - [x] Session persistence: `localStorage` for client ID and auth token across page reloads (`static/app.js`)
+ - [x] Session persistence: `localStorage` for client ID, auth token, session token across page reloads
+ - [x] Token persistence: authenticate once per device; saved token auto-connects on page load
  - [x] H5 chat UI: mobile-responsive chat interface (`static/index.html` + `style.css` + `app.js`; vanilla JS, not yet Rust→WASM)
- [ ] Streaming response display: progressive text rendering as agent generates output
- [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
- [ ] Media attachment support: image upload → base64 encoding → agent context
- [ ] PWA manifest: installable as home screen app (offline shell + online WebSocket)
- [ ] `wasm-pack build --target web` build pipeline in CI
+ - [x] Session management: sidebar session list with create (New Chat), Claude-style ⋯ context menu (Rename / Delete with confirmation dialog)
+ - [x] Session name customization: editable inline with localStorage persistence; defaults to truncated session ID
+ - [x] URL-based session access: `/s/{session_id}` path routing with automatic session load
+ - [x] Model selector: dropdown in navigation bar showing models grouped by provider; filtered to only show models from authenticated providers
+ - [x] Dynamic model switching: change model within active session without reconnecting; server-side model swap preserves conversation
+ - [x] Markdown rendering: agent responses rendered as HTML (headings, code blocks, lists, tables, blockquotes, links, emphasis)
+ - [x] Responsive scrollable chat layout: auto-scroll to bottom on new messages and during agent thinking
+ - [x] Thinking indicator: animated bouncing dots shown while agent is processing
+ - [x] Toast notifications: non-intrusive system event messages (connection status, model changes, auth results)
+ - [x] Provider authentication modal: full-screen modal showing all 11 providers with auth status dots; supports OAuth login, API key input, endpoint+key configuration, and authorization code input
+ - [x] Auth-filtered model selector: server-side filtering to show only models from authenticated providers; frontend re-requests model list on auth status change
+ - [x] Stop generating: Claude-style circular stop button + ESC key cancellation; backend drops client response channel to halt agent; `CancelGeneration` / `GenerationCancelled` WebSocket message pair
+ - [x] Security hardening: credential file `chmod 600` on Unix; `noopener,noreferrer` on OAuth popups; 10-minute TTL on pending PKCE flows
+ - [x] Inline tool approval: tool call approval rendered inside chat flow (not modal overlay); Allow / Deny / Allow All buttons with soft styling; pending timeouts paused during approval wait
+ - [x] Inline image rendering: `screen.capture` base64 data rendered as `<img>` tags in chat; sanitized tool output prevents base64 flooding
+ - [x] Automated Trunk build pipeline: `scripts/build-web.sh` — sync static → JS validation (`node -c`) → `trunk build --release` → deploy to `~/.openpista/web/`; optional `--restart` flag
+ - [x] Legacy model cleanup: removed deprecated model entries from catalog; all models configured with maximum reasoning effort and thinking mode enabled
+ - [x] Cross-provider conversation fix: conversation history validated on provider switch to prevent `tool_use` ID mismatch errors; empty LLM output correctly handled when tool history exists
+ - [ ] Streaming response display: progressive text rendering as agent generates output
+ - [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
+ - [ ] Media attachment support: image upload → base64 encoding → agent context
+ - [ ] PWA manifest: installable as home screen app (offline shell + online WebSocket)
+ - [ ] `wasm-pack build --target web` build pipeline in CI
 
 #### Quality
 
- - [x] Unit tests: WebSocket handshake, token auth, message framing, ping/pong, CORS, session mapping — 11 tests (`channels/src/web.rs`)
- [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
- [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
+ - [x] Unit tests: WebSocket handshake, session token auth, message framing, ping/pong, CORS, session mapping, response routing, broadcast fallback — 25+ tests (`channels/src/web.rs`)
+ - [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
+ - [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
 
 #### Reference Open-Source Projects
 
@@ -283,7 +310,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 ### Quality & CI
 
-- [x] 699 unit + integration tests across all crates (`cargo test --workspace`)
+- [x] 755 unit + integration tests across all crates (`cargo test --workspace`)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
 - [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`
