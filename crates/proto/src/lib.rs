@@ -3,11 +3,16 @@
 //! This crate defines serializable message/event/tool structures and
 //! strongly-typed error enums shared across the workspace.
 
+pub mod approval;
 pub mod error;
 pub mod event;
 pub mod message;
 pub mod tool;
 
+/// Re-export of tool approval types.
+pub use approval::{
+    AutoApproveHandler, ToolApprovalDecision, ToolApprovalHandler, ToolApprovalRequest,
+};
 /// Re-export of all protocol error types.
 pub use error::*;
 /// Re-export of inbound/outbound event types.
