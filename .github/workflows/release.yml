@@ -181,15 +181,13 @@ jobs:
         shell: bash
         run: |
           cd dist
-          mapfile -t artifacts < <(ls -1 openpista-*)
-          if [ "${#artifacts[@]}" -eq 0 ]; then
+          shopt -s nullglob
+          files=(openpista-*)
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "no release artifacts found" >&2
             exit 1
           fi
-
-          for file in "${artifacts[@]}"; do
-            sha256sum "${file}"
-          done > SHA256SUMS.txt
+          sha256sum "${files[@]}" > SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
