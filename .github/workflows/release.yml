@@ -117,6 +117,7 @@ jobs:
           cp -r use-channels "${package_dir}/"
           tar -czf "${artifact}" "${package_dir}"
           cp "${artifact}" "${latest}"
+          rm -rf "${package_dir}"
 
           # standalone binary
           cp "${bin_path}" "${standalone}"
