@@ -1154,11 +1154,7 @@ pub async fn run_tui(
                                     }
                                 }
                             }
-                            let state = crate::config::TuiState {
-                                last_model: new_model.clone(),
-                                last_provider: provider_name.clone(),
-                            };
-                            let _ = state.save();
+                            let _ = crate::config::TuiState::save_selection(new_model.clone(), provider_name.clone());
                         }
 
 
@@ -1574,11 +1570,7 @@ pub async fn run_tui(
                             let model = provider_str.parse::<ProviderPreset>()
                                 .map(|p| p.default_model().to_string())
                                 .unwrap_or_default();
-                            let state = crate::config::TuiState {
-                                last_model: model,
-                                last_provider: provider_str.clone(),
-                            };
-                            let _ = state.save();
+                            let _ = crate::config::TuiState::save_selection(model, provider_str.clone());
                         }
                         debug!(provider = ?auth_provider_name, "Auth task completed successfully");
                         // Pre-cache model catalog for the newly authenticated provider

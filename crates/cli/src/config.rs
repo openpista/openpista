@@ -1163,7 +1163,14 @@ impl TuiState {
 
     /// Load from the default path, returning `Default` on any error.
     pub fn load() -> Self {
-        Self::load_from(&Self::path())
+        Self::try_load().unwrap_or_default()
+    }
+
+    /// Load from the default path, returning `None` if the file does not exist or cannot be parsed.
+    pub fn try_load() -> Option<Self> {
+        std::fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
     }
 
     /// Load from a specific path.
@@ -1172,6 +1179,14 @@ impl TuiState {
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Update `last_model` / `last_provider`, merging with any existing persisted state.
+    pub fn save_selection(model: impl Into<String>, provider: impl Into<String>) -> Result<(), std::io::Error> {
+        let mut state = Self::load();
+        state.last_model = model.into();
+        state.last_provider = provider.into();
+        state.save()
     }
 
     /// Persist to the default path.

@@ -215,7 +215,7 @@ fn percent_decode(s: &str) -> String {
 
 /// Attempts to open `url` in the default system browser (best-effort).
 #[cfg(not(test))]
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "linux")]
