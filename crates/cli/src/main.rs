@@ -1,5 +1,8 @@
 //! CLI entrypoint and subcommand orchestration.
 
+#[cfg(not(test))]
+const GITHUB_REPO_URL: &str = "https://github.com/openpista/openpista";
+
 mod auth;
 mod auth_picker;
 mod config;
@@ -470,7 +473,9 @@ async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> 
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
     let channel_id = ChannelId::new("cli", "tui");
     let session_id = resolve_tui_session_id(&config, session);
-    let tui_state = config::TuiState::load();
+    let persisted = config::TuiState::try_load();
+    let is_first_run = persisted.is_none();
+    let tui_state = persisted.unwrap_or_default();
     let model_name = if config.agent.model.is_empty() && !tui_state.last_model.is_empty() {
         tui_state.last_model.clone()
     } else {
@@ -489,6 +494,17 @@ async fn cmd_tui(config: Config, session: Option<String>) -> anyhow::Result<()> 
     .await?;
 
     print_goodbye_banner(&session_id, config.agent.effective_model());
+
+    if is_first_run && is_interactive_terminal() {
+        let answer = prompt_yes_no(
+            "⭐  Enjoying openpista? Give us a star on GitHub! Open browser?",
+            true,
+        )?;
+        if answer {
+            auth::open_browser(GITHUB_REPO_URL);
+        }
+    }
+
     Ok(())
 }
 
@@ -1955,11 +1971,7 @@ async fn cmd_model_select(mut config: Config) -> anyhow::Result<()> {
         println!("Saved to ~/.openpista/config.toml");
     }
 
-    let tui_state = config::TuiState {
-        last_model: selected.id,
-        last_provider: selected.provider,
-    };
-    let _ = tui_state.save();
+    let _ = config::TuiState::save_selection(selected.id, selected.provider);
 
     Ok(())
 }
