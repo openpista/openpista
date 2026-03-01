@@ -1192,7 +1192,6 @@ impl TuiApp {
             return;
         }
 
-
         // ── ConfirmDelete state ──────────────────────────────
         if let AppState::ConfirmDelete { session_id, .. } = &self.state {
             match key.code {
@@ -2509,7 +2508,6 @@ impl TuiApp {
                 _ => vec![], // No text input in QR pairing flow
             };
         }
-
 
         let is_input_active = matches!(self.state, AppState::Idle | AppState::AuthPrompting { .. });
 

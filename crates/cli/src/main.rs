@@ -734,7 +734,6 @@ async fn cmd_start(config: Config) -> anyhow::Result<()> {
                 continue;
             }
 
-
             if should_send_web_response(&channel_id) {
                 if let Some(adapter) = &web_resp_adapter {
                     if let Err(e) = adapter.send_response(resp).await {
