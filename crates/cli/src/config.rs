@@ -1182,7 +1182,10 @@ impl TuiState {
     }
 
     /// Update `last_model` / `last_provider`, merging with any existing persisted state.
-    pub fn save_selection(model: impl Into<String>, provider: impl Into<String>) -> Result<(), std::io::Error> {
+    pub fn save_selection(
+        model: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Result<(), std::io::Error> {
         let mut state = Self::load();
         state.last_model = model.into();
         state.last_provider = provider.into();
