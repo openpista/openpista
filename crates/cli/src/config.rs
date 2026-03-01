@@ -643,6 +643,13 @@ impl WhatsAppConfig {
     pub fn is_configured(&self) -> bool {
         !self.session_dir.is_empty()
     }
+
+    /// Returns the effective bridge script path, falling back to the bundled default.
+    pub fn effective_bridge_path(&self) -> &str {
+        self.bridge_path
+            .as_deref()
+            .unwrap_or("whatsapp-bridge/index.js")
+    }
 }
 fn default_whatsapp_session_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());

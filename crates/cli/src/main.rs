@@ -109,7 +109,6 @@ enum Commands {
         command: AuthCommands,
     },
 
-
     /// Manage Web adapter setup/start/status flows
     Web {
         #[command(subcommand)]
@@ -147,7 +146,6 @@ enum WhatsAppCommands {
     },
 }
 
-/// `auth` sub-subcommands.
 /// `telegram` sub-subcommands.
 #[derive(Subcommand)]
 enum TelegramCommands {
@@ -1273,8 +1271,7 @@ async fn cmd_telegram_setup(mut config: Config, token: Option<String>) -> anyhow
 
     // Verify the token works by calling the Telegram getMe API
     print!("Verifying token with Telegram API... ");
-    let url = format!("https://api.telegram.org/bot{token}/getMe");
-    let resp = reqwest::get(&url).await?;
+    let resp = reqwest::get(format!("https://api.telegram.org/bot{token}/getMe")).await?;
     if resp.status().is_success() {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let username = body["result"]["username"].as_str().unwrap_or("unknown");
@@ -1347,36 +1344,10 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
         );
     }
 
-    let effective_model = config.agent.effective_model().to_string();
-    if effective_model.is_empty() || config.agent.model.is_empty() {
-        println!(
-            "\u{26a0}  No model configured. Telegram needs an LLM model to respond to messages."
-        );
-        println!(
-            "  Current: provider={}, model={}",
-            config.agent.provider.name(),
-            if effective_model.is_empty() {
-                "(none)"
-            } else {
-                &effective_model
-            }
-        );
-        println!();
-        println!("  Run `openpista model select` to choose a model first.");
-        println!("  Or set it in ~/.openpista/config.toml:");
-        println!("    [agent]");
-        println!("    provider = \"anthropic\"");
-        println!("    model = \"claude-sonnet-4-6\"");
-        println!();
-        print!("  Continue anyway? (y/N): ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            return Ok(());
-        }
-        println!();
+    if !prompt_whatsapp_model_warning(&config)? {
+        return Ok(());
     }
+    let effective_model = config.agent.effective_model().to_string();
     println!("Telegram Bot Server");
     println!("===================");
     println!();
@@ -2418,6 +2389,7 @@ fn format_run_header(exec: &str) -> String {
     format!("Running: {exec}")
 }
 
+#[cfg(not(test))]
 fn prompt_whatsapp_model_warning(config: &Config) -> anyhow::Result<bool> {
     if !config.agent.model.is_empty() {
         return Ok(true);
@@ -2450,6 +2422,16 @@ fn prompt_whatsapp_model_warning(config: &Config) -> anyhow::Result<bool> {
     }
     println!();
     Ok(true)
+}
+
+/// Drains stderr from a bridge subprocess in a background task to prevent pipe deadlock.
+#[cfg(not(test))]
+fn spawn_bridge_stderr_drain(stderr: tokio::process::ChildStderr) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
 }
 
 #[cfg(not(test))]
@@ -2501,12 +2483,7 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
     println!();
 
     // 3. Spawn bridge subprocess
-    let bridge_path = config
-        .channels
-        .whatsapp
-        .bridge_path
-        .clone()
-        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+    let bridge_path = config.channels.whatsapp.effective_bridge_path().to_owned();
     let session_dir = config.channels.whatsapp.session_dir.clone();
 
     println!("Starting WhatsApp bridge...");
@@ -2528,11 +2505,7 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
     // Drain stderr in background so the bridge can't block on a full pipe.
-    let _stderr_drain = tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut err_lines = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(_)) = err_lines.next_line().await {}
-    });
+    spawn_bridge_stderr_drain(stderr);
 
     // 4. Read bridge events
     println!("Waiting for QR code... (scan with your phone)");
@@ -2720,12 +2693,7 @@ async fn cmd_whatsapp_start(config: Config) -> anyhow::Result<()> {
     let runtime = build_runtime(&config, Arc::new(AutoApproveHandler)).await?;
     let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
 
-    let bridge_path = config
-        .channels
-        .whatsapp
-        .bridge_path
-        .clone()
-        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+    let bridge_path = config.channels.whatsapp.effective_bridge_path().to_owned();
 
     println!("Starting bridge...");
     println!("Session : {session_dir}");
@@ -2890,12 +2858,7 @@ async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> a
         anyhow::bail!("No WhatsApp session. Run `openpista whatsapp setup` first.");
     }
 
-    let bridge_path = config
-        .channels
-        .whatsapp
-        .bridge_path
-        .clone()
-        .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
+    let bridge_path = config.channels.whatsapp.effective_bridge_path().to_owned();
 
     let mut child = tokio::process::Command::new("node")
         .arg(&bridge_path)
@@ -2911,11 +2874,7 @@ async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> a
     let mut stdin = child.stdin.take().expect("bridge stdin");
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
-    let _stderr_drain = tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut err_lines = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(_)) = err_lines.next_line().await {}
-    });
+    spawn_bridge_stderr_drain(stderr);
 
     println!("Connecting to WhatsApp...");
 
@@ -2970,7 +2929,6 @@ async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn should_send_telegram_response_checks_prefix() {
@@ -2988,6 +2946,7 @@ mod tests {
         assert!(!should_send_cli_response(&ChannelId::from("telegram:123")));
     }
 
+    #[test]
     fn should_send_whatsapp_response_checks_prefix() {
         assert!(should_send_whatsapp_response(&ChannelId::from(
             "whatsapp:123"
