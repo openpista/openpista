@@ -645,6 +645,7 @@ impl WhatsAppConfig {
     }
 
     /// Returns the effective bridge script path, falling back to the bundled default.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn effective_bridge_path(&self) -> &str {
         self.bridge_path
             .as_deref()

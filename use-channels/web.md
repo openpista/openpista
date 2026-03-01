@@ -16,6 +16,13 @@ Default values:
 - `static_dir`: `~/.openpista/web`
 - `enabled`: `false`
 
+## Prerequisites
+
+| Requirement | Description |
+|---|---|
+| openpista binary | Built from source (`cargo build --release`) or installed |
+| Modern browser | For accessing the web UI (Chrome, Firefox, Safari, Edge) |
+
 ## Quick start
 
 ```bash

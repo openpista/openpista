@@ -1,66 +1,68 @@
 
 # ─────────────────────────────────────────────
-# Agent 설정
+# Agent settings
 # ─────────────────────────────────────────────
 [agent]
 
-# 프로바이더 선택 (기본값: openai)
+# Provider selection (default: openai)
 #
-#   openai     → OpenAI API              (기본 model: gpt-4o)
-#   together   → Together.ai             (기본 model: meta-llama/Llama-3.3-70B-Instruct-Turbo, base_url 자동 설정)
-#   ollama     → 로컬 Ollama             (기본 model: llama3.2, base_url 자동 설정, api_key 불필요)
-#   openrouter → OpenRouter              (기본 model: openai/gpt-4o, base_url 자동 설정)
-#   opencode   → OpenCode Zen            (기본 model: gpt-5-codex, base_url 자동 설정)
-#   custom     → base_url / model 직접 지정
+#   openai              → OpenAI API      (default model: gpt-4o, OAuth PKCE or API key)
+#   anthropic / claude  → Anthropic       (default model: claude-sonnet-4-6, OAuth PKCE or API key)
+#   together            → Together.ai     (default model: meta-llama/Llama-3.3-70B-Instruct-Turbo, API key)
+#   ollama              → Local Ollama    (default model: llama3.2, no api_key required)
+#   openrouter          → OpenRouter      (default model: openai/gpt-4o, OAuth PKCE or API key)
+#   custom              → specify base_url / model directly
+#
+# The OpenAI preset supports both the standard ChatCompletions API and the Responses API
+# (/v1/responses) for ChatGPT Pro subscribers.
+# The Anthropic preset handles OAuth Bearer auth and tool name sanitization automatically.
 #
 provider = "openai"
 
-# 모델 ID — 비워두면 provider 기본값 사용
-# 예시:
+# Model ID — leave blank to use the provider default
+# Examples:
 #   model = "gpt-4o"                                     # openai
-#   model = "gpt-4o-mini"                                # openai (저렴)
+#   model = "gpt-4o-mini"                                # openai (cheaper)
+#   model = "claude-sonnet-4-6"                          # anthropic
+#   model = "claude-opus-4-6"                            # anthropic (high performance)
 #   model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"   # together
 #   model = "llama3.2"                                   # ollama
-#   model = "anthropic/claude-sonnet-4-5"                # openrouter
-#   model = "gpt-5-codex"                                # opencode
+#   model = "openai/gpt-4o"                              # openrouter
 model = ""
 
-# API 키 — 환경 변수가 우선 적용됩니다:
-#   openpista_API_KEY   → 모든 provider에 적용 (최우선)
-#   OPENAI_API_KEY          → openai / custom (폴백)
-#   TOGETHER_API_KEY        → together
-#   OPENROUTER_API_KEY      → openrouter
-#   OPENCODE_API_KEY        → opencode
-#   GITHUB_COPILOT_TOKEN    → github-copilot (OAuth PKCE browser login; token exchanged for Copilot session)
-#   VERCEL_AI_GATEWAY_API_KEY → vercel-ai-gateway (login picker extension slot)
-#   (ollama 는 API 키 불필요)
+# API key — environment variables take precedence:
+#   openpista_API_KEY    → applies to all providers (highest priority)
+#   OPENAI_API_KEY       → openai / custom (fallback)
+#   ANTHROPIC_API_KEY    → anthropic
+#   TOGETHER_API_KEY     → together
+#   OPENROUTER_API_KEY   → openrouter
+#   GITHUB_COPILOT_TOKEN → GitHub Copilot (extension slot)
+#   (ollama requires no API key)
 api_key = ""
 
-# 최대 tool-call 라운드 수 (기본값: 10)
+# Maximum number of tool-call rounds (default: 10)
 max_tool_rounds = 10
 
-# API base URL — provider 선택 시 자동 설정되므로 대부분 생략 가능
-# custom provider 또는 base_url 재지정이 필요할 때만 설정:
-#   base_url = "http://localhost:11434/v1"   # Ollama 포트 변경 시
+# API base URL — automatically set when a provider is selected; usually not needed
+# Only set this for the custom provider or to override the default base URL:
+#   base_url = "http://localhost:11434/v1"   # if Ollama runs on a non-default port
 #   base_url = "https://my-proxy.example.com/v1"
 # base_url = ""
 
-# OAuth 2.0 client ID (PKCE 공개 클라이언트, 비밀이 아님)
-# `openpista auth login` 에서 browser-based OAuth 로그인 시 필요
-# 환경 변수 openpista_OAUTH_CLIENT_ID 로도 설정 가능
+# OAuth 2.0 client ID (PKCE public client — not a secret)
+# Required for browser-based OAuth login via `openpista auth login`
+# Can also be set via the openpista_OAUTH_CLIENT_ID environment variable
 # oauth_client_id = ""
 
 # ─────────────────────────────────────────────
-# 채널 설정
+# Channel settings
 # ─────────────────────────────────────────────
 [channels.telegram]
 enabled = false
-token = ""  # 또는 환경 변수 TELEGRAM_BOT_TOKEN
+token = ""  # or set the TELEGRAM_BOT_TOKEN environment variable
 
 [channels.cli]
 enabled = true
-
-
 
 [channels.whatsapp]
 enabled = false
@@ -69,14 +71,14 @@ session_dir = "~/.openpista/whatsapp-session"   # WhatsApp Web session auth stat
 
 [channels.web]
 enabled = false
-token = ""        # 또는 환경 변수 openpista_WEB_TOKEN
-port = 3210       # 또는 환경 변수 openpista_WEB_PORT
+token = ""        # or set the openpista_WEB_TOKEN environment variable
+port = 3210       # or set the openpista_WEB_PORT environment variable
 cors_origins = "*"
 static_dir = "~/.openpista/web"
-shared_session_id = "shared-main"   # 빈 문자열이면 기존 web:<client_id> 동작
+shared_session_id = "shared-main"   # empty string falls back to per-client web:<client_id> sessions
 
 # ─────────────────────────────────────────────
-# 데이터베이스 / 스킬 경로
+# Database / Skills path
 # ─────────────────────────────────────────────
 [database]
 url = "~/.openpista/memory.db"

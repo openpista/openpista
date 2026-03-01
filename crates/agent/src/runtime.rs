@@ -1514,6 +1514,8 @@ mod tests {
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    #[test]
     fn truncate_messages_is_noop_when_within_budget() {
         let mut messages = vec![
             ChatMessage::system("sys"),
