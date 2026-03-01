@@ -100,6 +100,7 @@ jobs:
           bin_path="target/${target}/release/openpista"
           package_dir="openpista-${tag}-${target}"
           artifact="${package_dir}.tar.gz"
+          latest="openpista-${target}.tar.gz"
 
           if [ ! -f "${bin_path}" ]; then
             echo "binary not found: ${bin_path}" >&2
@@ -109,14 +110,18 @@ jobs:
           mkdir -p "${package_dir}"
           cp "${bin_path}" "${package_dir}/openpista"
           tar -czf "${artifact}" "${package_dir}"
+          cp "${artifact}" "${latest}"
 
           echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
+          echo "latest=${latest}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: ${{ steps.package.outputs.artifact }}
+          path: |
+            ${{ steps.package.outputs.artifact }}
+            ${{ steps.package.outputs.latest }}
           if-no-files-found: error
 
   publish-release:
@@ -126,6 +131,34 @@ jobs:
       - release-build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+
+      - name: Extract changelog for this release
+        id: changelog
+        shell: bash
+        run: |
+          tag="${{ needs.prepare.outputs.release_tag }}"
+          # Extract section between this version header and the next version header (or EOF)
+          body=$(awk -v ver="${tag#v}" '
+            /^## v/ { if (found) exit; if (index($0, ver)) found=1; next }
+            found { print }
+          ' CHANGELOG.md)
+
+          if [ -z "${body}" ]; then
+            echo "⚠ No CHANGELOG section found for ${tag}, using fallback" >&2
+            body="See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${tag}/CHANGELOG.md) for details."
+          fi
+
+          # Write multi-line body to output
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "${body}"
+            echo "CHANGELOG_EOF"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -147,19 +180,12 @@ jobs:
             sha256sum "${file}"
           done > SHA256SUMS.txt
 
-      - name: Publish release notes from Release Drafter
-        uses: release-drafter/release-drafter@v6
-        with:
-          publish: true
-          tag: ${{ needs.prepare.outputs.release_tag }}
-          name: ${{ needs.prepare.outputs.release_tag }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release assets
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.release_tag }}
+          body: ${{ steps.changelog.outputs.body }}
           target_commitish: ${{ github.sha }}
           files: |
             dist/openpista-*.tar.gz

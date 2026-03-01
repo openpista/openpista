@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.1.0 - TBD
+## v0.1.0 - 2026-03-01
 
 ### Added
 
@@ -131,7 +131,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - [channels] Advanced multi-channel routing (e.g., cross-channel message forwarding) is out of scope for v0.1.0.
 - [docs] `LICENSE-MIT` and `LICENSE-APACHE` files not yet added.
 - [docs] `config.example.toml` not yet fully documented.
-- [release] Pre-built binaries and `crates.io` publish are pending.
+- [release] `crates.io` publish pending.
 
 ---
 

@@ -29,14 +29,35 @@ Unlike terminal-only AI agents, openpista meets you where you are:
 
 ## Quick Start
 
+### Option 1 — Pre-built binary (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openpista/openpista/main/install.sh | bash
+```
+
+The installer auto-detects your OS and architecture. To install to a custom path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openpista/openpista/main/install.sh | bash -s -- --prefix ~/.local/bin
+```
+
+Available targets: `x86_64-unknown-linux-gnu` · `x86_64-unknown-linux-musl` · `aarch64-unknown-linux-gnu` · `aarch64-unknown-linux-musl` · `aarch64-apple-darwin`
+
+### Option 2 — Build from source
+
 ```bash
 git clone https://github.com/openpista/openpista.git && cd openpista
 cargo build --release && sudo cp target/release/openpista /usr/local/bin/
+```
+
+> **Prerequisites (source build):** [Rust 1.85+](https://rustup.rs) · SQLite 3 (usually pre-installed)
+
+### First run
+
+```bash
 openpista auth login   # OAuth browser login — no API key required
 openpista              # launch TUI
 ```
-
-> **Prerequisites:** [Rust 1.85+](https://rustup.rs) · SQLite 3 (usually pre-installed)
 
 ---
 

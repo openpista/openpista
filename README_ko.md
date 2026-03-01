@@ -29,14 +29,35 @@
 
 ## 빠른 시작
 
+### 옵션 1 — 사전 빌드 바이너리 (권장)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openpista/openpista/main/install.sh | bash
+```
+
+인스톨러가 OS와 아키텍처를 자동 감지합니다. 커스텀 경로에 설치하려면:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openpista/openpista/main/install.sh | bash -s -- --prefix ~/.local/bin
+```
+
+지원 타겟: `x86_64-unknown-linux-gnu` · `x86_64-unknown-linux-musl` · `aarch64-unknown-linux-gnu` · `aarch64-unknown-linux-musl` · `aarch64-apple-darwin`
+
+### 옵션 2 — 소스에서 빌드
+
 ```bash
 git clone https://github.com/openpista/openpista.git && cd openpista
 cargo build --release && sudo cp target/release/openpista /usr/local/bin/
+```
+
+> **사전 요구사항 (소스 빌드):** [Rust 1.85+](https://rustup.rs) · SQLite 3 (보통 기본 설치됨)
+
+### 첫 실행
+
+```bash
 openpista auth login   # OAuth 브라우저 로그인 — API 키 불필요
 openpista              # TUI 실행
 ```
-
-> **사전 요구사항:** [Rust 1.85+](https://rustup.rs) · SQLite 3 (보통 기본 설치됨)
 
 ---
 
