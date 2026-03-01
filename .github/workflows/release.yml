@@ -101,19 +101,29 @@ jobs:
           package_dir="openpista-${tag}-${target}"
           artifact="${package_dir}.tar.gz"
           latest="openpista-${target}.tar.gz"
+          standalone="openpista-${tag}-${target}"
 
           if [ ! -f "${bin_path}" ]; then
             echo "binary not found: ${bin_path}" >&2
             exit 1
           fi
 
+          # tarball (binary + docs + whatsapp-bridge)
           mkdir -p "${package_dir}"
           cp "${bin_path}" "${package_dir}/openpista"
+          cp README.md "${package_dir}/"
+          cp config.example.toml "${package_dir}/"
+          cp -r whatsapp-bridge "${package_dir}/"
+          cp -r use-channels "${package_dir}/"
           tar -czf "${artifact}" "${package_dir}"
           cp "${artifact}" "${latest}"
 
+          # standalone binary
+          cp "${bin_path}" "${standalone}"
+
           echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
           echo "latest=${latest}" >> "${GITHUB_OUTPUT}"
+          echo "standalone=${standalone}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -122,6 +132,7 @@ jobs:
           path: |
             ${{ steps.package.outputs.artifact }}
             ${{ steps.package.outputs.latest }}
+            ${{ steps.package.outputs.standalone }}
           if-no-files-found: error
 
   publish-release:
@@ -170,7 +181,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          mapfile -t artifacts < <(ls -1 openpista-*.tar.gz)
+          mapfile -t artifacts < <(ls -1 openpista-*)
           if [ "${#artifacts[@]}" -eq 0 ]; then
             echo "no release artifacts found" >&2
             exit 1
@@ -189,7 +200,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             dist/openpista-*.tar.gz
+            dist/openpista-v*-*-*-*
             dist/SHA256SUMS.txt
+            install.sh
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
