@@ -197,6 +197,7 @@ jobs:
           name: ${{ needs.prepare.outputs.release_tag }}
           body: ${{ steps.changelog.outputs.body }}
           target_commitish: ${{ github.sha }}
+          overwrite: true
           files: |
             dist/openpista-*.tar.gz
             dist/openpista-v*-*-*-*
