@@ -21,6 +21,9 @@ config.toml
 *.log
 logs/
 
+# WASM build outputs (trunk)
+crates/web/dist/
+
 # skills
 skills/hello-wasm/target
 
