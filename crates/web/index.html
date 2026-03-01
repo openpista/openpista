@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>openpista</title>
+    <link data-trunk rel="css" href="style.css" />
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+  </head>
+  <body>
+    <main id="app-shell" class="app-shell sidebar-open" aria-label="openpista web chat">
+      <aside class="sidebar" id="sidebar" aria-label="Session navigation">
+        <div class="sidebar-inner">
+          <header class="sidebar-header">
+            <div class="sidebar-header-row">
+              <div>
+                <h1>openpista</h1>
+
+              </div>
+              <button id="sidebar-close" class="sidebar-close-btn" aria-label="Close sidebar">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <line x1="3" y1="3" x2="13" y2="13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                  <line x1="13" y1="3" x2="3" y2="13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <section id="session-list-panel" class="session-panel">
+            <h2>Sessions</h2>
+
+            <p id="session-empty" class="session-empty">No sessions yet.</p>
+            <ul id="session-list" class="session-list hidden"></ul>
+          </section>
+
+          <button id="new-chat" class="new-chat-btn" aria-label="New chat">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+            New chat
+          </button>
+        </div>
+      </aside>
+
+      <section id="main-pane" class="main-pane" aria-label="Chat pane">
+        <header class="main-header">
+          <button id="sidebar-toggle" class="sidebar-toggle-btn" aria-label="Toggle sidebar" aria-expanded="true">
+            <svg width="17" height="17" viewBox="0 0 17 17" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <line x1="2.5" y1="4.5" x2="14.5" y2="4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              <line x1="2.5" y1="8.5" x2="14.5" y2="8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              <line x1="2.5" y1="12.5" x2="14.5" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <h2 id="main-header-title">Assistant</h2>
+          <div class="nav-actions">
+            <button id="providerAuthBtn" class="nav-btn" title="Provider Authentication">🔑 Providers</button>
+            <div id="model-selector" class="model-selector">
+              <button id="model-selector-btn" class="model-selector-btn" aria-haspopup="listbox" aria-expanded="false">
+                <span id="model-selector-label">Model</span>
+                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M1 1L5 5L9 1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div id="model-dropdown" class="model-dropdown hidden" role="listbox"></div>
+            </div>
+            <button id="auth-btn" class="auth-btn" aria-label="Authentication status">
+              <span id="auth-status-dot" class="auth-dot offline"></span>
+              <span id="auth-status-label">Offline</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="chat-scroll" class="chat-scroll">
+          <section id="messages" class="messages hidden" aria-live="polite"></section>
+        </section>
+
+        <footer id="composer-dock" class="composer-dock">
+          <button id="stop-btn" type="button" class="stop-btn hidden" aria-label="Stop generating">
+            <span class="stop-btn-icon"></span>
+          </button>
+          <form id="composer" class="composer hidden">
+            <input
+              id="message"
+              type="text"
+              placeholder="Message openpista"
+              autocomplete="off"
+              required
+            />
+            <button type="submit">Send</button>
+          </form>
+
+        </footer>
+      </section>
+    </main>
+
+    <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
+    <div id="auth-modal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+      <div id="auth-modal-backdrop" class="auth-modal-backdrop"></div>
+      <section id="auth-modal-panel" class="auth-modal-panel">
+        <h2 id="auth-modal-title">Connect to openpista</h2>
+        <p>Enter your web token to continue.</p>
+
+        <div id="auth-controls" class="auth-controls">
+          <label for="token">Token</label>
+          <input id="token" type="password" placeholder="openpista_WEB_TOKEN" />
+          <button id="connect" type="button">Connect</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- Provider Auth Modal -->
+    <div id="providerAuthModal" class="modal-overlay" style="display:none">
+      <div class="modal-content provider-auth-modal">
+        <div class="modal-header">
+          <h2>🔑 Provider Authentication</h2>
+          <button class="modal-close" id="providerAuthClose">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div id="providerList" class="provider-list">
+            <div class="provider-loading">Loading providers...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <link data-trunk rel="copy-file" href="app.js" />
+    <script src="/app.js"></script>
+  </body>
+</html>

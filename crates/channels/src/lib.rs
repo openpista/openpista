@@ -3,7 +3,6 @@
 pub mod adapter;
 pub mod cli;
 pub mod telegram;
-
 pub mod web;
 pub mod whatsapp;
 
@@ -13,5 +12,7 @@ pub use adapter::ChannelAdapter;
 pub use cli::CliAdapter;
 /// Telegram adapter implementation.
 pub use telegram::TelegramAdapter;
-pub use web::WebAdapter;
+/// Web adapter implementation.
+pub use web::{SessionLoader, WebAdapter, WebHistoryMessage, WebModelEntry, WebSessionEntry};
+/// WhatsApp adapter implementation.
 pub use whatsapp::WhatsAppAdapter;

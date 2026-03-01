@@ -30,6 +30,10 @@ pub enum Error {
     /// Internal protocol type error.
     #[error("Proto error: {0}")]
     Proto(#[from] ProtoError),
+
+    /// Agent processing timed out.
+    #[error("Agent processing timed out")]
+    Timeout,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,6 +92,10 @@ pub enum LlmError {
     /// Runtime exceeded configured tool-call rounds.
     #[error("Max tool rounds exceeded")]
     MaxToolRoundsExceeded,
+
+    /// Provider credential is missing or expired; re-authentication required.
+    #[error("Authentication required: {0}")]
+    AuthRequired(String),
 
     /// Serialization/deserialization failure.
     #[error("Serialization error: {0}")]

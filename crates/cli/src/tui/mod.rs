@@ -3,6 +3,7 @@
 
 pub mod action;
 pub mod app;
+pub mod approval;
 pub mod chat;
 pub mod event;
 pub mod home;

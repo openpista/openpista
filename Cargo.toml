@@ -11,7 +11,8 @@ members = [
     "crates/web",
 ]
 exclude = [
-    "skills/hello-wasm"
+    "skills/hello-wasm",
+    "crates/web",
 ]
 
 [workspace.dependencies]
@@ -55,10 +56,14 @@ dashmap = "6"
 # 채널
 teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
-# HTTP / WebSocket 서버 (WhatsApp webhook, Web adapter)
+
+# 웹 채널 / WhatsApp webhook / Web adapter
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip"] }
 hmac = "0.12"
+sha2 = "0.10"
 hex = "0.4"
 
 # TUI
@@ -71,9 +76,8 @@ tokio-cron-scheduler = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chromiumoxide = "0.8"
 bollard = "0.19"
-wasmtime = "40.0.3"
-wasmtime-wasi = "40.0.3"
-sha2 = "0.10"
+wasmtime = "40.0.4"
+wasmtime-wasi = "40.0.4"
 base64 = "0.22"
 rand = "0.8"
 tar = "0.4"

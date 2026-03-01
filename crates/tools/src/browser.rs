@@ -65,6 +65,12 @@ impl BrowserState {
     }
 
     async fn launch(&mut self) -> Result<(), String> {
+        // Remove stale SingletonLock to prevent launch failures after unclean shutdown
+        let lock_path = std::env::temp_dir().join("chromiumoxide-runner/SingletonLock");
+        if lock_path.exists() {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+
         let config = BrowserConfig::builder()
             .build()
             .map_err(|e| format!("Failed to build browser config: {e}"))?;

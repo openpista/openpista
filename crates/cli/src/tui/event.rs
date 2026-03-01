@@ -199,6 +199,31 @@ fn parse_session_command(raw: &str) -> Option<SessionCommand> {
     }
 }
 
+/// Parsed sub-command for the `/web` slash command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WebCommand {
+    /// `/web` or `/web status` — display current web config.
+    Status,
+    /// `/web setup` — launch interactive configuration wizard.
+    Setup,
+    /// Unrecognised sub-command.
+    Invalid(String),
+}
+
+fn parse_web_command(raw: &str) -> Option<WebCommand> {
+    let mut parts = raw.split_whitespace();
+    if parts.next()? != "/web" {
+        return None;
+    }
+    match parts.next() {
+        None | Some("status") => Some(WebCommand::Status),
+        Some("setup") => Some(WebCommand::Setup),
+        Some(_) => Some(WebCommand::Invalid(
+            "Use /web to show status or /web setup to configure.".to_string(),
+        )),
+    }
+}
+
 /// Parsed sub-command for the `/whatsapp` slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WhatsAppCommand {
@@ -209,6 +234,7 @@ enum WhatsAppCommand {
     /// Invalid sub-command.
     Invalid(String),
 }
+
 fn parse_whatsapp_command(raw: &str) -> Option<WhatsAppCommand> {
     let mut parts = raw.split_whitespace();
     if parts.next()? != "/whatsapp" {
@@ -716,6 +742,7 @@ pub async fn run_tui(
     mut session_id: SessionId,
     model_name: String,
     mut config: Config,
+    mut approval_rx: mpsc::Receiver<super::approval::PendingApproval>,
 ) -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
@@ -834,6 +861,31 @@ pub async fn run_tui(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         use crossterm::event::KeyCode;
                         let mut pending_async_cmd = Command::None;
+
+                        // Handle tool approval prompt keys first
+                        if app.pending_approval.is_some() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Approve);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Reject);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('a') | KeyCode::Char('A') => {
+                                    if let Some(pending) = app.pending_approval.take() {
+                                        let _ = pending.reply_tx.send(proto::ToolApprovalDecision::AllowForSession);
+                                    }
+                                    continue;
+                                }
+                                _ => continue, // Ignore other keys while approval is pending
+                            }
+                        }
                         if key.code == KeyCode::Enter {
                             // Step 1: resolve palette if active
                             if app.is_palette_active() {
@@ -969,6 +1021,52 @@ pub async fn run_tui(
                                 if handle_telegram_command(&mut app, &config, &message) { continue; }
 
 
+                                if let Some(web_cmd) = parse_web_command(&message) {
+                                    match web_cmd {
+                                        WebCommand::Status => {
+                                            let wc = &config.channels.web;
+                                            let token_set = if wc.token.is_empty() { "no" } else { "yes" };
+                                            let status = format!(
+                                                "Web Adapter Config:\n  enabled: {}\n  port: {}\n  token set: {}\n  cors_origins: {}\n  static_dir: {}",
+                                                wc.enabled, wc.port, token_set, wc.cors_origins, wc.static_dir
+                                            );
+                                            app.update(Action::PushAssistantMessage(status));
+                                        }
+                                        WebCommand::Setup => {
+                                            let wc = &config.channels.web;
+                                            app.start_web_config_wizard(
+                                                wc.enabled,
+                                                wc.token.clone(),
+                                                wc.port,
+                                                &wc.cors_origins,
+                                                &wc.static_dir,
+                                            );
+                                        }
+                                        WebCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
+                                if let Some(wa_cmd) = parse_whatsapp_command(&message) {
+                                    match wa_cmd {
+                                        WhatsAppCommand::Setup => {
+                                            app.update(Action::OpenWhatsAppSetup);
+                                        }
+                                        WhatsAppCommand::Status => {
+                                            let status = format_whatsapp_status(&config);
+                                            app.update(Action::PushAssistantMessage(status));
+                                        }
+                                        WhatsAppCommand::Invalid(msg) => {
+                                            app.update(Action::PushError(msg));
+                                        }
+                                    }
+                                    app.update(Action::ScrollToBottom);
+                                    continue;
+                                }
+
                                 if app.handle_slash_command(&message) {
                                     debug!(command = %message, "Slash command dispatched");
                                     app.update(Action::ScrollToBottom);
@@ -1063,6 +1161,11 @@ pub async fn run_tui(
                             let _ = state.save();
                         }
 
+
+                        if let Some(web_cfg) = app.take_pending_web_config() {
+                            config.channels.web = web_cfg;
+                            let _ = config.save_web_section();
+                        }
                         if app.take_model_refresh_request() {
                             if model_task.is_some() {
                                 app.update(Action::PushError(
@@ -1361,66 +1464,6 @@ pub async fn run_tui(
                                     }
                                 }
                             }
-                            Command::InstallWhatsAppBridge => {
-                                let handle = tokio::process::Command::new("npm")
-                                    .arg("install")
-                                    .current_dir("whatsapp-bridge")
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::piped())
-                                    .status()
-                                    .await;
-                                let result = match handle {
-                                    Ok(status) if status.success() => Ok(()),
-                                    Ok(status) => Err(format!("npm install exited with {status}")),
-                                    Err(e) => Err(format!("Failed to run npm install: {e}")),
-                                };
-                                app.update(Action::WhatsAppBridgeInstalled(result));
-                            }
-                            Command::SpawnWhatsAppBridge => {
-                                let bridge_path = config.channels.whatsapp.bridge_path.clone()
-                                    .unwrap_or_else(|| "whatsapp-bridge/index.js".to_string());
-                                let session_dir = config.channels.whatsapp.session_dir.clone();
-                                match tokio::process::Command::new("node")
-                                    .arg(&bridge_path)
-                                    .arg(&session_dir)
-                                    .stdout(std::process::Stdio::piped())
-                                    .stderr(std::process::Stdio::piped())
-                                    .stdin(std::process::Stdio::piped())
-                                    .kill_on_drop(true)
-                                    .spawn()
-                                {
-                                    Ok(mut child) => {
-                                        let stdout = child.stdout.take().expect("bridge stdout");
-                                        let (qr_tx, qr_rx) = mpsc::channel::<String>(4);
-                                        let (conn_tx, conn_rx) = mpsc::channel::<(String, String)>(1);
-                                        whatsapp_bridge_child = Some(child);
-                                        whatsapp_qr_rx = Some(qr_rx);
-                                        whatsapp_connected_rx = Some(conn_rx);
-                                        tokio::spawn(async move {
-                                            let reader = tokio::io::BufReader::new(stdout);
-                                            let mut lines = reader.lines();
-                                            while let Ok(Some(line)) = lines.next_line().await {
-                                                if let Ok(event) = serde_json::from_str::<channels::whatsapp::BridgeEvent>(&line) {
-                                                    match event {
-                                                        channels::whatsapp::BridgeEvent::Qr { data } => {
-                                                            let _ = qr_tx.send(data).await;
-                                                        }
-                                                        channels::whatsapp::BridgeEvent::Connected { phone, name } => {
-                                                            let _ = conn_tx.send((phone, name.unwrap_or_default())).await;
-                                                            break;
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                    Err(e) => {
-                                        app.update(Action::PushError(format!("Failed to spawn WhatsApp bridge: {e}")));
-                                        app.update(Action::SetIdle);
-                                    }
-                                }
-                            }
                             _ => {
                                 // Other commands (CopyToClipboard, Batch) already handled
                                 // by execute_command; StartAuthFlow, LoadModelCatalog
@@ -1615,6 +1658,11 @@ pub async fn run_tui(
                 }
                 model_task = None;
                 app.update(super::action::Action::ScrollToBottom);
+            }
+
+            // ── Branch: tool approval request ─────────────────────────
+            Some(pending) = approval_rx.recv() => {
+                app.pending_approval = Some(pending);
             }
 
             // ── Branch 6: spinner tick ─────────────────────────────────
@@ -2193,73 +2241,6 @@ mod tests {
         assert!(qr.is_some());
     }
 
-    #[test]
-    fn parse_telegram_command_supports_all_variants() {
-        assert_eq!(
-            parse_telegram_command("/telegram"),
-            Some(TelegramCommand::Setup)
-        );
-        assert_eq!(
-            parse_telegram_command("/telegram setup"),
-            Some(TelegramCommand::Setup)
-        );
-        assert_eq!(
-            parse_telegram_command("/telegram start"),
-            Some(TelegramCommand::Start)
-        );
-        assert_eq!(
-            parse_telegram_command("/telegram status"),
-            Some(TelegramCommand::Status)
-        );
-        assert!(matches!(
-            parse_telegram_command("/telegram foo"),
-            Some(TelegramCommand::Invalid(_))
-        ));
-        assert_eq!(parse_telegram_command("/model"), None);
-        assert_eq!(parse_telegram_command("/help"), None);
-    }
-
-    #[test]
-    fn format_telegram_status_not_configured() {
-        let config = Config::default();
-        let status = format_telegram_status(&config);
-        assert!(status.contains("Telegram Configuration Status"));
-        assert!(status.contains("Enabled:"));
-        assert!(status.contains("(not set)"));
-        assert!(status.contains("Not configured"));
-    }
-
-    #[test]
-    fn format_telegram_status_configured() {
-        let mut config = Config::default();
-        config.channels.telegram.enabled = true;
-        config.channels.telegram.token = "123456:ABC".to_string();
-        let status = format_telegram_status(&config);
-        assert!(status.contains("Yes"));
-        assert!(status.contains("(set)"));
-        assert!(status.contains("Ready"));
-    }
-
-    #[test]
-    fn format_telegram_status_token_but_disabled() {
-        let mut config = Config::default();
-        config.channels.telegram.enabled = false;
-        config.channels.telegram.token = "123456:ABC".to_string();
-        let status = format_telegram_status(&config);
-        assert!(status.contains("No"));
-        assert!(status.contains("Token set but adapter disabled"));
-    }
-
-    #[test]
-    fn format_telegram_setup_guide_content() {
-        let guide = format_telegram_setup_guide();
-        assert!(guide.contains("@BotFather"));
-        assert!(guide.contains("/newbot"));
-        assert!(guide.contains("[channels.telegram]"));
-        assert!(guide.contains("TELEGRAM_BOT_TOKEN"));
-    }
-
-    #[test]
     fn handle_telegram_command_returns_false_for_non_telegram_message() {
         let mut app = make_app();
         let config = Config::default();
@@ -2703,5 +2684,71 @@ mod tests {
         for (name, _url, _key) in &providers {
             assert!(!name.is_empty(), "provider name must not be empty");
         }
+    }
+
+    #[test]
+    fn parse_telegram_command_supports_all_variants() {
+        assert_eq!(
+            parse_telegram_command("/telegram"),
+            Some(TelegramCommand::Setup)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram setup"),
+            Some(TelegramCommand::Setup)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram start"),
+            Some(TelegramCommand::Start)
+        );
+        assert_eq!(
+            parse_telegram_command("/telegram status"),
+            Some(TelegramCommand::Status)
+        );
+        assert!(matches!(
+            parse_telegram_command("/telegram foo"),
+            Some(TelegramCommand::Invalid(_))
+        ));
+        assert_eq!(parse_telegram_command("/model"), None);
+        assert_eq!(parse_telegram_command("/help"), None);
+    }
+
+    #[test]
+    fn format_telegram_status_not_configured() {
+        let config = Config::default();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("Telegram Configuration Status"));
+        assert!(status.contains("Enabled:"));
+        assert!(status.contains("(not set)"));
+        assert!(status.contains("Not configured"));
+    }
+
+    #[test]
+    fn format_telegram_status_configured() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = true;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("Yes"));
+        assert!(status.contains("(set)"));
+        assert!(status.contains("Ready"));
+    }
+
+    #[test]
+    fn format_telegram_status_token_but_disabled() {
+        let mut config = Config::default();
+        config.channels.telegram.enabled = false;
+        config.channels.telegram.token = "123456:ABC".to_string();
+        let status = format_telegram_status(&config);
+        assert!(status.contains("No"));
+        assert!(status.contains("Token set but adapter disabled"));
+    }
+
+    #[test]
+    fn format_telegram_setup_guide_content() {
+        let guide = format_telegram_setup_guide();
+        assert!(guide.contains("@BotFather"));
+        assert!(guide.contains("/newbot"));
+        assert!(guide.contains("[channels.telegram]"));
+        assert!(guide.contains("TELEGRAM_BOT_TOKEN"));
     }
 }

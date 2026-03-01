@@ -35,6 +35,29 @@ openpista start
 openpista run -e "프롬프트를 입력하세요"
 ```
 
+### 웹 서버 전용 관리
+
+```bash
+# web 설정 저장 + 정적 파일 설치 (crates/channels/static -> static_dir)
+openpista web setup --enable --port 3210
+
+# 토큰 관리
+openpista web setup --regenerate-token
+openpista web setup --yes
+openpista web setup --token "manual-token"
+
+# web 채널만 실행
+openpista web start
+
+# 설정 + 런타임 상태(pid/health) 확인
+openpista web status
+```
+
+`web setup` 동작 요약:
+- 최초 실행 시 web token 자동 발급
+- 기존 토큰 존재 시(대화형 터미널) 재발급 여부 확인 프롬프트
+- 비대화형 실행에서는 기본적으로 기존 토큰 유지 (`--regenerate-token`으로 강제 재발급)
+
 ### 모델 카탈로그 (Model Catalog)
 
 ```bash

@@ -278,6 +278,29 @@ fn unpack_abi_return(packed: i64) -> Result<(usize, usize), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_workspace_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    fn write_skill_module(workspace: &Path, skill_name: &str, bytes: &[u8]) {
+        let module_dir = workspace.join("skills").join(skill_name);
+        fs::create_dir_all(&module_dir).expect("create module directory");
+        fs::write(module_dir.join("main.wasm"), bytes).expect("write wasm module");
+    }
+
+    fn write_skill_module_from_wat(workspace: &Path, skill_name: &str, wat_src: &str) {
+        let wasm = wat::parse_str(wat_src).expect("parse wat");
+        write_skill_module(workspace, skill_name, &wasm);
+    }
+
     #[test]
     fn resolve_wasm_module_path_uses_skills_layout() {
         let workspace = PathBuf::from("/tmp/workspace");
@@ -448,6 +471,91 @@ mod tests {
         let cloned = req.clone();
         assert_eq!(cloned.call_id, req.call_id);
         assert_eq!(cloned.timeout_secs, None);
+    }
+
+    #[test]
+    fn run_wasm_skill_sync_reports_missing_module() {
+        let workspace = temp_workspace_dir("wasm-missing");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let req = WasmRunRequest {
+            call_id: "call-1".to_string(),
+            skill_name: "missing-skill".to_string(),
+            workspace_dir: workspace.clone(),
+            arguments: json!({}),
+            timeout_secs: Some(1),
+        };
+        let err = run_wasm_skill_sync(req).expect_err("missing module should fail");
+        assert!(err.contains("WASM module not found"));
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn run_wasm_skill_sync_reports_missing_memory_export_for_minimal_module() {
+        let workspace = temp_workspace_dir("wasm-minimal");
+        // Minimal valid wasm binary: magic + version, with no exports.
+        let minimal_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        write_skill_module(&workspace, "minimal-skill", &minimal_wasm);
+
+        let req = WasmRunRequest {
+            call_id: "call-2".to_string(),
+            skill_name: "minimal-skill".to_string(),
+            workspace_dir: workspace.clone(),
+            arguments: json!({ "input": "hello" }),
+            timeout_secs: Some(2),
+        };
+        let err = run_wasm_skill_sync(req).expect_err("module without memory must fail");
+        assert!(err.contains("WASM export 'memory' not found"));
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[tokio::test]
+    async fn run_wasm_skill_async_propagates_sync_failure() {
+        let workspace = temp_workspace_dir("wasm-async");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let req = WasmRunRequest {
+            call_id: "call-async".to_string(),
+            skill_name: "missing-async".to_string(),
+            workspace_dir: workspace.clone(),
+            arguments: json!({ "mode": "async" }),
+            timeout_secs: Some(3),
+        };
+        let err = run_wasm_skill(req)
+            .await
+            .expect_err("async wrapper should surface missing module failure");
+        assert!(err.contains("WASM module not found"));
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
+    }
+
+    #[test]
+    fn run_wasm_skill_sync_reports_empty_abi_when_run_returns_zero() {
+        let workspace = temp_workspace_dir("wasm-zero-result");
+        let wat = r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "alloc") (param i32) (result i32)
+                i32.const 16)
+              (func (export "run") (param i32 i32) (result i64)
+                i64.const 0)
+            )
+        "#;
+        write_skill_module_from_wat(&workspace, "zero-result-skill", wat);
+
+        let req = WasmRunRequest {
+            call_id: "call-zero".to_string(),
+            skill_name: "zero-result-skill".to_string(),
+            workspace_dir: workspace.clone(),
+            arguments: json!({ "case": "abi-empty" }),
+            timeout_secs: Some(2),
+        };
+        let err = run_wasm_skill_sync(req).expect_err("zero packed result must fail ABI decode");
+        assert!(err.contains("WASM ABI returned empty ToolResult buffer"));
+
+        fs::remove_dir_all(&workspace).expect("cleanup workspace");
     }
 
     #[test]

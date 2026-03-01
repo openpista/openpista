@@ -103,6 +103,9 @@ pub enum Action {
     /// Forward a key event to the session browser state machine.
     SessionBrowserKey(crossterm::event::KeyEvent),
 
+    /// Forward a key event to the web config wizard state machine.
+    WebConfigKey(crossterm::event::KeyEvent),
+
     // ── Command palette ──────────────────────────────────────
     /// Move command palette cursor up.
     PaletteMoveUp,
@@ -179,6 +182,8 @@ pub enum Action {
     WhatsAppQrReceived(String),
     /// The WhatsApp bridge connected successfully.
     WhatsAppConnected { phone: String, name: String },
+    /// Forward a raw key event to the WhatsApp setup state machine.
+    WhatsAppSetupKey(crossterm::event::KeyEvent),
     // ── QR code display ─────────────────────────────────────
     /// Open the QR code overlay showing the Web UI URL.
     OpenQrCode { url: String, qr_lines: Vec<String> },

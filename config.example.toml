@@ -69,10 +69,11 @@ session_dir = "~/.openpista/whatsapp-session"   # WhatsApp Web session auth stat
 
 [channels.web]
 enabled = false
-token = ""             # Auth token for WebSocket connections (or openpista_WEB_TOKEN)
-port = 3210             # HTTP/WS port (or openpista_WEB_PORT)
-cors_origins = ""      # Comma-separated allowed origins (empty = allow all)
-static_dir = "~/.openpista/web"  # Static file directory for web UI
+token = ""        # 또는 환경 변수 openpista_WEB_TOKEN
+port = 3210       # 또는 환경 변수 openpista_WEB_PORT
+cors_origins = "*"
+static_dir = "~/.openpista/web"
+shared_session_id = "shared-main"   # 빈 문자열이면 기존 web:<client_id> 동작
 
 # ─────────────────────────────────────────────
 # 데이터베이스 / 스킬 경로

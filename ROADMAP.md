@@ -13,7 +13,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] Agent ReAct loop (LLM → tool call → result → LLM → text response)
 - [x] `LlmProvider` trait with OpenAI-compatible adapter (`async-openai`)
 - [x] `ToolRegistry` — dynamic tool registration and dispatch
-- [x] Configurable max tool rounds to prevent infinite loops (default: 10)
+ - [x] Configurable max tool rounds to prevent infinite loops (default: 30)
 - [x] Skill context injection into the system prompt on every request
 
 ### Agent Providers
@@ -41,12 +41,11 @@ The first public release establishes the core autonomous loop: the LLM receives 
 
 > **Architecture note**
 >
-> All channel adapters use their native protocols (stdin, HTTP polling, HTTP webhooks, WebSocket) and bridge into the in-process gateway through `tokio::mpsc` channels.
+> All channel adapters use their native protocols (stdin, HTTP polling, WebSocket) and bridge into the in-process gateway through `tokio::mpsc` channels.
 >
 > ```
 > CliAdapter ─── stdin/stdout ──→ mpsc ──→ Gateway
 > TelegramAdapter ── HTTP poll ──→ mpsc ──→ Gateway
-> WhatsAppAdapter ── HTTP webhook → mpsc ──→ Gateway
 > WebAdapter ───── WebSocket ────→ mpsc ──→ Gateway  ← Rust→WASM client in browser
 > ```
 
@@ -66,7 +65,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
 - [x] Response routing: CLI responses → stdout, Telegram responses → bot API
 - [x] Error responses clearly surfaced to the user
-- [x] `WebAdapter` — Rust→WASM browser client with WebSocket transport (see Web Channel Adapter section)
+- [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
 
 ### Telegram Channel Adapter
 
@@ -304,25 +303,52 @@ Baseline (config expansion → send_chunked → typing indicator)
 
 #### Server (axum)
 
-- [x] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
-- [x] WebSocket message framing: JSON `ChannelEvent` / `AgentResponse` over WS text frames
-- [x] Token-based authentication on WebSocket handshake (`Sec-WebSocket-Protocol` or query param)
-- [x] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
-- [x] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
-- [x] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
- - [ ] Auto-reconnect support: client-side heartbeat ping/pong, server-side timeout detection
-- [x] CORS configuration for cross-origin browser access
+ - [x] `WebAdapter` — axum HTTP server: WebSocket upgrade + static file serving for WASM bundle
+ - [x] WebSocket message framing: JSON `WsMessage` envelope (`UserMessage`, `AgentReply`, `Ping`, `Pong`, `Auth`, `AuthResult`, `ModelChange`, `ModelChanged`, `ModelList`, `ProviderAuthRequest`, `ProviderAuthStatus`, `ProviderLogin`) over WS text frames
+ - [x] Two-phase authentication: `POST /auth` with session tokens + WebSocket upgrade with `?session_token=`; legacy `?token=` query param fallback
+ - [x] `WebConfig` — `[channels.web]` config section: `port`, `token`, `cors_origins`, `static_dir`
+ - [x] Environment variable overrides: `openpista_WEB_TOKEN`, `openpista_WEB_PORT`
+ - [x] Session mapping: `web:{client_id}` channel ID with stable session per authenticated client
+ - [x] Auto-reconnect support: `Ping`/`Pong` keepalive with client-side exponential backoff reconnect loop; stale token recovery
+ - [x] URL-based session routing: `GET /s/{session_id}` serves `index.html` for direct session access
+ - [x] CORS configuration for cross-origin browser access
+ - [x] Web OAuth PKCE provider authentication: browser-initiated OAuth for OpenAI, Anthropic, OpenRouter, GitHub Copilot; API key input for Together, Ollama, custom providers
+ - [x] Runtime model switching via WebSocket: `model_change` → `model_changed` without session disconnect
+ - [x] Agent processing timeout: 120-second `tokio::time::timeout` wrapper on `runtime.process()` to prevent silent response drops
+ - [x] Per-client response routing via `DashMap` with cloned sender pattern (no lock-across-await)
+ - [x] Configurable static file directory for WASM bundle and H5 assets
+ - [x] Tool call approval system: inline approval UI in chat for all channels; `ToolApprovalRequest` / `ToolApprovalResponse` WebSocket message pair; per-session "allow all" toggle
+ - [x] Conversation history validation: strip orphaned `tool_use` blocks when switching providers mid-conversation; empty output ≠ auth error when tool history exists
+ - [x] Screen capture sanitization: strip multi-MB `data_b64` fields from tool output before sending to LLM; full data preserved in frontend for inline image rendering
  - [ ] WSS (TLS) support via reverse proxy or built-in `axum-server` with `rustls`
-- [x] Configurable static file directory for WASM bundle and H5 assets
 
 #### Client (Rust→WASM)
 
-- [x] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
-- [x] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
-- [x] WebSocket connection manager: connect, disconnect, is_connected
-- [x] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
-- [x] Session persistence: `localStorage` for session ID across page reloads
- - [ ] H5 chat UI: mobile-responsive chat interface (HTML/CSS/JS or Yew/Leptos framework)
+ - [x] Rust client crate (`crates/web/`) compiled to `wasm32-unknown-unknown` via `wasm-pack`
+ - [x] `wasm-bindgen` JS interop: WebSocket API, DOM manipulation, localStorage
+ - [x] WebSocket connection manager: connect, auto-reconnect with exponential backoff (1s–30s, max 10 attempts), `Ping`/`Pong` heartbeat
+ - [x] Message serialization: `serde_json` in WASM for `ChannelEvent` / `AgentResponse`
+ - [x] Session persistence: `localStorage` for client ID, auth token, session token across page reloads
+ - [x] Token persistence: authenticate once per device; saved token auto-connects on page load
+ - [x] H5 chat UI: mobile-responsive chat interface (`static/index.html` + `style.css` + `app.js`; vanilla JS, not yet Rust→WASM)
+ - [x] Session management: sidebar session list with create (New Chat), Claude-style ⋯ context menu (Rename / Delete with confirmation dialog)
+ - [x] Session name customization: editable inline with localStorage persistence; defaults to truncated session ID
+ - [x] URL-based session access: `/s/{session_id}` path routing with automatic session load
+ - [x] Model selector: dropdown in navigation bar showing models grouped by provider; filtered to only show models from authenticated providers
+ - [x] Dynamic model switching: change model within active session without reconnecting; server-side model swap preserves conversation
+ - [x] Markdown rendering: agent responses rendered as HTML (headings, code blocks, lists, tables, blockquotes, links, emphasis)
+ - [x] Responsive scrollable chat layout: auto-scroll to bottom on new messages and during agent thinking
+ - [x] Thinking indicator: animated bouncing dots shown while agent is processing
+ - [x] Toast notifications: non-intrusive system event messages (connection status, model changes, auth results)
+ - [x] Provider authentication modal: full-screen modal showing all 11 providers with auth status dots; supports OAuth login, API key input, endpoint+key configuration, and authorization code input
+ - [x] Auth-filtered model selector: server-side filtering to show only models from authenticated providers; frontend re-requests model list on auth status change
+ - [x] Stop generating: Claude-style circular stop button + ESC key cancellation; backend drops client response channel to halt agent; `CancelGeneration` / `GenerationCancelled` WebSocket message pair
+ - [x] Security hardening: credential file `chmod 600` on Unix; `noopener,noreferrer` on OAuth popups; 10-minute TTL on pending PKCE flows
+ - [x] Inline tool approval: tool call approval rendered inside chat flow (not modal overlay); Allow / Deny / Allow All buttons with soft styling; pending timeouts paused during approval wait
+ - [x] Inline image rendering: `screen.capture` base64 data rendered as `<img>` tags in chat; sanitized tool output prevents base64 flooding
+ - [x] Automated Trunk build pipeline: `scripts/build-web.sh` — sync static → JS validation (`node -c`) → `trunk build --release` → deploy to `~/.openpista/web/`; optional `--restart` flag
+ - [x] Legacy model cleanup: removed deprecated model entries from catalog; all models configured with maximum reasoning effort and thinking mode enabled
+ - [x] Cross-provider conversation fix: conversation history validated on provider switch to prevent `tool_use` ID mismatch errors; empty LLM output correctly handled when tool history exists
  - [ ] Streaming response display: progressive text rendering as agent generates output
  - [ ] Slash command support: `/model`, `/session`, `/clear`, `/help` from web UI input
  - [ ] Media attachment support: image upload → base64 encoding → agent context
@@ -331,9 +357,66 @@ Baseline (config expansion → send_chunked → typing indicator)
 
 #### Quality
 
-- [x] Unit tests: WebSocket message parsing, token auth, session ID, CORS layer
+ - [x] Unit tests: WebSocket handshake, session token auth, message framing, ping/pong, CORS, session mapping, response routing, broadcast fallback — 25+ tests (`channels/src/web.rs`)
  - [ ] Integration test: browser → WebSocket → `ChannelEvent` → `AgentResponse` → browser render
  - [ ] WASM bundle size optimization: `wasm-opt`, tree shaking, gzip/brotli serving
+
+#### Reference Open-Source Projects
+
+> **Axum WebSocket server patterns**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [axum — chat example](https://github.com/tokio-rs/axum/blob/main/examples/chat/src/main.rs) | Official Axum broadcast-based WebSocket chat example. Best starting point for `WebSocketUpgrade` + `tokio::sync::broadcast`. |
+> | [axum — websockets example](https://github.com/tokio-rs/axum/blob/main/examples/websockets/src/main.rs) | Official Axum WebSocket example demonstrating general WS handling, ping/pong, and connection lifecycle. |
+> | [0xLaurens/chatr](https://github.com/0xLaurens/chatr) | Chat room with WebSocket and Axum, demonstrating room-based session architecture. |
+> | [kumanote/axum-chat-example-rs](https://github.com/kumanote/axum-chat-example-rs) | Axum WebSocket chat with Dragonfly (Redis-compatible) pub/sub for multi-instance scaling. |
+> | [`danielclough/fireside-chat`](https://github.com/danielclough/fireside-chat) | LLM chat bot: Axum WebSocket backend + Leptos WASM frontend — closest architecture match to openpista's target Web adapter design. |
+> | [`dawnchan030920/axum-ycrdt-websocket`](https://github.com/dawnchan030920/axum-ycrdt-websocket) | Axum WebSocket middleware with per-connection state and multi-client broadcast — good reference for room-aware WebSocket handler patterns. |
+>
+> **Rust→WASM WebSocket client libraries**
+>
+> | Crate | Description |
+> |-------|-------------|
+> | [wasm-bindgen — WebSocket example](https://github.com/rustwasm/wasm-bindgen/tree/main/examples/websockets) | Canonical `web-sys` WebSocket example from wasm-bindgen. Foundation for WASM WS clients. |
+> | [`ewebsock`](https://github.com/rerun-io/ewebsock) | Cross-platform (native + WASM) WebSocket client with a single unified API. By the Rerun team. |
+> | [`tokio-tungstenite-wasm`](https://github.com/TannerRogalsky/tokio-tungstenite-wasm) | Wraps `web-sys` (WASM) and `tokio-tungstenite` (native) behind one cross-platform API. ~343k crates.io downloads. |
+> | [`ws_stream_wasm`](https://github.com/najamelan/ws_stream_wasm) | WASM-only WebSocket library providing `AsyncRead`/`AsyncWrite` via `WsMeta`/`WsStream`. Most ergonomic for stream-based patterns. |
+> | [`cunarist/tokio-with-wasm`](https://github.com/cunarist/tokio-with-wasm) | Tokio runtime emulation in the browser — enables `tokio::spawn`, `spawn_blocking` in WASM contexts. |
+> | [`gloo-net`](https://github.com/rustwasm/gloo) | Ergonomic `web-sys` wrappers from the official `rustwasm` org; `gloo_net::websocket` gives a clean `Stream`/`Sink` WebSocket API — simpler than raw `web-sys`. |
+>
+> **Rust WASM frontend frameworks (for H5 chat UI)**
+>
+> | Framework | Description |
+> |-----------|-------------|
+> | [`yew`](https://github.com/yewstack/yew) (~30.5k stars) | Most mature Rust/WASM frontend framework. React-like component model with JSX-style `html!` macros. |
+> | [`leptos`](https://github.com/leptos-rs/leptos) (~20k stars) | Full-stack isomorphic Rust framework with fine-grained reactivity. Native WebSocket support for server functions via `Stream`. |
+> | [`dioxus`](https://github.com/DioxusLabs/dioxus) (~24.5k stars) | Cross-platform (web + desktop + mobile) app framework. Deep Axum integration for full-stack Rust. |
+> | [`leptos-use` — `use_websocket`](https://github.com/Synphonyte/leptos-use) | Reactive WebSocket hook for Leptos with codec support. Inspired by VueUse. |
+> | [`leptos_server_signal`](https://github.com/tqwewe/leptos_server_signal) | Leptos signals synced with server through WebSocket. Supports Axum and Actix backends. |
+> | [`security-union/yew-websocket`](https://github.com/security-union/yew-websocket) | Standalone Yew WebSocket service crate (extracted from Yew core). |
+>
+> **Full-stack Rust WebSocket chat references**
+>
+> | Project | Description |
+> |---------|-------------|
+> | [`YewChat`](https://github.com/jtordgeman/YewChat) | Complete WebSocket chat app built with Yew — routing, agents, GIF support. Companion to a popular tutorial series. |
+> | [`ztm-project-uchat`](https://github.com/jayson-lennon/ztm-project-uchat) | Full-stack chat clone entirely in Rust: WASM frontend (Trunk), Diesel ORM, PostgreSQL, Tailwind CSS. |
+> | [`fullstack-rust-axum-dioxus-rwa`](https://github.com/dxps/fullstack-rust-axum-dioxus-rwa) | RealWorld app with Axum backend + Dioxus WASM frontend — auth, routing, CRUD. |
+> | [`rust-axum-leptos-wasm`](https://github.com/hvalfangst/rust-axum-leptos-wasm) | Full-stack Axum + Leptos WASM with JWT-protected endpoints. |
+> | [`veklov/rust-chat`](https://github.com/veklov/rust-chat) | Web chat with Warp backend + Yew/WASM frontend, includes end-to-end WebDriver tests. |
+> | [`ProstoyVadila/ws_chat`](https://github.com/ProstoyVadila/ws_chat) | Backend and frontend both in Rust — demonstrates the full-stack Rust WebSocket approach with separate server/client crates. |
+> | [`bestia-dev/mem6_game`](https://github.com/bestia-dev/mem6_game) | Multi-player browser game in Rust WASM with real-time WebSocket and PWA service worker — the only reference covering WASM + WebSocket + PWA simultaneously. |
+>
+> **WASM build tooling & PWA**
+>
+> | Tool | Description |
+> |------|-------------|
+> | [`trunk`](https://github.com/trunk-rs/trunk) (~4.2k stars) | Leading WASM web application bundler for Rust. Built-in dev server with hot reload. Works with Yew, Leptos, Dioxus. |
+> | [`wasm-pack`](https://github.com/rustwasm/wasm-pack) (~6.5k stars) | Classic Rust→WASM workflow tool. Note: `rustwasm` org archived mid-2025; community fork at [drager/wasm-pack](https://github.com/drager/wasm-pack). |
+> | [`yew-wasm-pack-template`](https://github.com/nickkos/nickkos/yew-wasm-pack-template) | Full-stack PWA template: Yew frontend + Actix backend, with Workbox service worker. |
+> | [`woz`](https://github.com/nickkos/nickkos/alexkehayias/woz) | Progressive WebAssembly App (PWAA) generator for Rust — PWA + WASM tooling in a single CLI. |
+> | [`wasm-bindgen-service-worker`](https://github.com/justinrubek/wasm-bindgen-service-worker) | Service worker written entirely in Rust via wasm-bindgen. Minimal JS glue. |
 
 ### Skills System
 
@@ -400,7 +483,7 @@ Baseline (config expansion → send_chunked → typing indicator)
 
 ### Quality & CI
 
-- [x] 699 unit + integration tests across all crates (`cargo test --workspace`)
+- [x] 755 unit + integration tests across all crates (`cargo test --workspace`)
 - [x] Zero clippy warnings: `cargo clippy --workspace -- -D warnings`
 - [x] Consistent formatting: `cargo fmt --all`
 - [x] GitHub Actions CI workflow on `push` / `pull_request` to `main`

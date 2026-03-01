@@ -9,8 +9,10 @@ use tracing::{debug, trace, warn};
 use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-const MAX_TOKENS: u32 = 8192;
+const MAX_TOKENS: u32 = 16000;
+const THINKING_BUDGET_TOKENS: u32 = 10000;
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+const ANTHROPIC_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -23,6 +25,15 @@ struct AnthropicRequest {
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: String,
+    budget_tokens: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +54,9 @@ enum AnthropicContent {
 enum ContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        thinking: String,
     },
     ToolUse {
         id: String,
@@ -149,6 +163,10 @@ impl LlmProvider for AnthropicProvider {
             system,
             messages,
             tools,
+            thinking: Some(ThinkingConfig {
+                thinking_type: "enabled".to_string(),
+                budget_tokens: THINKING_BUDGET_TOKENS,
+            }),
         };
 
         let url = format!("{}/v1/messages", self.base_url);
@@ -173,11 +191,14 @@ impl LlmProvider for AnthropicProvider {
             .header("content-type", "application/json");
 
         if proto::is_anthropic_oauth_token(&self.api_key) {
-            req_builder = req_builder
-                .bearer_auth(&self.api_key)
-                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA);
+            req_builder = req_builder.bearer_auth(&self.api_key).header(
+                "anthropic-beta",
+                format!("{},{}", ANTHROPIC_OAUTH_BETA, ANTHROPIC_THINKING_BETA),
+            );
         } else {
-            req_builder = req_builder.header("x-api-key", &self.api_key);
+            req_builder = req_builder
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-beta", ANTHROPIC_THINKING_BETA);
         }
 
         let response = req_builder
@@ -203,9 +224,9 @@ impl LlmProvider for AnthropicProvider {
                 && let Some(msg) = parsed["error"]["message"].as_str()
             {
                 let hint = if parsed["error"]["type"].as_str() == Some("authentication_error") {
-                    " Use /login to re-authenticate."
+                    " /login으로 재인증하세요."
                 } else if msg.to_lowercase().contains("credit balance") {
-                    " Visit https://console.anthropic.com to add credits."
+                    " https://console.anthropic.com 에서 크레딧을 충전하세요."
                 } else {
                     ""
                 };
@@ -269,12 +290,16 @@ impl LlmProvider for AnthropicProvider {
         let text = anthropic_resp
             .content
             .into_iter()
-            .filter_map(|block| {
-                if let ContentBlock::Text { text } = block {
-                    Some(text)
-                } else {
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                ContentBlock::Thinking { thinking } => {
+                    debug!(
+                        len = thinking.len(),
+                        "Skipping thinking block from response"
+                    );
                     None
                 }
+                _ => None,
             })
             .collect::<Vec<_>>()
             .join("");
@@ -364,6 +389,40 @@ fn convert_messages(messages: &[ChatMessage]) -> Result<Vec<AnthropicMessage>, L
         }
     }
 
+    // Validate tool_use / tool_result pairing.
+    // Collect all tool_result IDs from user messages, then strip any assistant
+    // tool_use blocks whose IDs have no matching tool_result.  This prevents
+    // Anthropic API errors like "tool_use ids were found without tool_result
+    // blocks immediately after" when conversation history from another provider
+    // (e.g. ChatGPT) is replayed against Claude.
+    let mut tool_result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in &result {
+        if msg.role == "user"
+            && let AnthropicContent::Blocks(blocks) = &msg.content
+        {
+            for block in blocks {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    tool_result_ids.insert(tool_use_id.clone());
+                }
+            }
+        }
+    }
+
+    // Fix assistant messages with orphaned tool_use blocks
+    for msg in &mut result {
+        if msg.role == "assistant"
+            && let AnthropicContent::Blocks(blocks) = &msg.content
+        {
+            let has_orphan = blocks.iter().any(
+                |b| matches!(b, ContentBlock::ToolUse { id, .. } if !tool_result_ids.contains(id)),
+            );
+            if has_orphan {
+                // Replace with empty text to avoid API rejection
+                msg.content = AnthropicContent::Text(String::new());
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -441,9 +500,14 @@ mod tests {
                 arguments: serde_json::json!({}),
             },
         ]);
-        let msgs = vec![ChatMessage::user("go"), assistant];
+        let msgs = vec![
+            ChatMessage::user("go"),
+            assistant,
+            ChatMessage::tool_result("tc1", "bash", "ok"),
+            ChatMessage::tool_result("tc2", "screen", "ok"),
+        ];
         let converted = convert_messages(&msgs).expect("conversion");
-        assert_eq!(converted.len(), 2);
+        assert_eq!(converted.len(), 3); // user, assistant(tool_use), user(tool_results)
 
         let AnthropicContent::Blocks(ref blocks) = converted[1].content else {
             panic!("expected blocks for assistant with tool calls");

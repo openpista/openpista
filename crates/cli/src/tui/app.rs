@@ -76,6 +76,14 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Delete a session by ID",
     },
     SlashCommand {
+        name: "/web",
+        description: "Show web adapter status",
+    },
+    SlashCommand {
+        name: "/web setup",
+        description: "Configure web adapter (wizard)",
+    },
+    SlashCommand {
         name: "/whatsapp",
         description: "Configure WhatsApp channel",
     },
@@ -135,6 +143,23 @@ pub enum Screen {
     Home,
     /// The active chat conversation screen.
     Chat,
+}
+
+/// Steps in the web adapter configuration wizard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebConfigStep {
+    /// Toggle web adapter enabled/disabled.
+    Enable,
+    /// Enter auth token.
+    Token,
+    /// Enter listen port.
+    Port,
+    /// Enter CORS origins.
+    CorsOrigins,
+    /// Enter static file directory.
+    StaticDir,
+    /// Confirm and save settings.
+    Confirm,
 }
 
 /// High-level processing state.
@@ -215,6 +240,23 @@ pub enum AppState {
         session_id: String,
         /// Short preview text shown in the confirmation dialog.
         session_preview: String,
+    },
+    /// Step-by-step web adapter configuration wizard.
+    WebConfiguring {
+        /// Current wizard step.
+        step: WebConfigStep,
+        /// Whether web adapter is enabled.
+        enabled: bool,
+        /// Auth token value being configured.
+        token: String,
+        /// Port string being configured.
+        port: String,
+        /// CORS origins value being configured.
+        cors_origins: String,
+        /// Static dir value being configured.
+        static_dir: String,
+        /// Text input buffer for the current step.
+        input_buffer: String,
     },
     /// WhatsApp pairing flow (QR code from Baileys bridge).
     WhatsAppSetup {
@@ -353,6 +395,10 @@ pub struct TuiApp {
     pub chat_scroll_clamped: u16,
     /// Pending session browser action: create new session (consumed by event loop).
     pub session_browser_new_requested: bool,
+    /// Pending web config from completed wizard (consumed by event loop).
+    pending_web_config: Option<crate::config::WebConfig>,
+    /// Pending tool approval request awaiting user decision (Y/N/A).
+    pub pending_approval: Option<super::approval::PendingApproval>,
 }
 
 /// Generates QR code lines using Unicode half-block characters.
@@ -427,6 +473,8 @@ impl TuiApp {
             chat_text_grid: Vec::new(),
             chat_scroll_clamped: 0,
             session_browser_new_requested: false,
+            pending_web_config: None,
+            pending_approval: None,
         }
     }
 
@@ -530,7 +578,7 @@ impl TuiApp {
             }
             "/help" => {
                 self.push_assistant(
-                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/telegram - Telegram bot setup guide\n/telegram status - show Telegram config status\n/telegram start - start Telegram adapter info\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
+                    "TUI commands:\n/help - show this help\n/login - open credential picker\n/connection - open credential picker\n/model - browse model catalog (search with s, refresh with r)\n/model list - print available models to chat\n/session - list sessions\n/session new - start a new session\n/session load <id> - load a session\n/session delete <id> - delete a session\n/web - show web adapter status\n/web setup - configure web adapter\n/whatsapp - configure WhatsApp channel\n/whatsapp status - show WhatsApp config status\n/telegram - Telegram bot setup guide\n/telegram status - show Telegram config status\n/telegram start - start Telegram adapter info\n/qr - show QR code for Web UI URL\n/clear - clear history\n/quit or /exit - leave TUI"
                         .to_string(),
                 );
             }
@@ -635,6 +683,37 @@ impl TuiApp {
             last_error: None,
             endpoint: None,
         };
+    }
+
+    /// Launches the step-by-step web adapter configuration wizard.
+    pub fn start_web_config_wizard(
+        &mut self,
+        enabled: bool,
+        token: String,
+        port: u16,
+        cors_origins: &str,
+        static_dir: &str,
+    ) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.screen = Screen::Chat;
+        self.push_assistant(
+            "Web Adapter Setup Wizard\nStep 1/6: Enable web adapter? (y/n)".to_string(),
+        );
+        self.state = AppState::WebConfiguring {
+            step: WebConfigStep::Enable,
+            enabled,
+            token,
+            port: port.to_string(),
+            cors_origins: cors_origins.to_string(),
+            static_dir: static_dir.to_string(),
+            input_buffer: String::new(),
+        };
+    }
+
+    /// Takes the pending web config set when the wizard completes.
+    pub fn take_pending_web_config(&mut self) -> Option<crate::config::WebConfig> {
+        self.pending_web_config.take()
     }
 
     /// Takes the pending `AuthLoginIntent` that was set during the login browser flow.
@@ -1087,6 +1166,28 @@ impl TuiApp {
                     self.state = AppState::Idle;
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        // ── Tool Approval prompt ────────────────────────────
+        if self.pending_approval.is_some() {
+            let decision = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    Some(proto::ToolApprovalDecision::Approve)
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Some(proto::ToolApprovalDecision::Reject)
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    Some(proto::ToolApprovalDecision::AllowForSession)
+                }
+                _ => None,
+            };
+            if let Some(decision) = decision
+                && let Some(pending) = self.pending_approval.take()
+            {
+                let _ = pending.reply_tx.send(decision);
             }
             return;
         }
@@ -1957,6 +2058,157 @@ impl TuiApp {
                 Command::None
             }
 
+            // ── Web config wizard ──────────────────────────────
+            Action::WebConfigKey(key) => {
+                use crossterm::event::{KeyCode, KeyModifiers};
+                if let AppState::WebConfiguring {
+                    ref mut step,
+                    ref mut enabled,
+                    ref mut token,
+                    ref mut port,
+                    ref mut cors_origins,
+                    ref mut static_dir,
+                    ref mut input_buffer,
+                } = self.state
+                {
+                    // Esc cancels the wizard from any step
+                    if key.code == KeyCode::Esc
+                        || (key.modifiers == KeyModifiers::CONTROL
+                            && key.code == KeyCode::Char('c'))
+                    {
+                        self.push_assistant("Web setup cancelled.".to_string());
+                        self.state = AppState::Idle;
+                        return Command::None;
+                    }
+
+                    match step {
+                        WebConfigStep::Enable => match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                *enabled = true;
+                                *step = WebConfigStep::Token;
+                                *input_buffer = token.clone();
+                                self.push_assistant(
+                                    "Step 2/6: Auth token (leave empty for none):".to_string(),
+                                );
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                *enabled = false;
+                                *step = WebConfigStep::Token;
+                                *input_buffer = token.clone();
+                                self.push_assistant(
+                                    "Step 2/6: Auth token (leave empty for none):".to_string(),
+                                );
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Token => match key.code {
+                            KeyCode::Enter => {
+                                *token = input_buffer.clone();
+                                *step = WebConfigStep::Port;
+                                *input_buffer = port.clone();
+                                self.push_assistant(
+                                    "Step 3/6: HTTP/WS port (default 3210):".to_string(),
+                                );
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Port => match key.code {
+                            KeyCode::Enter => {
+                                *port = input_buffer.clone();
+                                *step = WebConfigStep::CorsOrigins;
+                                *input_buffer = cors_origins.clone();
+                                self.push_assistant(
+                                    "Step 4/6: CORS origins (comma-separated, or \"*\"):"
+                                        .to_string(),
+                                );
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::CorsOrigins => match key.code {
+                            KeyCode::Enter => {
+                                *cors_origins = input_buffer.clone();
+                                *step = WebConfigStep::StaticDir;
+                                *input_buffer = static_dir.clone();
+                                self.push_assistant("Step 5/6: Static file directory:".to_string());
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::StaticDir => match key.code {
+                            KeyCode::Enter => {
+                                *static_dir = input_buffer.clone();
+                                let summary = format!(
+                                    "Step 6/6: Confirm settings?\n\
+                                     enabled: {}\n\
+                                     token: {}\n\
+                                     port: {}\n\
+                                     cors_origins: {}\n\
+                                     static_dir: {}\n\
+                                     Save? (y/n)",
+                                    enabled,
+                                    if token.is_empty() {
+                                        "(none)"
+                                    } else {
+                                        token.as_str()
+                                    },
+                                    port,
+                                    cors_origins,
+                                    static_dir,
+                                );
+                                *step = WebConfigStep::Confirm;
+                                *input_buffer = String::new();
+                                self.push_assistant(summary);
+                            }
+                            KeyCode::Char(c) => {
+                                input_buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                input_buffer.pop();
+                            }
+                            _ => {}
+                        },
+                        WebConfigStep::Confirm => match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                let web_cfg = crate::config::WebConfig {
+                                    enabled: *enabled,
+                                    token: token.clone(),
+                                    port: port.parse::<u16>().unwrap_or(3210),
+                                    cors_origins: cors_origins.clone(),
+                                    static_dir: static_dir.clone(),
+                                    shared_session_id: crate::config::WebConfig::default()
+                                        .shared_session_id,
+                                };
+                                self.pending_web_config = Some(web_cfg);
+                                self.push_assistant("Web config saved.".to_string());
+                                self.state = AppState::Idle;
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') => {
+                                self.push_assistant("Web setup cancelled.".to_string());
+                                self.state = AppState::Idle;
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                Command::None
+            }
             // ── Command palette ─────────────────────────────────
             Action::PaletteMoveUp => {
                 self.command_palette_cursor = self.command_palette_cursor.saturating_sub(1);
@@ -2181,6 +2433,10 @@ impl TuiApp {
                 self.state = AppState::Idle;
                 Command::None
             }
+            Action::WhatsAppSetupKey(key) => {
+                self.handle_key(key);
+                Command::None
+            }
         }
     }
 
@@ -2240,6 +2496,10 @@ impl TuiApp {
 
         if matches!(self.state, AppState::SessionBrowsing { .. }) {
             return vec![Action::SessionBrowserKey(key)];
+        }
+
+        if matches!(self.state, AppState::WebConfiguring { .. }) {
+            return vec![Action::WebConfigKey(key)];
         }
 
         if matches!(self.state, AppState::WhatsAppSetup { .. }) {
@@ -2581,6 +2841,72 @@ impl TuiApp {
                         )
                         .wrap(Wrap { trim: false });
                     frame.render_widget(qr_widget, popup_area);
+                }
+
+                // ── Tool Approval overlay ────────────────────
+                if let Some(pending) = &self.pending_approval {
+                    let tool_name = &pending.request.tool_name;
+                    let args_str = serde_json::to_string_pretty(&pending.request.arguments)
+                        .unwrap_or_else(|_| pending.request.arguments.to_string());
+                    let args_preview: String = args_str.chars().take(200).collect();
+
+                    let popup_width = 60u16.min(area.width.saturating_sub(4));
+                    let popup_height = 9u16.min(area.height.saturating_sub(2));
+                    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+                    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+                    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+                    frame.render_widget(Clear, popup_area);
+                    let dialog = Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            " Tool Approval Required ",
+                            Style::default()
+                                .fg(THEME.warning)
+                                .add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" Tool: {tool_name}"),
+                            Style::default().fg(THEME.fg),
+                        )),
+                        Line::from(Span::styled(
+                            format!(" Args: {args_preview}"),
+                            Style::default().fg(THEME.fg_dim),
+                        )),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::styled(
+                                " y",
+                                Style::default()
+                                    .fg(THEME.success)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(": approve  ", Style::default().fg(THEME.fg_muted)),
+                            Span::styled(
+                                "n",
+                                Style::default()
+                                    .fg(THEME.error)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(": reject  ", Style::default().fg(THEME.fg_muted)),
+                            Span::styled(
+                                "a",
+                                Style::default()
+                                    .fg(THEME.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                ": allow for session",
+                                Style::default().fg(THEME.fg_muted),
+                            ),
+                        ]),
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(THEME.warning)),
+                    )
+                    .wrap(Wrap { trim: false });
+                    frame.render_widget(dialog, popup_area);
                 }
             }
         }
