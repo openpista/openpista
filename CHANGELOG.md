@@ -3,6 +3,22 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## v0.1.1 - 2026-03-01
+
+### Added
+- [cli] GitHub star prompt — on first run, ask user if they want to open the repository in a browser (`⭐ Enjoying openpista? Give us a star on GitHub!`).
+- [ci] Binary package artifacts added to GitHub release workflow (pre-built binaries for supported targets).
+- [docs] `install.sh` one-liner installer script; binary install documentation added to README.
+- [docs] CHANGELOG integrated into GitHub release notes.
+
+### Fixed
+- [cli] Guard `GITHUB_REPO_URL` const with `#[cfg(not(test))]` to silence dead-code warning in `--all-targets` builds (clippy `-D warnings`).
+
+### Changed
+- None.
+
+---
+
 ## v0.1.0 - 2026-03-01
 
 ### Added
