@@ -1,182 +1,235 @@
-# 명령어 가이드 (COMMANDS)
+# Commands Reference
 
-`openpista`에서 자주 사용되는 명령어들을 `CLI`와 `TUI` 카테고리별로 정리했습니다.
+CLI and TUI commands for `openpista`, organized by category.
 
-## CLI 명령어 (CLI Commands)
-### 인증 (권장 — 가장 먼저 실행)
+## CLI Commands
 
-OAuth PKCE 브라우저 로그인이 권장되는 인증 방법입니다. OpenAI, Anthropic, OpenRouter에서 API 키 없이 바로 사용 가능합니다.
+### Authentication (Recommended — Run First)
+
+OAuth PKCE browser login is the recommended authentication method. Works with OpenAI, Anthropic, and OpenRouter without a separate API key.
 
 ```bash
-# 대화형 인증 제공자(Provider) 선택창 열기 (권장)
+# Interactive provider picker (recommended)
 openpista auth login
+
+# Non-interactive with explicit credentials
 openpista auth login --non-interactive --provider openai --api-key "$OPENAI_API_KEY"
 openpista auth login --non-interactive \
   --provider azure-openai \
   --endpoint "https://your-resource.openai.azure.com" \
   --api-key "$AZURE_OPENAI_API_KEY"
-# 로그아웃
+
+# Logout / status
 openpista auth logout --provider openai
 openpista auth status
 ```
 
-> **자격증명 해석 우선순위:** config 파일 / `openpista_API_KEY` → credential store (`auth login`) → 프로바이더 환경 변수 → `OPENAI_API_KEY` 폴백
-> 대부분의 사용자는 `openpista auth login`만으로 충분합니다.
+> **Credential resolution order:** config file / `openpista_API_KEY` → credential store (`auth login`) → provider env vars → `OPENAI_API_KEY` fallback
+> For most users, `openpista auth login` is all you need.
 
-### 기본 실행
+### Basic Usage
 
 ```bash
-# TUI 실행 (기본값)
+# Launch TUI (default)
 openpista
 openpista tui
 openpista -s SESSION_ID
 openpista tui -s SESSION_ID
+
+# Run as daemon (all enabled channels)
 openpista start
-openpista run -e "프롬프트를 입력하세요"
+
+# Run a single prompt and exit
+openpista run -e "your prompt here"
 ```
 
-### 웹 서버 전용 관리
+### Web Channel
 
 ```bash
-# web 설정 저장 + 정적 파일 설치 (crates/channels/static -> static_dir)
+# Save web config + install static assets (crates/channels/static → static_dir)
 openpista web setup --enable --port 3210
 
-# 토큰 관리
+# Token management
 openpista web setup --regenerate-token
-openpista web setup --yes
+openpista web setup --yes                        # auto-confirm regeneration prompt
 openpista web setup --token "manual-token"
 
-# web 채널만 실행
+# Start web-only daemon
 openpista web start
 
-# 설정 + 런타임 상태(pid/health) 확인
+# Show config + runtime state (pid / health)
 openpista web status
 ```
 
-`web setup` 동작 요약:
-- 최초 실행 시 web token 자동 발급
-- 기존 토큰 존재 시(대화형 터미널) 재발급 여부 확인 프롬프트
-- 비대화형 실행에서는 기본적으로 기존 토큰 유지 (`--regenerate-token`으로 강제 재발급)
+`web setup` token behavior:
+- First run with no token: token is auto-generated.
+- Existing token in an interactive terminal: prompt asks whether to regenerate.
+- Non-interactive mode: existing token is preserved unless `--regenerate-token` is passed.
 
-### 모델 카탈로그 (Model Catalog)
+### Telegram Channel
 
 ```bash
-# 사용 가능한 모델 목록 출력
+# Validate and save bot token
+openpista telegram setup --token 123456:ABC...
+
+# Start Telegram bot server
+openpista telegram start
+openpista telegram start --token 123456:ABC...   # override token for this session only
+
+# Show configuration status
+openpista telegram status
+```
+
+### WhatsApp Channel
+
+```bash
+# Initiate QR pairing flow (same as /whatsapp in TUI)
+openpista whatsapp
+openpista whatsapp setup
+
+# Start WhatsApp bridge in foreground mode
+openpista whatsapp start
+
+# Show connection status
+openpista whatsapp status
+
+# Send a message directly
+openpista whatsapp send 821012345678 "Hello from openpista"
+```
+
+### Model Catalog
+
+```bash
+# List available models
 openpista model list
-openpista model -m "안녕하세요" gpt-4o
+
+# Test a specific model
+openpista model -m "hello" gpt-4o
+
+# Open interactive model browser (same as /model in TUI)
 openpista model
 ```
 
-### 전역 플래그 (Global Flags)
+### Global Flags
 
 ```bash
-# 커스텀 설정 파일 지정
+# Use a custom config file
 openpista --config /path/to/config.toml
 
-# 로그 레벨 설정 (trace, debug, info, warn, error)
+# Set log level (trace, debug, info, warn, error)
 openpista --log-level debug
 
-# 디버그 로그를 파일로 출력
+# Write debug log to ~/.openpista/debug.log
 openpista --debug
 ```
 
 ---
 
-## TUI 명령어 (TUI Commands)
+## TUI Commands
 
-### 슬래시 명령어 (Slash Commands)
+### Slash Commands
 
-```txt
-/help                    - 사용 가능한 TUI 명령어 목록 보기
-/login                   - 인증을 위한 제공자 선택창 열기
-/connection              - /login 과 동일 (별칭)
-/model                   - 모델 브라우저 열기
-/model list              - 사용 가능한 모델을 채팅에 출력
-/session                 - 세션 브라우저 열기
-/session new             - 새 세션 시작
-/session load <id>       - ID로 세션 로드
-/session delete <id>     - ID로 세션 삭제
-/clear                   - 대화 기록 지우기
-/quit                    - TUI 종료
-/exit                    - TUI 종료 (/quit 과 동일)
+Press `Tab` in the input area to open the autocomplete palette. Navigate with arrow keys and press `Enter` to select.
+
 ```
-
-> **팁:** 입력 창에서 `Tab`을 누르면 슬래시 명령어 자동완성 팔레트가 열립니다. 화살표 키로 탐색하고 `Enter`로 선택하세요.
-
----
-
-## 사이드바 단축키 (Sidebar Keybinds)
-
-```txt
-Tab:          사이드바 토글 (열기/닫기)
-j 또는 ↓:    다음 세션으로 이동
-k 또는 ↑:    이전 세션으로 이동
-Enter:        선택한 세션 로드
-d 또는 Delete: 선택한 세션 삭제 요청 (확인 대화상자 표시)
-Esc:          사이드바 포커스 해제
+/help                    Show available TUI commands
+/login                   Open provider login / credentials browser
+/connection              Same as /login (alias)
+/model                   Open full-screen model browser
+/model list              Print available models to chat
+/session                 Open full-screen session browser
+/session new             Start a new session
+/session load <id>       Load a session by ID
+/session delete <id>     Delete a session by ID
+/clear                   Clear conversation history
+/quit                    Exit TUI
+/exit                    Exit TUI (same as /quit)
+/web                     Show web adapter status
+/web setup               Configure web adapter (interactive wizard)
+/whatsapp                Start WhatsApp QR pairing flow
+/whatsapp setup          Same as /whatsapp
+/whatsapp status         Show WhatsApp configuration status
+/telegram                Show Telegram setup guide
+/telegram setup          Same as /telegram
+/telegram status         Show Telegram configuration status
+/telegram start          Show info for starting the Telegram adapter
+/qr                      Show QR code for the Web UI URL
 ```
 
 ---
 
-## 세션 브라우저 단축키 (Session Browser Keybinds)
+## Sidebar Keybinds
 
-`/session` 명령어로 열리는 전체 화면 세션 브라우저입니다.
-
-```txt
-텍스트 입력:  세션 제목으로 검색 필터링
-j 또는 ↓:    다음 세션으로 이동
-k 또는 ↑:    이전 세션으로 이동
-Enter:        선택한 세션 로드
-n:            새 세션 생성
-d 또는 Delete: 선택한 세션 삭제 요청
-Esc:          세션 브라우저 닫기
 ```
-
-### 삭제 확인 대화상자 (ConfirmDelete Dialog)
-
-```txt
-y 또는 Enter: 삭제 확인
-n 또는 Esc:  취소
+Tab              Toggle sidebar open/closed
+j or ↓           Move to next session
+k or ↑           Move to previous session
+Enter            Load selected session
+d or Delete      Request deletion of selected session (shows confirmation)
+Esc              Unfocus sidebar
 ```
 
 ---
 
-## 로그인 브라우저 단축키 (Login Browser Keybinds)
+## Session Browser Keybinds
 
-```txt
-↑/↓, j/k:    이동
-Enter:        선택 / 다음 단계로 진행
-텍스트 입력:  검색 또는 정보 입력
-Backspace:    입력 지우기
-Esc:          이전 단계로 돌아가거나 종료
+Full-screen session browser opened with `/session`.
+
+```
+Text input       Filter sessions by title
+j or ↓           Move to next session
+k or ↑           Move to previous session
+Enter            Load selected session
+n                Create a new session
+d or Delete      Request deletion of selected session
+Esc              Close session browser
+```
+
+### Delete Confirmation Dialog
+
+```
+y or Enter       Confirm deletion
+n or Esc         Cancel
 ```
 
 ---
 
-## 모델 브라우저 단축키 (Model Browser Keybinds)
+## Login Browser Keybinds
 
-`/model` 명령어로 열리는 전체 화면 모델 브라우저입니다.
-
-```txt
-s 또는 /:    검색 모드 진입
-텍스트 입력:  모델 ID 부분 일치 검색
-Backspace:   검색어 지우기
-j/k, ↑/↓:   이동
-PgUp/PgDn:  페이지 단위 이동
-Enter:       선택한 모델을 현재 세션 모델로 적용
-r:           강제 새로고침 (Force Refresh)
-Esc:         (검색 모드에서) 검색 종료, (일반 모드에서) 브라우저 종료
+```
+↑/↓, j/k         Navigate
+Enter             Select / proceed to next step
+Text input        Enter search query or credentials
+Backspace         Delete input character
+Esc               Go back or exit
 ```
 
 ---
 
-## 채팅 단축키 (Chat Keybinds)
+## Model Browser Keybinds
 
-```txt
-Enter:                  메시지 전송
-Shift+Enter:            줄 바꿈
-↑/↓ 또는 스크롤:        채팅 히스토리 스크롤
-마우스 드래그:           텍스트 선택
-Ctrl+C 또는 Cmd+C:      선택한 텍스트 복사
-Tab:                    슬래시 명령어 자동완성 팔레트 열기
+Full-screen model browser opened with `/model`.
+
+```
+s or /           Enter search mode
+Text input       Filter models by ID (partial match)
+Backspace        Delete search character
+j/k or ↑/↓      Navigate model list
+PgUp/PgDn        Page up / page down
+Enter            Apply selected model to current session
+r                Force refresh model list
+Esc              Exit search mode (or close browser in normal mode)
+```
+
+---
+
+## Chat Keybinds
+
+```
+Enter                    Send message
+Shift+Enter              Insert newline (multi-line input)
+↑/↓ or scroll            Scroll conversation history
+Mouse drag               Select text
+Ctrl+C or Cmd+C          Copy selected text
+Tab                      Open slash command autocomplete palette
 ```

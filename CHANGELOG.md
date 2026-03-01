@@ -43,9 +43,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 #### Channel Adapters
 - [channels] `ChannelAdapter` trait for pluggable channel implementations.
 - [channels] `CliAdapter` — stdin/stdout with `/quit` exit command.
-- [channels] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions.
-- [channels] `MobileAdapter` — QUIC bidirectional streams, token-based auth, self-signed TLS via `rcgen`.
-- [channels] Response routing: CLI → stdout, Telegram → bot API; error responses surfaced to the user.
+- [channels] `TelegramAdapter` — `teloxide` long-polling dispatcher with stable per-chat sessions; token resolution priority: flag → `TELEGRAM_BOT_TOKEN` env → config file.
+- [channels] `WebAdapter` — axum-based HTTP + WebSocket server:
+  - Token authentication via WebSocket handshake (`auth` / `auth_result` messages).
+  - Static file serving for web UI assets (`/`, `/s/{session_id}` deep-link).
+  - REST endpoints: `GET /health`, `GET|POST /auth` (OAuth callback), `GET /ws` (WebSocket upgrade).
+  - 24-type WebSocket message protocol covering chat, session management, model switching, provider auth, and keepalive.
+  - Session list sync from server; TUI session sharing via `shared_session_id`.
+  - Provider OAuth initiation from web UI (`provider_login`, `provider_auth_url`, `provider_auth_completed`).
+  - Model catalog and live model switching (`model_list_request`, `model_change`, `model_changed`).
+  - CORS support via `tower-http`; configurable via `cors_origins`.
+  - Token auto-generation on first setup; `--regenerate-token` flag for rotation.
+- [channels] `WhatsAppAdapter` — Node.js/Baileys bridge subprocess:
+  - JSON-lines framing over stdin/stdout to `whatsapp-bridge/index.js`.
+  - QR code pairing via TUI `/whatsapp` command; one-time scan, session persists in `session_dir/auth/`.
+  - `session_dir` and `bridge_path` configurable; env override `WHATSAPP_SESSION_DIR`.
+- [channels] Response routing: CLI → stdout, Telegram → bot API, WhatsApp → bridge, Web → WebSocket; error responses surfaced per channel.
 
 #### Skills System
 - [skills] `SkillLoader` — recursive `SKILL.md` discovery from workspace with context concatenation.
@@ -53,14 +66,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - [skills] `openpista_WORKSPACE` environment variable override.
 
 #### CLI & TUI
-- [cli] `openpista start` — full daemon (QUIC + all enabled channels).
+- [cli] `openpista start` — full daemon (all enabled channels).
 - [cli] `openpista run -e "..."` — single-shot agent command.
 - [cli] `openpista tui [-s SESSION_ID]` — interactive TUI with optional session resume.
 - [cli] `openpista model [MODEL_OR_COMMAND]` — model catalog (list / test).
 - [cli] `openpista -s SESSION_ID` — session resume shortcut.
 - [cli] `openpista auth login` — browser OAuth PKCE login with persisted credentials; supports `--provider`, `--api-key`, `--endpoint`, `--port`, `--timeout`, `--non-interactive` flags.
+- [cli] `openpista auth logout [--provider]` — remove stored credentials for a provider.
+- [cli] `openpista auth status` — show authentication status for all stored providers.
+- [cli] `openpista web setup` — configure web adapter and install static assets; flags: `--token`, `--regenerate-token`, `--port`, `--cors-origins`, `--static-dir`, `--shared-session-id`, `--enable`, `--disable`, `--yes`.
+- [cli] `openpista web start` — start web-only daemon mode.
+- [cli] `openpista web status` — show web adapter config and runtime state (pid, health).
+- [cli] `openpista telegram setup [--token]` — validate and save bot token to config.
+- [cli] `openpista telegram start [--token]` — start Telegram bot server.
+- [cli] `openpista telegram status` — show Telegram configuration status.
+- [cli] `openpista whatsapp` / `whatsapp setup` — initiate QR pairing flow.
+- [cli] `openpista whatsapp start` — start WhatsApp bridge in foreground mode.
+- [cli] `openpista whatsapp status` — show WhatsApp connection status.
+- [cli] `openpista whatsapp send <number> <message>` — send a message to a WhatsApp number.
 - [cli] Elm Architecture (TEA) reactive TUI — unidirectional data flow (`Action → update() → State → view()`).
-- [cli] 12 TUI slash commands: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`.
+- [cli] 20 TUI slash commands: `/help`, `/login`, `/connection`, `/model`, `/model list`, `/session`, `/session new`, `/session load <id>`, `/session delete <id>`, `/clear`, `/quit`, `/exit`, `/web`, `/web setup`, `/whatsapp`, `/whatsapp status`, `/telegram`, `/telegram status`, `/telegram start`, `/qr`.
 - [cli] Centralized TUI with dedicated Home, Chat, Session Browser, and Model Browser screens.
 - [cli] TOML config file with documented examples; environment variable override for all secrets.
 - [cli] PID file on start, `SIGTERM` + `Ctrl-C` graceful shutdown.
@@ -93,6 +118,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - [docs] `ROADMAP.md` (English) and `ROADMAP_ko.md` (Korean).
 - [docs] `CHANGELOG.md` (this document).
 - [docs] `COMMANDS.md` — CLI and TUI command reference.
+- [docs] `use-channels/` — per-channel setup guides: `telegram.md`, `cli.md`, `whatsapp.md`, `web.md`, `README.md` (index with comparison table).
 - [docs] Agent orchestration docs (`docs/agent-orchestration/`).
 
 ### Changed
