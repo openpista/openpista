@@ -197,17 +197,32 @@ jobs:
           sha256sum "${files[@]}" > SHA256SUMS.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.release_tag }}
-          name: ${{ needs.prepare.outputs.release_tag }}
-          body: ${{ steps.changelog.outputs.body }}
-          target_commitish: ${{ github.sha }}
-          files: |
-            dist/openpista-*.tar.gz
-            dist/openpista-v*-*-*-*
-            dist/SHA256SUMS.txt
-            install.sh
-          fail_on_unmatched_files: true
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.prepare.outputs.release_tag }}"
+
+          # Write changelog body to a temp file to avoid shell quoting issues
+          cat > /tmp/release-notes.md << 'NOTES_EOF'
+          ${{ steps.changelog.outputs.body }}
+          NOTES_EOF
+
+          # Collect tarballs
+          tarballs=( dist/openpista-*.tar.gz )
+
+          # Collect standalone binaries (exclude .tar.gz)
+          standalones=()
+          for f in dist/openpista-v*; do
+            [[ "${f}" == *.tar.gz ]] && continue
+            standalones+=( "${f}" )
+          done
+
+          gh release create "${tag}" \
+            --title "${tag}" \
+            --notes-file /tmp/release-notes.md \
+            --target "${{ github.sha }}" \
+            "${tarballs[@]}" \
+            "${standalones[@]}" \
+            dist/SHA256SUMS.txt \
+            install.sh
