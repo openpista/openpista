@@ -312,6 +312,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_wasm_module_path_with_nested_workspace() {
+        let workspace = PathBuf::from("/home/user/.openpista/workspace");
+        let path = resolve_wasm_module_path(&workspace, "deploy");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/.openpista/workspace/skills/deploy/main.wasm")
+        );
+    }
+
+    #[test]
+    fn resolve_wasm_module_path_with_special_chars_in_skill_name() {
+        let workspace = PathBuf::from("/tmp/ws");
+        let path = resolve_wasm_module_path(&workspace, "my-skill_v2");
+        assert_eq!(path, PathBuf::from("/tmp/ws/skills/my-skill_v2/main.wasm"));
+    }
+
+    #[test]
     fn unpack_abi_return_decodes_pointer_and_length() {
         let ptr = 4096_u32;
         let len = 128_u32;
@@ -325,6 +342,135 @@ mod tests {
         let packed = (1_i64) << 32;
         let err = unpack_abi_return(packed).expect_err("empty len should fail");
         assert!(err.contains("empty ToolResult"));
+    }
+
+    #[test]
+    fn unpack_abi_return_handles_large_pointer() {
+        let ptr = u32::MAX;
+        let len = 1_u32;
+        let packed = ((ptr as i64) << 32) | (len as i64);
+        let (p, l) = unpack_abi_return(packed).expect("large ptr");
+        assert_eq!(p, u32::MAX as usize);
+        assert_eq!(l, 1);
+    }
+
+    #[test]
+    fn unpack_abi_return_handles_large_length() {
+        let ptr = 1_u32;
+        let len = u32::MAX;
+        let packed = ((ptr as i64) << 32) | (len as i64);
+        let (p, l) = unpack_abi_return(packed).expect("large len");
+        assert_eq!(p, 1);
+        assert_eq!(l, u32::MAX as usize);
+    }
+
+    #[test]
+    fn unpack_abi_return_zero_pointer_with_nonzero_len() {
+        let packed = 42_i64; // ptr=0, len=42
+        let (p, l) = unpack_abi_return(packed).expect("zero ptr");
+        assert_eq!(p, 0);
+        assert_eq!(l, 42);
+    }
+
+    #[tokio::test]
+    async fn run_wasm_skill_returns_error_for_missing_module() {
+        let req = WasmRunRequest {
+            call_id: "test-missing".to_string(),
+            skill_name: "nonexistent-skill".to_string(),
+            workspace_dir: PathBuf::from("/tmp/no-such-workspace-xyz"),
+            arguments: serde_json::json!({}),
+            timeout_secs: Some(5),
+        };
+        let result = run_wasm_skill(req).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("WASM module not found"));
+        assert!(err.contains("nonexistent-skill"));
+    }
+
+    #[tokio::test]
+    async fn run_wasm_skill_error_for_missing_module_with_default_timeout() {
+        let req = WasmRunRequest {
+            call_id: "test-no-timeout".to_string(),
+            skill_name: "missing".to_string(),
+            workspace_dir: PathBuf::from("/tmp/absent"),
+            arguments: serde_json::json!({"key": "value"}),
+            timeout_secs: None,
+        };
+        let result = run_wasm_skill(req).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("WASM module not found"));
+    }
+
+    #[tokio::test]
+    async fn run_wasm_skill_error_includes_module_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let req = WasmRunRequest {
+            call_id: "test-path".to_string(),
+            skill_name: "echo".to_string(),
+            workspace_dir: tmp.path().to_path_buf(),
+            arguments: serde_json::json!({}),
+            timeout_secs: Some(1),
+        };
+        let result = run_wasm_skill(req).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("main.wasm"),
+            "error should mention the module path: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_wasm_skill_invalid_wasm_binary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = tmp.path().join("skills/bad-wasm");
+        std::fs::create_dir_all(&skill_dir).expect("create dir");
+        std::fs::write(skill_dir.join("main.wasm"), b"not a valid wasm module").expect("write");
+
+        let req = WasmRunRequest {
+            call_id: "test-bad-wasm".to_string(),
+            skill_name: "bad-wasm".to_string(),
+            workspace_dir: tmp.path().to_path_buf(),
+            arguments: serde_json::json!({}),
+            timeout_secs: Some(5),
+        };
+        let result = run_wasm_skill(req).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to load WASM module"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_run_request_fields_are_accessible() {
+        let req = WasmRunRequest {
+            call_id: "c1".to_string(),
+            skill_name: "skill".to_string(),
+            workspace_dir: PathBuf::from("/ws"),
+            arguments: serde_json::json!({"a": 1}),
+            timeout_secs: Some(10),
+        };
+        assert_eq!(req.call_id, "c1");
+        assert_eq!(req.skill_name, "skill");
+        assert_eq!(req.workspace_dir, PathBuf::from("/ws"));
+        assert_eq!(req.arguments["a"], 1);
+        assert_eq!(req.timeout_secs, Some(10));
+    }
+
+    #[test]
+    fn wasm_run_request_clone() {
+        let req = WasmRunRequest {
+            call_id: "c2".to_string(),
+            skill_name: "s".to_string(),
+            workspace_dir: PathBuf::from("/w"),
+            arguments: serde_json::json!(null),
+            timeout_secs: None,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.call_id, req.call_id);
+        assert_eq!(cloned.timeout_secs, None);
     }
 
     #[test]

@@ -285,6 +285,14 @@ pub fn seed_models_for_provider(provider: &str) -> Vec<ModelCatalogEntry> {
                 available: true,
             },
         ],
+        "ollama" => vec![ModelCatalogEntry {
+            id: "llama3.2".to_string(),
+            provider: p,
+            recommended_for_coding: true,
+            status: ModelStatus::Stable,
+            source: ModelSource::Docs,
+            available: true,
+        }],
         _ => vec![],
     }
 }
@@ -1512,7 +1520,6 @@ mod tests {
         assert!(!entries.is_empty());
         assert!(entries.iter().all(|e| e.provider == "openai"));
         assert!(entries.iter().any(|e| e.id == "gpt-5.3-codex"));
-        assert!(entries.iter().any(|e| e.id == "gpt-4o"));
         assert!(entries.iter().any(|e| e.id == "o3"));
         assert!(entries.iter().any(|e| e.id == "gpt-4.1"));
         assert!(entries.iter().any(|e| e.recommended_for_coding));

@@ -65,7 +65,7 @@ The first public release establishes the core autonomous loop: the LLM receives 
 - [x] `TelegramAdapter` — `teloxide` dispatcher with stable per-chat sessions
 - [x] Response routing: CLI responses → stdout, Telegram responses → bot API
 - [x] Error responses clearly surfaced to the user
- - [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
+- [x] `WebAdapter` — axum WebSocket server + static H5 chat UI (`static/`) serving; Rust→WASM client in progress (see Web Channel Adapter section)
 
 ### Telegram Channel Adapter
 

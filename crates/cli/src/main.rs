@@ -1195,6 +1195,70 @@ async fn cmd_web_setup(mut config: Config, options: WebSetupOptions) -> anyhow::
     Ok(())
 }
 
+#[cfg(not(test))]
+/// Starts daemon mode with only the web channel adapter enabled.
+async fn cmd_web_start(config: Config) -> anyhow::Result<()> {
+    info!("Starting openpista web-only daemon");
+
+    if !config.channels.web.enabled {
+        warn!("Web adapter is disabled in config; `web start` will start it anyway");
+    }
+    if config.channels.web.token.is_empty() {
+        warn!("Web adapter token is empty; websocket auth is disabled");
+    }
+    ensure_web_port_available(config.channels.web.port).await?;
+
+    let runtime = build_runtime(&config, Arc::new(AutoApproveHandler)).await?;
+    let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<ChannelEvent>(128);
+    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<AgentResponse>(128);
+
+    let web_adapter = build_web_adapter(&config, &runtime);
+    // Wire web approval handler into the runtime so tool calls go through the browser
+    runtime.set_approval_handler(web_adapter.approval_handler());
+    let web_session_sync_adapter = web_adapter.clone();
+    let web_resp_adapter = web_adapter.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = web_adapter.run(event_tx).await {
+            error!("Web adapter error: {e}");
+        }
+    });
+
+    spawn_web_session_sync_task(runtime.memory().clone(), web_session_sync_adapter);
+
+    tokio::spawn(async move {
+        while let Some(resp) = resp_rx.recv().await {
+            let channel_id = resp.channel_id.clone();
+            if should_send_web_response(&channel_id) {
+                if let Err(e) = web_resp_adapter.send_response(resp).await {
+                    error!("Failed to send Web response: {e}");
+                }
+                continue;
+            }
+            warn!(
+                "No web response adapter configured for channel: {}",
+                channel_id
+            );
+        }
+    });
+
+    let pid_file = daemon::PidFile::new(daemon::PidFile::default_path());
+    pid_file.write().await?;
+    let port = config.channels.web.port;
+    println!("Web server started:");
+    println!("  http: http://127.0.0.1:{port}");
+    println!("  ws: ws://127.0.0.1:{port}/ws");
+    println!("  health: http://127.0.0.1:{port}/health");
+
+    run_web_event_loop(event_rx, runtime, skill_loader, resp_tx, "web").await;
+
+    pid_file.remove().await;
+    info!("openpista web-only daemon stopped");
+    Ok(())
+}
+
 // ─── Telegram CLI commands ───────────────────────────────────────────────────
 
 /// Validates that a Telegram bot token matches the expected `NUMBERS:STRING` format.
@@ -1271,7 +1335,8 @@ async fn cmd_telegram_setup(mut config: Config, token: Option<String>) -> anyhow
 
     // Verify the token works by calling the Telegram getMe API
     print!("Verifying token with Telegram API... ");
-    let resp = reqwest::get(format!("https://api.telegram.org/bot{token}/getMe")).await?;
+    let url = format!("https://api.telegram.org/bot{token}/getMe");
+    let resp = reqwest::get(&url).await?;
     if resp.status().is_success() {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let username = body["result"]["username"].as_str().unwrap_or("unknown");
@@ -1344,10 +1409,36 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
         );
     }
 
-    if !prompt_whatsapp_model_warning(&config)? {
-        return Ok(());
-    }
     let effective_model = config.agent.effective_model().to_string();
+    if effective_model.is_empty() || config.agent.model.is_empty() {
+        println!(
+            "\u{26a0}  No model configured. Telegram needs an LLM model to respond to messages."
+        );
+        println!(
+            "  Current: provider={}, model={}",
+            config.agent.provider.name(),
+            if effective_model.is_empty() {
+                "(none)"
+            } else {
+                &effective_model
+            }
+        );
+        println!();
+        println!("  Run `openpista model select` to choose a model first.");
+        println!("  Or set it in ~/.openpista/config.toml:");
+        println!("    [agent]");
+        println!("    provider = \"anthropic\"");
+        println!("    model = \"claude-sonnet-4-6\"");
+        println!();
+        print!("  Continue anyway? (y/N): ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            return Ok(());
+        }
+        println!();
+    }
     println!("Telegram Bot Server");
     println!("===================");
     println!();
@@ -1414,70 +1505,6 @@ async fn cmd_telegram_start(config: Config, token: Option<String>) -> anyhow::Re
     signal::ctrl_c().await?;
     println!();
     println!("Shutting down Telegram bot.");
-    Ok(())
-}
-
-#[cfg(not(test))]
-/// Starts daemon mode with only the web channel adapter enabled.
-async fn cmd_web_start(config: Config) -> anyhow::Result<()> {
-    info!("Starting openpista web-only daemon");
-
-    if !config.channels.web.enabled {
-        warn!("Web adapter is disabled in config; `web start` will start it anyway");
-    }
-    if config.channels.web.token.is_empty() {
-        warn!("Web adapter token is empty; websocket auth is disabled");
-    }
-    ensure_web_port_available(config.channels.web.port).await?;
-
-    let runtime = build_runtime(&config, Arc::new(AutoApproveHandler)).await?;
-    let skill_loader = Arc::new(SkillLoader::new(&config.skills.workspace));
-
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<ChannelEvent>(128);
-    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<AgentResponse>(128);
-
-    let web_adapter = build_web_adapter(&config, &runtime);
-    // Wire web approval handler into the runtime so tool calls go through the browser
-    runtime.set_approval_handler(web_adapter.approval_handler());
-    let web_session_sync_adapter = web_adapter.clone();
-    let web_resp_adapter = web_adapter.clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = web_adapter.run(event_tx).await {
-            error!("Web adapter error: {e}");
-        }
-    });
-
-    spawn_web_session_sync_task(runtime.memory().clone(), web_session_sync_adapter);
-
-    tokio::spawn(async move {
-        while let Some(resp) = resp_rx.recv().await {
-            let channel_id = resp.channel_id.clone();
-            if should_send_web_response(&channel_id) {
-                if let Err(e) = web_resp_adapter.send_response(resp).await {
-                    error!("Failed to send Web response: {e}");
-                }
-                continue;
-            }
-            warn!(
-                "No web response adapter configured for channel: {}",
-                channel_id
-            );
-        }
-    });
-
-    let pid_file = daemon::PidFile::new(daemon::PidFile::default_path());
-    pid_file.write().await?;
-    let port = config.channels.web.port;
-    println!("Web server started:");
-    println!("  http: http://127.0.0.1:{port}");
-    println!("  ws: ws://127.0.0.1:{port}/ws");
-    println!("  health: http://127.0.0.1:{port}/health");
-
-    run_web_event_loop(event_rx, runtime, skill_loader, resp_tx, "web").await;
-
-    pid_file.remove().await;
-    info!("openpista web-only daemon stopped");
     Ok(())
 }
 
@@ -1710,7 +1737,7 @@ async fn cmd_run(config: Config, exec: String) -> anyhow::Result<()> {
         .await;
 
     match result {
-        Ok(text) => {
+        Ok((text, _usage)) => {
             println!("{text}");
         }
         Err(e) => {
@@ -2042,7 +2069,7 @@ async fn cmd_model_test(
     let elapsed = start.elapsed();
 
     match result {
-        Ok(text) => {
+        Ok((text, _usage)) => {
             println!("OK ({:.1}s)\n{text}", elapsed.as_secs_f64());
             info!(model = %model_name, elapsed_ms = %elapsed.as_millis(), "Model test passed");
         }
@@ -2103,7 +2130,7 @@ async fn cmd_model_test_all(config: Config, message: String) -> anyhow::Result<(
         let elapsed = start.elapsed();
 
         match result {
-            Ok(text) => {
+            Ok((text, _usage)) => {
                 let preview: String = text.chars().take(50).collect();
                 let preview = preview.replace('\n', " ");
                 println!(
@@ -2372,10 +2399,12 @@ fn should_send_web_response(channel_id: &ChannelId) -> bool {
 /// Builds an outbound response from runtime result.
 fn build_agent_response(
     event: &ChannelEvent,
-    result: Result<String, proto::Error>,
+    result: Result<(String, agent::TokenUsage), proto::Error>,
 ) -> AgentResponse {
     match result {
-        Ok(text) => AgentResponse::new(event.channel_id.clone(), event.session_id.clone(), text),
+        Ok((text, _usage)) => {
+            AgentResponse::new(event.channel_id.clone(), event.session_id.clone(), text)
+        }
         Err(e) => AgentResponse::error(
             event.channel_id.clone(),
             event.session_id.clone(),
@@ -2524,9 +2553,7 @@ async fn cmd_whatsapp(mut config: Config) -> anyhow::Result<()> {
                             }
                             println!();
                             println!("Scan this QR code with WhatsApp on your phone.");
-                            println!(
-                                "(Open WhatsApp > Settings > Linked Devices > Link a Device)"
-                            );
+                            println!("(Open WhatsApp > Settings > Linked Devices > Link a Device)");
                             println!();
                         }
                         channels::whatsapp::BridgeEvent::Connected { phone, name } => {
@@ -2621,16 +2648,14 @@ async fn cmd_whatsapp_status(config: Config) -> anyhow::Result<()> {
         println!("Credentials: found (auth/creds.json exists)");
         if let Ok(data) = std::fs::read_to_string(&creds_path)
             && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
-        {
-            if let Some(me_id) = json
+            && let Some(me_id) = json
                 .get("me")
                 .and_then(|me| me.get("id"))
                 .and_then(|id| id.as_str())
-            {
-                let phone = me_id.split(':').next().unwrap_or(me_id);
-                println!("Phone:       {phone}");
-                println!("Link:        https://wa.me/{phone}");
-            }
+        {
+            let phone = me_id.split(':').next().unwrap_or(me_id);
+            println!("Phone:       {phone}");
+            println!("Link:        https://wa.me/{phone}");
         }
     } else {
         println!("Credentials: not found");
@@ -2764,7 +2789,7 @@ async fn cmd_whatsapp_start(config: Config) -> anyhow::Result<()> {
                                             )
                                             .await;
                                         let reply_text = match result {
-                                            Ok(text) => text,
+                                            Ok((text, _usage)) => text,
                                             Err(e) => format!("Error: {e}"),
                                         };
                                         println!("[OUT] {from_clone}: {reply_text}");
@@ -2929,6 +2954,7 @@ async fn cmd_whatsapp_send(config: Config, number: String, message: String) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn should_send_telegram_response_checks_prefix() {
@@ -3086,7 +3112,10 @@ mod tests {
     #[test]
     fn build_agent_response_maps_success_and_error() {
         let event = ChannelEvent::new(ChannelId::from("cli:local"), SessionId::from("s1"), "msg");
-        let ok = build_agent_response(&event, Ok("done".to_string()));
+        let ok = build_agent_response(
+            &event,
+            Ok(("done".to_string(), agent::TokenUsage::default())),
+        );
         assert_eq!(ok.content, "done");
         assert!(!ok.is_error);
 

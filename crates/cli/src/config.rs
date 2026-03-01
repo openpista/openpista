@@ -450,7 +450,7 @@ pub struct Config {
     pub skills: SkillsConfig,
 }
 
-const DEFAULT_MAX_TOOL_ROUNDS: usize = 25;
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 30;
 
 fn default_max_tool_rounds() -> usize {
     DEFAULT_MAX_TOOL_ROUNDS
@@ -645,6 +645,7 @@ impl WhatsAppConfig {
     }
 
     /// Returns the effective bridge script path, falling back to the bundled default.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn effective_bridge_path(&self) -> &str {
         self.bridge_path
             .as_deref()
