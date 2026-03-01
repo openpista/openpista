@@ -1,5 +1,6 @@
 //! CLI entrypoint and subcommand orchestration.
 
+#[cfg(not(test))]
 const GITHUB_REPO_URL: &str = "https://github.com/openpista/openpista";
 
 mod auth;

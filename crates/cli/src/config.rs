@@ -1942,4 +1942,63 @@ static_dir = "/tmp/web"
             assert!(std::env::var("HOME").is_err());
         });
     }
+
+    #[test]
+    fn tui_state_try_load_returns_none_when_file_missing() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            set_env_var("HOME", tmp.path().to_str().unwrap());
+
+            // No state.toml exists yet — first-run detection path.
+            assert!(TuiState::try_load().is_none());
+
+            restore_home(original_home);
+        });
+    }
+
+    #[test]
+    fn tui_state_try_load_returns_some_when_file_exists() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            set_env_var("HOME", tmp.path().to_str().unwrap());
+
+            TuiState {
+                last_model: "claude-sonnet-4-6".to_string(),
+                last_provider: "anthropic".to_string(),
+            }
+            .save()
+            .expect("save");
+
+            let state = TuiState::try_load().expect("should be Some after save");
+            assert_eq!(state.last_model, "claude-sonnet-4-6");
+            assert_eq!(state.last_provider, "anthropic");
+
+            restore_home(original_home);
+        });
+    }
+
+    #[test]
+    fn tui_state_save_selection_creates_then_updates() {
+        with_locked_env(|| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let original_home = std::env::var("HOME").ok();
+            set_env_var("HOME", tmp.path().to_str().unwrap());
+
+            // First call: file does not exist yet — save_selection must create it.
+            TuiState::save_selection("gpt-4o", "openai").expect("first save");
+            let first = TuiState::load();
+            assert_eq!(first.last_model, "gpt-4o");
+            assert_eq!(first.last_provider, "openai");
+
+            // Second call: file already exists — save_selection must merge and update.
+            TuiState::save_selection("claude-sonnet-4-6", "anthropic").expect("second save");
+            let second = TuiState::load();
+            assert_eq!(second.last_model, "claude-sonnet-4-6");
+            assert_eq!(second.last_provider, "anthropic");
+
+            restore_home(original_home);
+        });
+    }
 }
