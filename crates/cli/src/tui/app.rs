@@ -431,25 +431,36 @@ pub fn generate_qr_lines(url: &str) -> Result<Vec<String>, String> {
 }
 
 /// Detects image data in tool output and returns a placeholder string.
-/// Looks for JSON with mime: image/* and data_b64 fields.
+/// Looks for JSON with mime: image/* AND a payload field (data_b64, data, or url).
+/// Also detects data:image/*;base64, URIs.
 fn detect_image_placeholder(output: &str) -> Option<String> {
     // Try to parse as JSON
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
-        // Check for image mime type
+        // Check for image mime type AND a payload field
         if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
             if mime.starts_with("image/") {
-                let img_type = mime.strip_prefix("image/").unwrap_or("image");
-                // Check if there's base64 data
-                if json.get("data_b64").is_some() {
+                // Must have actual image data (data_b64, data, or url field)
+                let has_payload = json.get("data_b64").is_some() 
+                    || json.get("data").is_some()
+                    || json.get("url").is_some();
+                
+                if has_payload {
+                    let img_type = mime.strip_prefix("image/").unwrap_or("image");
                     return Some(format!("[image:{}]", img_type));
                 }
-                return Some(format!("[image:{}]", img_type));
             }
         }
         
-        // Also check for common image field patterns
-        if json.get("image").is_some() || json.get("img").is_some() {
-            return Some("[image]".to_string());
+        // Check for "image" or "img" fields with actual content (non-empty string or object)
+        if let Some(img) = json.get("image") {
+            if has_image_content(img) {
+                return Some("[image]".to_string());
+            }
+        }
+        if let Some(img) = json.get("img") {
+            if has_image_content(img) {
+                return Some("[image]".to_string());
+            }
         }
     }
     
@@ -467,6 +478,21 @@ fn detect_image_placeholder(output: &str) -> Option<String> {
     }
     
     None
+}
+
+/// Helper to check if a JSON value contains actual image content
+fn has_image_content(value: &serde_json::Value) -> bool {
+    // Non-empty string (base64 data or URL)
+    if let Some(s) = value.as_str() {
+        return !s.is_empty();
+    }
+    // Object with payload fields
+    if let Some(obj) = value.as_object() {
+        return obj.get("data_b64").is_some() 
+            || obj.get("data").is_some()
+            || obj.get("url").is_some();
+    }
+    false
 }
 
 impl TuiApp {
@@ -1167,9 +1193,17 @@ impl TuiApp {
                     }
                 }
                 proto::Role::Tool => {
+                    // Apply image placeholder detection for consistency with live tool results
+                    let preview = if let Some(img_info) = detect_image_placeholder(&msg.content) {
+                        img_info
+                    } else if msg.content.len() > 120 {
+                        format!("{}…", &msg.content[..120])
+                    } else {
+                        msg.content.clone()
+                    };
                     self.messages.push(TuiMessage::ToolResult {
                         tool_name: msg.tool_name.unwrap_or_default(),
-                        output_preview: msg.content,
+                        output_preview: preview,
                         is_error: false,
                     });
                 }
@@ -7500,7 +7534,22 @@ mod tests {
     }
 
     #[test]
-    fn detect_image_placeholder_json_no_data_b64() {
+    fn detect_image_placeholder_json_no_payload() {
+        // JSON with mime but no payload fields should NOT trigger placeholder
+        let input = r#"{"mime":"image/png","description":"An image"}"#;
+        assert_eq!(detect_image_placeholder(input), None);
+    }
+
+    #[test]
+    fn detect_image_placeholder_json_empty_image_field() {
+        // Empty image field should NOT trigger placeholder
+        let input = r#"{"image":""}"#;
+        assert_eq!(detect_image_placeholder(input), None);
+    }
+
+    #[test]
+    fn detect_image_placeholder_json_url_payload() {
+        // JSON with mime and url field should trigger placeholder
         let input = r#"{"mime":"image/png","url":"http://example.com/image.png"}"#;
         assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
     }
