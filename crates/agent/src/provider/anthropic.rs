@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, trace, warn};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
+use super::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 16000;
@@ -145,7 +145,7 @@ impl LlmProvider for AnthropicProvider {
         let mut tool_name_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::with_capacity(req.tools.len());
         for t in &req.tools {
-            let sanitized = sanitize_tool_name(&t.name);
+            let sanitized = super::sanitize_tool_name(&t.name);
             if let Some(existing) = tool_name_map.get(&sanitized)
                 && existing != &t.name
             {
@@ -336,7 +336,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Result<Vec<AnthropicMessage>, L
                         .iter()
                         .map(|tc| ContentBlock::ToolUse {
                             id: tc.id.clone(),
-                            name: sanitize_tool_name(&tc.name),
+                            name: super::sanitize_tool_name(&tc.name),
                             input: tc.arguments.clone(),
                         })
                         .collect();
@@ -428,25 +428,10 @@ fn convert_messages(messages: &[ChatMessage]) -> Result<Vec<AnthropicMessage>, L
 
 fn convert_tool(t: &ToolDefinition) -> AnthropicTool {
     AnthropicTool {
-        name: sanitize_tool_name(&t.name),
+        name: super::sanitize_tool_name(&t.name),
         description: t.description.clone(),
         input_schema: t.parameters.clone(),
     }
-}
-
-/// Sanitizes a tool name for the Anthropic API.
-/// The Anthropic OAuth API only allows `^[a-zA-Z0-9_-]{1,128}$` in tool names.
-/// Non-conforming characters (e.g. dots) are replaced with underscores.
-fn sanitize_tool_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -454,7 +439,6 @@ fn sanitize_tool_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
 
     // ── constructor tests ──────────────────────────────────────────────────────
 
@@ -705,20 +689,20 @@ mod tests {
 
     #[test]
     fn sanitize_tool_name_replaces_dots() {
-        assert_eq!(sanitize_tool_name("system.run"), "system_run");
+        assert_eq!(super::super::sanitize_tool_name("system.run"), "system_run");
     }
 
     #[test]
     fn sanitize_tool_name_preserves_valid_chars() {
-        assert_eq!(sanitize_tool_name("my-tool"), "my-tool");
-        assert_eq!(sanitize_tool_name("simple"), "simple");
-        assert_eq!(sanitize_tool_name("tool_123"), "tool_123");
+        assert_eq!(super::super::sanitize_tool_name("my-tool"), "my-tool");
+        assert_eq!(super::super::sanitize_tool_name("simple"), "simple");
+        assert_eq!(super::super::sanitize_tool_name("tool_123"), "tool_123");
     }
 
     #[test]
     fn sanitize_tool_name_replaces_special_chars() {
-        assert_eq!(sanitize_tool_name("tool@v2"), "tool_v2");
-        assert_eq!(sanitize_tool_name("ns::tool"), "ns__tool");
+        assert_eq!(super::super::sanitize_tool_name("tool@v2"), "tool_v2");
+        assert_eq!(super::super::sanitize_tool_name("ns::tool"), "ns__tool");
     }
 
     #[test]

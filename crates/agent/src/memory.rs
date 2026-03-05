@@ -1,7 +1,45 @@
+use async_trait::async_trait;
 use proto::{AgentMessage, DatabaseError, Role, SessionId};
 use sqlx::{Row, sqlite::SqlitePool};
 use std::str::FromStr;
 use tracing::{debug, info};
+
+/// Trait for conversation memory backends.
+///
+/// Abstracting behind this trait allows unit tests to substitute a
+/// lightweight in-memory mock instead of a real SQLite database.
+#[async_trait]
+pub trait Memory: Send + Sync {
+    /// Ensure a session record exists (idempotent).
+    async fn ensure_session(
+        &self,
+        session_id: &SessionId,
+        channel_id: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// Persist a message to storage.
+    async fn save_message(&self, msg: &AgentMessage) -> Result<(), DatabaseError>;
+
+    /// Load all messages for a session, ordered by creation time.
+    async fn load_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<AgentMessage>, DatabaseError>;
+
+    /// List all session ids with their channel ids.
+    async fn list_sessions(&self) -> Result<Vec<(SessionId, String)>, DatabaseError>;
+
+    /// List sessions with preview text and last-updated timestamp.
+    async fn list_sessions_with_preview(
+        &self,
+    ) -> Result<Vec<(SessionId, String, chrono::DateTime<chrono::Utc>, String)>, DatabaseError>;
+
+    /// Update the `updated_at` timestamp of a session.
+    async fn touch_session(&self, session_id: &SessionId) -> Result<(), DatabaseError>;
+
+    /// Delete a session and all its messages.
+    async fn delete_session(&self, session_id: &SessionId) -> Result<(), DatabaseError>;
+}
 
 /// SQLite-backed conversation memory
 pub struct SqliteMemory {
@@ -12,12 +50,7 @@ impl SqliteMemory {
     /// Open (or create) the SQLite database and run migrations
     pub async fn open(db_url: &str) -> Result<Self, DatabaseError> {
         // Expand ~ in path
-        let url = if db_url.starts_with("~") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            db_url.replacen("~", &home, 1)
-        } else {
-            db_url.to_string()
-        };
+        let url = proto::path::expand_tilde(db_url);
 
         // Ensure parent directory exists
         if let Some(parent) = std::path::Path::new(&url).parent()
@@ -234,6 +267,48 @@ impl SqliteMemory {
         Ok(())
     }
 }
+
+#[async_trait]
+impl Memory for SqliteMemory {
+    async fn ensure_session(
+        &self,
+        session_id: &SessionId,
+        channel_id: &str,
+    ) -> Result<(), DatabaseError> {
+        self.ensure_session(session_id, channel_id).await
+    }
+
+    async fn save_message(&self, msg: &AgentMessage) -> Result<(), DatabaseError> {
+        self.save_message(msg).await
+    }
+
+    async fn load_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<AgentMessage>, DatabaseError> {
+        self.load_session(session_id).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<(SessionId, String)>, DatabaseError> {
+        self.list_sessions().await
+    }
+
+    async fn list_sessions_with_preview(
+        &self,
+    ) -> Result<Vec<(SessionId, String, chrono::DateTime<chrono::Utc>, String)>, DatabaseError>
+    {
+        self.list_sessions_with_preview().await
+    }
+
+    async fn touch_session(&self, session_id: &SessionId) -> Result<(), DatabaseError> {
+        self.touch_session(session_id).await
+    }
+
+    async fn delete_session(&self, session_id: &SessionId) -> Result<(), DatabaseError> {
+        self.delete_session(session_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

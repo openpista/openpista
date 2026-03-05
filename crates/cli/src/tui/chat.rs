@@ -15,7 +15,7 @@ use ratatui::{
 pub fn render(app: &mut TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    for msg in &app.messages {
+    for msg in &app.chat.messages {
         match msg {
             TuiMessage::User(text) => {
                 lines.push(Line::from(""));
@@ -99,7 +99,7 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let content_height = grid.len() as u16;
     let visible_height = area.height.saturating_sub(2);
     let max_scroll = content_height.saturating_sub(visible_height);
-    let scroll = app.history_scroll.min(max_scroll);
+    let scroll = app.chat.history_scroll.min(max_scroll);
 
     let history = Paragraph::new(Text::from(lines))
         .block(
@@ -113,12 +113,12 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(history, area);
 
     // Persist grid, area, and clamped scroll for mouse hit-testing and text extraction.
-    app.chat_text_grid = grid;
-    app.chat_area = Some(area);
-    app.chat_scroll_clamped = scroll;
+    app.chat.chat_text_grid = grid;
+    app.chat.chat_area = Some(area);
+    app.chat.chat_scroll_clamped = scroll;
 
     // ── Selection highlight overlay ──────────────────────────────────────────
-    if let Some((start, end)) = app.text_selection.ordered_range() {
+    if let Some((start, end)) = app.chat.text_selection.ordered_range() {
         let inner = Rect {
             x: area.x + 1,
             y: area.y + 1,
@@ -238,137 +238,144 @@ mod tests {
     fn render_empty_messages() {
         let mut app = test_app();
         render_chat(&mut app, 80, 24);
-        assert!(app.chat_text_grid.is_empty());
-        assert_eq!(app.chat_area, Some(Rect::new(0, 0, 80, 24)));
-        assert_eq!(app.chat_scroll_clamped, 0);
+        assert!(app.chat.chat_text_grid.is_empty());
+        assert_eq!(app.chat.chat_area, Some(Rect::new(0, 0, 80, 24)));
+        assert_eq!(app.chat.chat_scroll_clamped, 0);
     }
 
     #[test]
     fn render_user_messages() {
         let mut app = test_app();
-        app.messages
+        app.chat
+            .messages
             .push(TuiMessage::User("hello world".to_string()));
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
-        assert_eq!(app.chat_area, Some(Rect::new(0, 0, 80, 24)));
+        assert!(!app.chat.chat_text_grid.is_empty());
+        assert_eq!(app.chat.chat_area, Some(Rect::new(0, 0, 80, 24)));
         // User message produces 2 lines: blank + "You: hello world"
-        assert!(app.chat_text_grid.len() >= 2);
+        assert!(app.chat.chat_text_grid.len() >= 2);
     }
 
     #[test]
     fn render_assistant_single_line() {
         let mut app = test_app();
-        app.messages
+        app.chat
+            .messages
             .push(TuiMessage::Assistant("single line".to_string()));
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
         // blank + "Agent: single line"
-        assert!(app.chat_text_grid.len() >= 2);
+        assert!(app.chat.chat_text_grid.len() >= 2);
     }
 
     #[test]
     fn render_assistant_multi_line() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::Assistant(
+        app.chat.messages.push(TuiMessage::Assistant(
             "line one\nline two\nline three".to_string(),
         ));
         render_chat(&mut app, 80, 24);
         // blank + "Agent: line one" + "       line two" + "       line three"
-        assert!(app.chat_text_grid.len() >= 4);
+        assert!(app.chat.chat_text_grid.len() >= 4);
     }
 
     #[test]
     fn render_tool_call_done() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::ToolCall {
+        app.chat.messages.push(TuiMessage::ToolCall {
             tool_name: "system.run".to_string(),
             args_preview: "ls -la".to_string(),
             done: true,
         });
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
     fn render_tool_call_in_progress() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::ToolCall {
+        app.chat.messages.push(TuiMessage::ToolCall {
             tool_name: "bash".to_string(),
             args_preview: "echo hi".to_string(),
             done: false,
         });
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
     fn render_tool_result_success() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::ToolResult {
+        app.chat.messages.push(TuiMessage::ToolResult {
             tool_name: "system.run".to_string(),
             output_preview: "file1.txt\nfile2.txt".to_string(),
             is_error: false,
         });
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
     fn render_tool_result_error() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::ToolResult {
+        app.chat.messages.push(TuiMessage::ToolResult {
             tool_name: "system.run".to_string(),
             output_preview: "command not found".to_string(),
             is_error: true,
         });
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
     fn render_error_message() {
         let mut app = test_app();
-        app.messages
+        app.chat
+            .messages
             .push(TuiMessage::Error("something went wrong".to_string()));
         render_chat(&mut app, 80, 24);
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(!app.chat.chat_text_grid.is_empty());
         // blank + "Error: something went wrong"
-        assert!(app.chat_text_grid.len() >= 2);
+        assert!(app.chat.chat_text_grid.len() >= 2);
     }
 
     #[test]
     fn render_mixed_messages_sets_chat_area() {
         let mut app = test_app();
-        app.messages.push(TuiMessage::User("q".to_string()));
-        app.messages.push(TuiMessage::Assistant("a".to_string()));
-        app.messages.push(TuiMessage::ToolCall {
+        app.chat.messages.push(TuiMessage::User("q".to_string()));
+        app.chat
+            .messages
+            .push(TuiMessage::Assistant("a".to_string()));
+        app.chat.messages.push(TuiMessage::ToolCall {
             tool_name: "t".to_string(),
             args_preview: "x".to_string(),
             done: true,
         });
-        app.messages.push(TuiMessage::ToolResult {
+        app.chat.messages.push(TuiMessage::ToolResult {
             tool_name: "t".to_string(),
             output_preview: "ok".to_string(),
             is_error: false,
         });
-        app.messages.push(TuiMessage::Error("err".to_string()));
+        app.chat.messages.push(TuiMessage::Error("err".to_string()));
 
         render_chat(&mut app, 100, 30);
-        assert!(app.chat_area.is_some());
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(app.chat.chat_area.is_some());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
     fn render_with_text_selection_active() {
         let mut app = test_app();
-        app.messages
+        app.chat
+            .messages
             .push(TuiMessage::User("hello world".to_string()));
-        app.messages
+        app.chat
+            .messages
             .push(TuiMessage::Assistant("response text".to_string()));
 
         // Set up a selection spanning rows 0-1
-        app.text_selection.anchor = Some((0, 2));
-        app.text_selection.endpoint = Some((1, 5));
+        app.chat.text_selection.anchor = Some((0, 2));
+        app.chat.text_selection.endpoint = Some((1, 5));
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -379,8 +386,8 @@ mod tests {
             .unwrap();
 
         // Selection overlay should have been applied; verify state is persisted
-        assert!(app.chat_area.is_some());
-        assert!(!app.chat_text_grid.is_empty());
+        assert!(app.chat.chat_area.is_some());
+        assert!(!app.chat.chat_text_grid.is_empty());
     }
 
     #[test]
@@ -388,14 +395,16 @@ mod tests {
         let mut app = test_app();
         // Push enough messages to overflow a small viewport
         for i in 0..50 {
-            app.messages.push(TuiMessage::User(format!("message {i}")));
+            app.chat
+                .messages
+                .push(TuiMessage::User(format!("message {i}")));
         }
-        app.history_scroll = 9999; // Excessively high scroll
+        app.chat.history_scroll = 9999; // Excessively high scroll
         render_chat(&mut app, 60, 10);
         // Scroll should be clamped to max_scroll
-        let content_height = app.chat_text_grid.len() as u16;
+        let content_height = app.chat.chat_text_grid.len() as u16;
         let visible_height = 10u16.saturating_sub(2);
         let expected_max = content_height.saturating_sub(visible_height);
-        assert_eq!(app.chat_scroll_clamped, expected_max);
+        assert_eq!(app.chat.chat_scroll_clamped, expected_max);
     }
 }

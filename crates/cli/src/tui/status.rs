@@ -1,6 +1,6 @@
 //! Status bar widget — workspace, branch, MCP count, state indicator, and version.
 
-use super::app::{AppState, TuiApp};
+use super::app::{AppState, LoginBrowsingState, TuiApp};
 use super::theme::THEME;
 use ratatui::{
     Frame,
@@ -16,7 +16,7 @@ const SPINNER: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷
 /// Renders the status bar showing workspace, branch, MCP count, app state, and version.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let status_text = match &app.state {
-        AppState::Idle if app.sidebar_focused => Line::from(vec![
+        AppState::Idle if app.sidebar.focused => Line::from(vec![
             Span::styled(
                 format!(" {} ", app.workspace_name),
                 Style::default().fg(THEME.status_workspace),
@@ -108,7 +108,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
                 Style::default().fg(THEME.status_spinner),
             )])
         }
-        AppState::LoginBrowsing { .. } => Line::from(Span::styled(
+        AppState::LoginBrowsing(_) => Line::from(Span::styled(
             " Login browser active ",
             Style::default().fg(THEME.status_hint),
         )),
@@ -124,7 +124,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             " Confirm delete — y/Enter: delete, n/Esc: cancel ",
             Style::default().fg(THEME.error),
         )),
-        AppState::WebConfiguring { .. } => Line::from(Span::styled(
+        AppState::WebConfiguring(_) => Line::from(Span::styled(
             " Web adapter setup wizard active ",
             Style::default().fg(THEME.status_hint),
         )),
@@ -180,14 +180,14 @@ mod tests {
     fn render_idle_state() {
         let app = make_app();
         assert_eq!(app.state, AppState::Idle);
-        assert!(!app.sidebar_focused);
+        assert!(!app.sidebar.focused);
         render_status(&app);
     }
 
     #[test]
     fn render_idle_sidebar_focused() {
         let mut app = make_app();
-        app.sidebar_focused = true;
+        app.sidebar.focused = true;
         render_status(&app);
     }
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn render_login_browsing_state() {
         let mut app = make_app();
-        app.state = AppState::LoginBrowsing {
+        app.state = AppState::LoginBrowsing(LoginBrowsingState {
             query: String::new(),
             cursor: 0,
             scroll: 0,
@@ -275,7 +275,7 @@ mod tests {
             masked_buffer: String::new(),
             last_error: None,
             endpoint: None,
-        };
+        });
         render_status(&app);
     }
 
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn render_sidebar_focused_idle_shows_sidebar_hints() {
         let mut app = make_app();
-        app.sidebar_focused = true;
+        app.sidebar.focused = true;
         let backend = TestBackend::new(120, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

@@ -1,5 +1,6 @@
 //! Runtime orchestration loop for conversation, tools, and memory.
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -13,8 +14,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     approval::ToolApprovalHandler,
-    llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage},
-    memory::SqliteMemory,
+    memory::Memory,
+    provider::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage},
     tool_registry::ToolRegistry,
 };
 
@@ -29,15 +30,15 @@ const MAX_TOOL_RESULT_CHARS: usize = 16_000;
 const MAX_CONTEXT_CHARS: usize = 600_000;
 /// The main agent runtime: manages the ReAct loop
 pub struct AgentRuntime {
-    llm: std::sync::RwLock<Arc<dyn LlmProvider>>,
-    providers: std::sync::RwLock<std::collections::HashMap<String, Arc<dyn LlmProvider>>>,
-    active_provider: std::sync::RwLock<String>,
+    llm: RwLock<Arc<dyn LlmProvider>>,
+    providers: RwLock<HashMap<String, Arc<dyn LlmProvider>>>,
+    active_provider: RwLock<String>,
     tools: Arc<ToolRegistry>,
-    memory: Arc<SqliteMemory>,
-    model: std::sync::RwLock<String>,
+    memory: Arc<dyn Memory>,
+    model: RwLock<String>,
     max_tool_rounds: usize,
     /// Handler for requesting user approval before tool execution.
-    approval_handler: std::sync::RwLock<Arc<dyn ToolApprovalHandler>>,
+    approval_handler: RwLock<Arc<dyn ToolApprovalHandler>>,
     /// Tools approved per session via "Allow for session", keyed by session ID.
     session_allowed_tools: Mutex<HashMap<String, HashSet<String>>>,
 }
@@ -47,78 +48,71 @@ impl AgentRuntime {
     pub fn new(
         llm: Arc<dyn LlmProvider>,
         tools: Arc<ToolRegistry>,
-        memory: Arc<SqliteMemory>,
+        memory: Arc<dyn Memory>,
         provider_name: &str,
         model: impl Into<String>,
         max_tool_rounds: usize,
         approval_handler: Arc<dyn ToolApprovalHandler>,
     ) -> Self {
-        let mut providers = std::collections::HashMap::new();
+        let mut providers = HashMap::new();
         providers.insert(provider_name.to_string(), Arc::clone(&llm));
         Self {
-            llm: std::sync::RwLock::new(llm),
-            providers: std::sync::RwLock::new(providers),
-            active_provider: std::sync::RwLock::new(provider_name.to_string()),
+            llm: RwLock::new(llm),
+            providers: RwLock::new(providers),
+            active_provider: RwLock::new(provider_name.to_string()),
             tools,
             memory,
-            model: std::sync::RwLock::new(model.into()),
+            model: RwLock::new(model.into()),
             max_tool_rounds,
-            approval_handler: std::sync::RwLock::new(approval_handler),
+            approval_handler: RwLock::new(approval_handler),
             session_allowed_tools: Mutex::new(HashMap::new()),
         }
     }
 
     /// Replaces the approval handler at runtime (e.g. after constructing a web adapter).
     pub fn set_approval_handler(&self, handler: Arc<dyn ToolApprovalHandler>) {
-        *self
-            .approval_handler
-            .write()
-            .expect("approval_handler lock") = handler;
+        *self.approval_handler.write() = handler;
     }
 
-    pub fn memory(&self) -> &Arc<SqliteMemory> {
+    pub fn memory(&self) -> &Arc<dyn Memory> {
         &self.memory
     }
 
     pub fn set_model(&self, model: String) {
-        *self.model.write().expect("model lock") = model;
+        *self.model.write() = model;
     }
 
     /// Replaces the active LLM provider (e.g. after switching from OpenAI to Anthropic).
     pub fn set_llm(&self, llm: Arc<dyn LlmProvider>) {
-        *self.llm.write().expect("llm lock") = llm;
+        *self.llm.write() = llm;
     }
 
     /// Registers an additional LLM provider by name.
     pub fn register_provider(&self, name: &str, llm: Arc<dyn LlmProvider>) {
-        self.providers
-            .write()
-            .expect("providers lock")
-            .insert(name.to_string(), llm);
+        self.providers.write().insert(name.to_string(), llm);
     }
 
     /// Switches the active LLM provider to a previously registered one.
     pub fn switch_provider(&self, name: &str) -> Result<(), String> {
-        let providers = self.providers.read().expect("providers lock");
+        let providers = self.providers.read();
         let provider = providers
             .get(name)
             .ok_or_else(|| format!("unknown provider: {name}"))?;
-        *self.llm.write().expect("llm lock") = Arc::clone(provider);
-        *self.active_provider.write().expect("active_provider lock") = name.to_string();
+        let llm = Arc::clone(provider);
+        drop(providers);
+        *self.llm.write() = llm;
+        *self.active_provider.write() = name.to_string();
         Ok(())
     }
 
     /// Returns the name of the currently active provider.
     pub fn active_provider_name(&self) -> String {
-        self.active_provider
-            .read()
-            .expect("active_provider lock")
-            .clone()
+        self.active_provider.read().clone()
     }
 
     /// Returns the names of all registered providers.
     pub fn registered_providers(&self) -> Vec<String> {
-        let providers = self.providers.read().expect("providers lock");
+        let providers = self.providers.read();
         let mut names: Vec<String> = providers.keys().cloned().collect();
         names.sort();
         names
@@ -155,7 +149,7 @@ impl AgentRuntime {
         };
 
         // 60-second timeout — reject if no response
-        let handler = Arc::clone(&*self.approval_handler.read().expect("approval_handler lock"));
+        let handler = Arc::clone(&*self.approval_handler.read());
         let decision = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             handler.request_approval(req),
@@ -174,7 +168,7 @@ impl AgentRuntime {
         decision
     }
 
-    /// Process a user message and return the agent's final text response
+    /// Process a user message and return the agent's final text response.
     pub async fn process(
         &self,
         channel_id: &ChannelId,
@@ -182,31 +176,67 @@ impl AgentRuntime {
         user_message: &str,
         skills_context: Option<&str>,
     ) -> Result<(String, TokenUsage), proto::Error> {
+        self.process_inner(channel_id, session_id, user_message, skills_context, None)
+            .await
+    }
+
+    /// Process a user message with real-time progress events.
+    ///
+    /// Emits [`proto::ProgressEvent`]s on the provided channel so a TUI or
+    /// other consumer can display live tool-call status while the ReAct loop runs.
+    pub async fn process_with_progress(
+        &self,
+        channel_id: &ChannelId,
+        session_id: &SessionId,
+        user_message: &str,
+        skills_context: Option<&str>,
+        progress_tx: tokio::sync::mpsc::Sender<proto::ProgressEvent>,
+    ) -> Result<String, proto::Error> {
+        let (text, usage) = self
+            .process_inner(
+                channel_id,
+                session_id,
+                user_message,
+                skills_context,
+                Some(&progress_tx),
+            )
+            .await?;
+        info!(
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            "Accumulated token usage in process_with_progress"
+        );
+        Ok(text)
+    }
+
+    /// Core ReAct loop shared by [`process`](Self::process) and
+    /// [`process_with_progress`](Self::process_with_progress).
+    ///
+    /// When `progress_tx` is `Some`, progress events are emitted before each
+    /// LLM call and around each tool execution.
+    async fn process_inner(
+        &self,
+        channel_id: &ChannelId,
+        session_id: &SessionId,
+        user_message: &str,
+        skills_context: Option<&str>,
+        progress_tx: Option<&tokio::sync::mpsc::Sender<proto::ProgressEvent>>,
+    ) -> Result<(String, TokenUsage), proto::Error> {
         // Ensure session exists
         self.memory
             .ensure_session(session_id, channel_id.as_str())
-            .await
-            .map_err(proto::Error::Database)?;
+            .await?;
 
         // Save user message
         let user_msg = AgentMessage::new(session_id.clone(), Role::User, user_message);
-        self.memory
-            .save_message(&user_msg)
-            .await
-            .map_err(proto::Error::Database)?;
+        self.memory.save_message(&user_msg).await?;
 
         // Build system prompt
         let system_prompt = build_system_prompt(skills_context);
 
         // Load conversation history
-        let history = self
-            .memory
-            .load_session(session_id)
-            .await
-            .map_err(proto::Error::Database)?;
-
+        let history = self.memory.load_session(session_id).await?;
         let history = trim_session_history(history);
-
         let mut messages = history_to_chat_messages(&system_prompt, &history);
 
         // Truncate history if it exceeds the context budget.
@@ -225,13 +255,19 @@ impl AgentRuntime {
                 );
                 return Err(proto::Error::Llm(LlmError::MaxToolRoundsExceeded));
             }
+
             let req = ChatRequest {
                 messages: messages.clone(),
                 tools: tool_defs.clone(),
-                model: self.model.read().expect("model lock").clone(),
+                model: self.model.read().clone(),
             };
+
+            if let Some(tx) = progress_tx {
+                let _ = tx.try_send(proto::ProgressEvent::LlmThinking { round });
+            }
+
             debug!("LLM call (round {round}) for session {session_id}");
-            let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
+            let llm = Arc::clone(&*self.llm.read());
             let t0 = std::time::Instant::now();
             let response = llm.chat(req).await;
             debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
@@ -247,14 +283,8 @@ impl AgentRuntime {
                     info!("Auth required for session {session_id}, returning re-login hint");
                     let assistant_msg =
                         AgentMessage::new(session_id.clone(), Role::Assistant, &text);
-                    self.memory
-                        .save_message(&assistant_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
-                    self.memory
-                        .touch_session(session_id)
-                        .await
-                        .map_err(proto::Error::Database)?;
+                    self.memory.save_message(&assistant_msg).await?;
+                    self.memory.touch_session(session_id).await?;
                     return Ok((text, TokenUsage::default()));
                 }
                 other => other.map_err(proto::Error::Llm)?,
@@ -264,19 +294,10 @@ impl AgentRuntime {
                 ChatResponse::Text(text, usage) => {
                     info!("Agent final response for session {session_id}: {text:.50}...");
                     total_usage.add(&usage);
-                    // Save assistant response
                     let assistant_msg =
                         AgentMessage::new(session_id.clone(), Role::Assistant, &text);
-                    self.memory
-                        .save_message(&assistant_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
-
-                    self.memory
-                        .touch_session(session_id)
-                        .await
-                        .map_err(proto::Error::Database)?;
-
+                    self.memory.save_message(&assistant_msg).await?;
+                    self.memory.touch_session(session_id).await?;
                     return Ok((text, total_usage));
                 }
 
@@ -289,205 +310,24 @@ impl AgentRuntime {
                     // Persist assistant tool-call message so replayed history remains valid.
                     let assistant_tool_calls_msg =
                         AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
-                    self.memory
-                        .save_message(&assistant_tool_calls_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
+                    self.memory.save_message(&assistant_tool_calls_msg).await?;
                     // Add assistant message with tool calls to history
-                    let assistant_msg = ChatMessage {
+                    messages.push(ChatMessage {
                         role: Role::Assistant,
                         content: String::new(),
                         tool_call_id: None,
                         tool_name: None,
                         tool_calls: Some(tool_calls.clone()),
-                    };
-                    messages.push(assistant_msg);
+                    });
+
                     for tc in &tool_calls {
-                        let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
-
-                        // Check approval before execution
-                        let decision = self
-                            .check_tool_approval(session_id, &tc.id, &tc.name, &tool_args)
-                            .await;
-                        let result = match decision {
-                            ToolApprovalDecision::Approve
-                            | ToolApprovalDecision::AllowForSession => {
-                                self.tools.execute(&tc.id, &tc.name, tool_args).await
-                            }
-                            ToolApprovalDecision::Reject => {
-                                ToolResult::error(&tc.id, &tc.name, "Tool call rejected by user")
-                            }
-                        };
-
-                        // Save tool result message to memory
-                        let tool_msg = AgentMessage::tool_result(
-                            session_id.clone(),
-                            &tc.id,
-                            &tc.name,
-                            &result.output,
-                        );
-                        self.memory
-                            .save_message(&tool_msg)
-                            .await
-                            .map_err(proto::Error::Database)?;
-                        // Add to in-memory conversation
-                        let llm_output = sanitize_tool_output_for_llm(&result.output);
-                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &llm_output));
-                    }
-                    round += 1;
-                }
-            }
-        }
-    }
-
-    /// Process a user message with real-time progress events.
-    ///
-    /// Identical to [`process()`](Self::process) but emits [`proto::ProgressEvent`]s
-    /// on the provided channel so a TUI or other consumer can display
-    /// live tool-call status while the ReAct loop runs.
-    pub async fn process_with_progress(
-        &self,
-        channel_id: &ChannelId,
-        session_id: &SessionId,
-        user_message: &str,
-        skills_context: Option<&str>,
-        progress_tx: tokio::sync::mpsc::Sender<proto::ProgressEvent>,
-    ) -> Result<String, proto::Error> {
-        // Ensure session exists
-        self.memory
-            .ensure_session(session_id, channel_id.as_str())
-            .await
-            .map_err(proto::Error::Database)?;
-
-        // Save user message
-        let user_msg = AgentMessage::new(session_id.clone(), Role::User, user_message);
-        self.memory
-            .save_message(&user_msg)
-            .await
-            .map_err(proto::Error::Database)?;
-
-        // Build system prompt
-        let system_prompt = build_system_prompt(skills_context);
-
-        // Load conversation history
-        let history = self
-            .memory
-            .load_session(session_id)
-            .await
-            .map_err(proto::Error::Database)?;
-
-        let history = trim_session_history(history);
-
-        let mut messages = history_to_chat_messages(&system_prompt, &history);
-
-        // Truncate history if it exceeds the context budget.
-        truncate_messages_to_fit(&mut messages);
-
-        // ReAct loop with progress events
-        let tool_defs = self.tools.definitions();
-        let mut round = 0;
-        let mut total_usage = TokenUsage::default();
-
-        loop {
-            if round >= self.max_tool_rounds {
-                warn!(
-                    "Max tool rounds ({}) reached for session {session_id}",
-                    self.max_tool_rounds
-                );
-                return Err(proto::Error::Llm(LlmError::MaxToolRoundsExceeded));
-            }
-
-            let req = ChatRequest {
-                messages: messages.clone(),
-                tools: tool_defs.clone(),
-                model: self.model.read().expect("model lock").clone(),
-            };
-
-            // Progress: LLM thinking
-            let _ = progress_tx.try_send(proto::ProgressEvent::LlmThinking { round });
-
-            debug!("LLM call (round {round}) for session {session_id}");
-            let llm = Arc::clone(&*self.llm.read().expect("llm lock"));
-            let t0 = std::time::Instant::now();
-            let response = llm.chat(req).await;
-            debug!(elapsed_ms = %t0.elapsed().as_millis(), round = %round, "LLM response received");
-
-            // Surface authentication failures as a human-readable agent reply.
-            let response = match response {
-                Err(LlmError::AuthRequired(msg)) => {
-                    let text = format!(
-                        "**인증 필요**: {msg}\n\n\
-                         - **TUI**: `openpista auth login` 실행 또는 `/login` 명령 사용\n\
-                         - **웹**: 좌측 사이드바 상단의 로그인 버튼 클릭",
-                    );
-                    info!("Auth required for session {session_id}, returning re-login hint");
-                    let assistant_msg =
-                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
-                    self.memory
-                        .save_message(&assistant_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
-                    self.memory
-                        .touch_session(session_id)
-                        .await
-                        .map_err(proto::Error::Database)?;
-                    return Ok(text);
-                }
-                other => other.map_err(proto::Error::Llm)?,
-            };
-
-            match response {
-                ChatResponse::Text(text, usage) => {
-                    info!("Agent final response for session {session_id}: {text:.50}...");
-                    total_usage.add(&usage);
-                    let assistant_msg =
-                        AgentMessage::new(session_id.clone(), Role::Assistant, &text);
-                    self.memory
-                        .save_message(&assistant_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
-
-                    self.memory
-                        .touch_session(session_id)
-                        .await
-                        .map_err(proto::Error::Database)?;
-                    info!(
-                        prompt_tokens = total_usage.prompt_tokens,
-                        completion_tokens = total_usage.completion_tokens,
-                        "Accumulated token usage in process_with_progress"
-                    );
-                    return Ok(text);
-                }
-
-                ChatResponse::ToolCalls(tool_calls, usage) => {
-                    debug!(
-                        "Tool calls requested: {:?}",
-                        tool_calls.iter().map(|tc| &tc.name).collect::<Vec<_>>()
-                    );
-                    total_usage.add(&usage);
-                    // Persist assistant tool-call message
-                    let assistant_tool_calls_msg =
-                        AgentMessage::assistant_tool_calls(session_id.clone(), tool_calls.clone());
-                    self.memory
-                        .save_message(&assistant_tool_calls_msg)
-                        .await
-                        .map_err(proto::Error::Database)?;
-                    // Add assistant message with tool calls to history
-                    let assistant_msg = ChatMessage {
-                        role: Role::Assistant,
-                        content: String::new(),
-                        tool_call_id: None,
-                        tool_name: None,
-                        tool_calls: Some(tool_calls.clone()),
-                    };
-                    messages.push(assistant_msg);
-                    for tc in &tool_calls {
-                        // Progress: tool call started
-                        let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallStarted {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            args: tc.arguments.clone(),
-                        });
+                        if let Some(tx) = progress_tx {
+                            let _ = tx.try_send(proto::ProgressEvent::ToolCallStarted {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                args: tc.arguments.clone(),
+                            });
+                        }
 
                         let tool_args = prepare_tool_args(&tc.name, tc.arguments.clone());
 
@@ -505,13 +345,15 @@ impl AgentRuntime {
                             }
                         };
 
-                        // Progress: tool call finished
-                        let _ = progress_tx.try_send(proto::ProgressEvent::ToolCallFinished {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            output: result.output.clone(),
-                            is_error: result.is_error,
-                        });
+                        if let Some(tx) = progress_tx {
+                            let _ = tx.try_send(proto::ProgressEvent::ToolCallFinished {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                output: result.output.clone(),
+                                is_error: result.is_error,
+                            });
+                        }
+
                         // Save tool result message to memory
                         let tool_msg = AgentMessage::tool_result(
                             session_id.clone(),
@@ -519,10 +361,7 @@ impl AgentRuntime {
                             &tc.name,
                             &result.output,
                         );
-                        self.memory
-                            .save_message(&tool_msg)
-                            .await
-                            .map_err(proto::Error::Database)?;
+                        self.memory.save_message(&tool_msg).await?;
                         // Add to in-memory conversation
                         let llm_output = sanitize_tool_output_for_llm(&result.output);
                         messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &llm_output));
@@ -721,6 +560,7 @@ mod tests {
 
     use super::*;
     use crate::approval::AutoApproveHandler;
+    use crate::memory::SqliteMemory;
 
     struct MockLlm {
         queue: Mutex<VecDeque<ChatResponse>>,
@@ -786,7 +626,7 @@ mod tests {
         }
     }
 
-    async fn open_temp_memory() -> Arc<SqliteMemory> {
+    async fn open_temp_memory() -> Arc<dyn Memory> {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let db_path = tempdir.path().join("memory.db");
         let db_path_str = db_path.to_string_lossy().to_string();

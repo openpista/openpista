@@ -57,12 +57,12 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     } else {
         THEME.fg_muted
     };
-    let display_text = if app.input.is_empty() && app.state == AppState::Idle {
+    let display_text = if app.chat.input.is_empty() && app.state == AppState::Idle {
         " Ask anything... \"Fix broken tests\" "
     } else {
-        &app.input
+        &app.chat.input
     };
-    let input_style = if app.input.is_empty() && app.state == AppState::Idle {
+    let input_style = if app.chat.input.is_empty() && app.state == AppState::Idle {
         Style::default().fg(THEME.fg_muted)
     } else {
         Style::default()
@@ -89,7 +89,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 
     // Show cursor when idle
     if app.state == AppState::Idle {
-        let cursor_col = UnicodeWidthStr::width(&app.input[..app.cursor_pos]) as u16;
+        let cursor_col = UnicodeWidthStr::width(&app.chat.input[..app.chat.cursor_pos]) as u16;
         frame.set_cursor_position((inner_input_v[0].x + 1 + cursor_col, inner_input_v[0].y));
     }
 
@@ -100,7 +100,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
 
     let model_line = Line::from(vec![
         Span::styled(
-            format!("{} ", app.model_name),
+            format!("{} ", app.model.model_name),
             Style::default().fg(THEME.accent_bright),
         ),
         Span::styled(

@@ -42,6 +42,19 @@ impl From<&str> for SessionId {
     }
 }
 
+/// The kind of channel adapter encoded in a [`ChannelId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelKind {
+    /// Command-line / TUI adapter (`cli:*`).
+    Cli,
+    /// Telegram bot adapter (`telegram:*`).
+    Telegram,
+    /// Web HTTP adapter (`web:*`).
+    Web,
+    /// WhatsApp bridge adapter (`whatsapp:*`).
+    WhatsApp,
+}
+
 /// Unique identifier for a channel (e.g., "telegram:12345", "cli:local")
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelId(pub String);
@@ -55,6 +68,21 @@ impl ChannelId {
     /// Returns the raw channel identifier string.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Returns the [`ChannelKind`] for this identifier, if the prefix is recognised.
+    pub fn kind(&self) -> Option<ChannelKind> {
+        if self.0.starts_with("cli:") {
+            Some(ChannelKind::Cli)
+        } else if self.0.starts_with("telegram:") {
+            Some(ChannelKind::Telegram)
+        } else if self.0.starts_with("web:") {
+            Some(ChannelKind::Web)
+        } else if self.0.starts_with("whatsapp:") {
+            Some(ChannelKind::WhatsApp)
+        } else {
+            None
+        }
     }
 }
 
@@ -345,5 +373,20 @@ mod tests {
         set.insert(a.clone());
         assert!(set.contains(&b));
         assert!(!set.contains(&c));
+    }
+
+    #[test]
+    fn channel_id_kind_returns_correct_variant() {
+        assert_eq!(ChannelId::from("cli:local").kind(), Some(ChannelKind::Cli));
+        assert_eq!(
+            ChannelId::from("telegram:12345").kind(),
+            Some(ChannelKind::Telegram)
+        );
+        assert_eq!(ChannelId::from("web:0").kind(), Some(ChannelKind::Web));
+        assert_eq!(
+            ChannelId::from("whatsapp:me").kind(),
+            Some(ChannelKind::WhatsApp)
+        );
+        assert_eq!(ChannelId::from("unknown:x").kind(), None);
     }
 }

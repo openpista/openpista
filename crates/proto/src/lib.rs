@@ -7,6 +7,7 @@ pub mod approval;
 pub mod error;
 pub mod event;
 pub mod message;
+pub mod path;
 pub mod tool;
 
 /// Re-export of tool approval types.
@@ -20,7 +21,7 @@ pub use event::{
     AgentResponse, ChannelEvent, ProgressEvent, WORKER_REPORT_KIND, WorkerOutput, WorkerReport,
 };
 /// Re-export of conversation/message identity types.
-pub use message::{AgentMessage, ChannelId, Role, SessionId};
+pub use message::{AgentMessage, ChannelId, ChannelKind, Role, SessionId};
 /// Re-export of tool call definition and result types.
 pub use tool::{ToolCall, ToolDefinition, ToolResult};
 

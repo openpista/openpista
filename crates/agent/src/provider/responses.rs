@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, trace};
 
-use crate::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
+use super::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, TokenUsage};
 
 // ── Request types ──────────────────────────────────────────────────────────────
 
@@ -171,7 +171,7 @@ impl LlmProvider for ResponsesApiProvider {
         let mut tool_name_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::with_capacity(req.tools.len());
         for t in &req.tools {
-            let sanitized = sanitize_tool_name(&t.name);
+            let sanitized = super::sanitize_tool_name(&t.name);
             if let Some(existing) = tool_name_map.get(&sanitized)
                 && existing != &t.name
             {
@@ -359,7 +359,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<Value> {
                         result.push(serde_json::json!({
                             "type": "function_call",
                             "call_id": tc.id,
-                            "name": sanitize_tool_name(&tc.name),
+                            "name": super::sanitize_tool_name(&tc.name),
                             "arguments": tc.arguments.to_string()
                         }));
                     }
@@ -393,7 +393,7 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<Value> {
 fn convert_tool(t: &ToolDefinition) -> ResponsesTool {
     ResponsesTool {
         tool_type: "function",
-        name: sanitize_tool_name(&t.name),
+        name: super::sanitize_tool_name(&t.name),
         description: t.description.clone(),
         parameters: t.parameters.clone(),
     }
@@ -413,20 +413,6 @@ fn token_usage_from_response(resp: &ResponsesResponse) -> TokenUsage {
         prompt_tokens: usage.input_tokens,
         completion_tokens: usage.output_tokens,
     }
-}
-
-/// Sanitizes a tool name so it matches the OpenAI `^[a-zA-Z0-9_-]+$` pattern.
-/// Non-conforming characters (e.g. `.`) are replaced with `_`.
-fn sanitize_tool_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Parses an API error from the response body.
@@ -562,7 +548,6 @@ fn parse_sse_response(body: &str) -> Result<ResponsesResponse, LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
 
     // ── constructor tests ──────────────────────────────────────────────────────
 
@@ -982,27 +967,27 @@ mod tests {
 
     #[test]
     fn sanitize_tool_name_replaces_dots() {
-        assert_eq!(sanitize_tool_name("system.run"), "system_run");
+        assert_eq!(super::super::sanitize_tool_name("system.run"), "system_run");
     }
 
     #[test]
     fn sanitize_tool_name_preserves_valid_chars() {
-        assert_eq!(sanitize_tool_name("my-tool_v2"), "my-tool_v2");
+        assert_eq!(super::super::sanitize_tool_name("my-tool_v2"), "my-tool_v2");
     }
 
     #[test]
     fn sanitize_tool_name_replaces_special_chars() {
-        assert_eq!(sanitize_tool_name("a@b#c$d"), "a_b_c_d");
+        assert_eq!(super::super::sanitize_tool_name("a@b#c$d"), "a_b_c_d");
     }
 
     #[test]
     fn sanitize_tool_name_empty_string() {
-        assert_eq!(sanitize_tool_name(""), "");
+        assert_eq!(super::super::sanitize_tool_name(""), "");
     }
 
     #[test]
     fn sanitize_tool_name_all_special() {
-        assert_eq!(sanitize_tool_name("..."), "___");
+        assert_eq!(super::super::sanitize_tool_name("..."), "___");
     }
 
     // ── convert_messages edge cases ──────────────────────────────────────────

@@ -52,6 +52,7 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
+parking_lot = "0.12"
 
 # 채널
 teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }

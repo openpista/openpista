@@ -1,6 +1,10 @@
 //! Async event loop for the TUI — interleaves crossterm, agent progress, and timer events.
 #![allow(dead_code, unused_imports)]
 
+pub mod auth;
+pub mod helpers;
+pub mod slash;
+
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -30,402 +34,14 @@ use crate::config::{
 use crate::model_catalog;
 use tracing::{debug, info};
 
-/// Detects the local IP address by connecting a UDP socket to a public DNS server.
-fn detect_local_ip() -> String {
-    use std::net::UdpSocket;
-    UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("8.8.8.8:80")?;
-            s.local_addr()
-        })
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|_| "localhost".to_string())
-}
+// Re-import submodule items into this module's scope
+use auth::*;
+use helpers::*;
+use slash::*;
 
-/// Local port used for the OAuth redirect callback server.
-const OAUTH_CALLBACK_PORT: u16 = 9009;
-
-/// Formats model catalog entries into a human-readable text listing for chat display.
-fn format_model_list(
-    entries: &[model_catalog::ModelCatalogEntry],
-    sync_statuses: &[String],
-) -> String {
-    use model_catalog::ModelSource;
-    let recommended: Vec<_> = entries
-        .iter()
-        .filter(|e| e.recommended_for_coding && e.available)
-        .collect();
-    let other: Vec<_> = entries
-        .iter()
-        .filter(|e| !e.recommended_for_coding && e.available)
-        .collect();
-
-    let mut out = format!("Models — {} total\n", entries.len());
-    if !recommended.is_empty() {
-        out.push_str("\nRecommended:\n");
-        for e in &recommended {
-            let tag = if e.source == ModelSource::Api {
-                " (api)"
-            } else {
-                ""
-            };
-            out.push_str(&format!("  ★  {} [{}]{}\n", e.id, e.provider, tag));
-        }
-    }
-    if !other.is_empty() {
-        out.push_str("\nOther:\n");
-        for e in &other {
-            let tag = if e.source == ModelSource::Api {
-                " (api)"
-            } else {
-                ""
-            };
-            out.push_str(&format!("     {} [{}]{}\n", e.id, e.provider, tag));
-        }
-    }
-
-    if !sync_statuses.is_empty() {
-        out.push_str(&format!("\nSync: {}", sync_statuses.join("; ")));
-    }
-    out
-}
-
-/// Collects (provider_name, base_url, api_key) tuples for all authenticated providers.
-fn collect_authenticated_providers(config: &Config) -> Vec<(String, Option<String>, String)> {
-    use crate::config::ProviderPreset;
-    let mut providers = Vec::new();
-    for preset in ProviderPreset::all() {
-        let name = preset.name();
-        if let Some(cred) = config.resolve_credential_for(name) {
-            providers.push((name.to_string(), cred.base_url, cred.api_key));
-        }
-    }
-    // Ensure the currently configured provider is always included
-    let active = config.agent.provider.name().to_string();
-    if !providers.iter().any(|(n, _, _)| n == &active) {
-        let key = config.resolve_api_key();
-        if !key.is_empty() {
-            providers.push((
-                active,
-                config.agent.effective_base_url().map(String::from),
-                key,
-            ));
-        }
-    }
-    providers
-}
-/// Maximum seconds to wait for the OAuth callback before timing out.
-const OAUTH_TIMEOUT_SECS: u64 = 120;
-const MODEL_SYNC_IN_PROGRESS_MESSAGE: &str = "Model sync is already in progress. Please wait.";
-
-fn model_sync_in_progress_error() -> String {
-    MODEL_SYNC_IN_PROGRESS_MESSAGE.to_string()
-}
-
-/// Parsed sub-command for the `/model` slash command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ModelsCommand {
-    /// Open the interactive model browser.
-    Browse,
-    /// Print model list to chat.
-    List,
-    /// Unrecognised sub-command with an error message.
-    Invalid(String),
-}
-
-/// Parses a raw `/model` input into a `ModelsCommand` variant.
-fn parse_models_command(raw: &str) -> Option<ModelsCommand> {
-    let mut parts = raw.split_whitespace();
-    if parts.next()? != "/model" {
-        return None;
-    }
-
-    match parts.next() {
-        None => Some(ModelsCommand::Browse),
-        Some("list") => Some(ModelsCommand::List),
-        Some(_) => Some(ModelsCommand::Invalid(
-            "Use /model to browse or /model list to print models.".to_string(),
-        )),
-    }
-}
-
-/// Parsed sub-command for the `/session` slash command.
-#[derive(Debug, Clone, PartialEq)]
-enum SessionCommand {
-    /// `/session` or `/session list` — print all sessions to chat.
-    List,
-    /// `/session new` — create a new session.
-    New,
-    /// `/session load <id>` — load a specific session (partial ID match).
-    Load(String),
-    /// `/session delete <id>` — delete a specific session (partial ID match).
-    Delete(String),
-    /// Invalid usage with hint message.
-    Invalid(String),
-}
-
-fn parse_session_command(raw: &str) -> Option<SessionCommand> {
-    let mut parts = raw.split_whitespace();
-    if parts.next()? != "/session" {
-        return None;
-    }
-    match parts.next() {
-        None | Some("list") => Some(SessionCommand::List),
-        Some("new") => Some(SessionCommand::New),
-        Some("load") => {
-            let id = parts.collect::<Vec<_>>().join(" ");
-            if id.is_empty() {
-                Some(SessionCommand::Invalid(
-                    "Usage: /session load <id>".to_string(),
-                ))
-            } else {
-                Some(SessionCommand::Load(id))
-            }
-        }
-        Some("delete") | Some("del") => {
-            let id = parts.collect::<Vec<_>>().join(" ");
-            if id.is_empty() {
-                Some(SessionCommand::Invalid(
-                    "Usage: /session delete <id>".to_string(),
-                ))
-            } else {
-                Some(SessionCommand::Delete(id))
-            }
-        }
-        Some(_) => Some(SessionCommand::Invalid(
-            "Use /session, /session list, /session new, /session load <id>, /session delete <id>"
-                .to_string(),
-        )),
-    }
-}
-
-/// Parsed sub-command for the `/web` slash command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WebCommand {
-    /// `/web` or `/web status` — display current web config.
-    Status,
-    /// `/web setup` — launch interactive configuration wizard.
-    Setup,
-    /// Unrecognised sub-command.
-    Invalid(String),
-}
-
-fn parse_web_command(raw: &str) -> Option<WebCommand> {
-    let mut parts = raw.split_whitespace();
-    if parts.next()? != "/web" {
-        return None;
-    }
-    match parts.next() {
-        None | Some("status") => Some(WebCommand::Status),
-        Some("setup") => Some(WebCommand::Setup),
-        Some(_) => Some(WebCommand::Invalid(
-            "Use /web to show status or /web setup to configure.".to_string(),
-        )),
-    }
-}
-
-/// Parsed sub-command for the `/whatsapp` slash command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WhatsAppCommand {
-    /// `/whatsapp` — open the interactive setup wizard.
-    Setup,
-    /// `/whatsapp status` — show current WhatsApp configuration.
-    Status,
-    /// Invalid sub-command.
-    Invalid(String),
-}
-
-fn parse_whatsapp_command(raw: &str) -> Option<WhatsAppCommand> {
-    let mut parts = raw.split_whitespace();
-    if parts.next()? != "/whatsapp" {
-        return None;
-    }
-    match parts.next() {
-        None | Some("setup") => Some(WhatsAppCommand::Setup),
-        Some("status") => Some(WhatsAppCommand::Status),
-        Some(_) => Some(WhatsAppCommand::Invalid(
-            "Usage: /whatsapp [setup|status]".to_string(),
-        )),
-    }
-}
-
-/// Render a QR code as Unicode half-block text lines.
-/// Uses `▀`, `▄`, `█` and space to pack two module rows per text line.
-pub(crate) fn render_qr_text(url: &str) -> Option<String> {
-    use qrcode::QrCode;
-    let code = QrCode::new(url.as_bytes()).ok()?;
-    let modules = code.to_colors();
-    let width = code.width();
-    let height = modules.len() / width;
-
-    // Add 1-module quiet zone on each side
-    let mut lines: Vec<String> = Vec::new();
-
-    // Top quiet-zone row (all white)
-    lines.push(" ".repeat(width + 2));
-
-    // Process two rows at a time using half-block characters
-    let mut y = 0;
-    while y < height {
-        let mut row = String::new();
-        row.push(' '); // left quiet zone
-        for x in 0..width {
-            let top = modules[y * width + x];
-            let bottom = if y + 1 < height {
-                modules[(y + 1) * width + x]
-            } else {
-                qrcode::Color::Light // pad with white if odd height
-            };
-            match (top, bottom) {
-                (qrcode::Color::Dark, qrcode::Color::Dark) => row.push('\u{2588}'),
-                (qrcode::Color::Dark, qrcode::Color::Light) => row.push('\u{2580}'),
-                (qrcode::Color::Light, qrcode::Color::Dark) => row.push('\u{2584}'),
-                (qrcode::Color::Light, qrcode::Color::Light) => row.push(' '),
-            }
-        }
-        row.push(' '); // right quiet zone
-        lines.push(row);
-        y += 2;
-    }
-
-    // Bottom quiet-zone row
-    lines.push(" ".repeat(width + 2));
-
-    Some(lines.join("\n"))
-}
-fn format_whatsapp_status(config: &Config) -> String {
-    let wa = &config.channels.whatsapp;
-    let mut lines = vec!["WhatsApp Configuration Status".to_string(), "".to_string()];
-    lines.push(format!(
-        "  Enabled:         {}",
-        if wa.enabled { "Yes" } else { "No" }
-    ));
-    lines.push(format!("  Session Dir:     {}", wa.session_dir));
-    lines.push(format!(
-        "  Bridge Path:     {}",
-        wa.bridge_path.as_deref().unwrap_or("(bundled default)")
-    ));
-    lines.push("".to_string());
-    if wa.is_configured() {
-        lines.push("  Status: Ready (session directory set)".to_string());
-    } else {
-        lines.push("  Status: Incomplete \u{2014} run /whatsapp to configure".to_string());
-    }
-    lines.join("\n")
-}
-
-/// Parsed sub-command for the `/telegram` slash command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TelegramCommand {
-    /// `/telegram` or `/telegram setup` — show setup instructions.
-    Setup,
-    /// `/telegram start` — start the Telegram adapter.
-    Start,
-    /// `/telegram status` — show current Telegram configuration.
-    Status,
-    /// Invalid sub-command.
-    Invalid(String),
-}
-
-fn parse_telegram_command(raw: &str) -> Option<TelegramCommand> {
-    let mut parts = raw.split_whitespace();
-    if parts.next()? != "/telegram" {
-        return None;
-    }
-    match parts.next() {
-        None | Some("setup") => Some(TelegramCommand::Setup),
-        Some("start") => Some(TelegramCommand::Start),
-        Some("status") => Some(TelegramCommand::Status),
-        Some(_) => Some(TelegramCommand::Invalid(
-            "Usage: /telegram [setup|start|status]".to_string(),
-        )),
-    }
-}
-
-fn format_telegram_status(config: &Config) -> String {
-    let tg = &config.channels.telegram;
-    let mut lines = vec!["Telegram Configuration Status".to_string(), "".to_string()];
-    lines.push(format!(
-        "  Enabled:     {}",
-        if tg.enabled { "Yes" } else { "No" }
-    ));
-    lines.push(format!(
-        "  Token:       {}",
-        if tg.token.is_empty() {
-            "(not set)"
-        } else {
-            "(set)"
-        }
-    ));
-    lines.push("".to_string());
-    if tg.enabled && !tg.token.is_empty() {
-        lines.push("  Status: Ready".to_string());
-    } else if !tg.token.is_empty() {
-        lines.push("  Status: Token set but adapter disabled".to_string());
-        lines.push(
-            "  → Set `enabled = true` in [channels.telegram] or run `openpista start`".to_string(),
-        );
-    } else {
-        lines.push("  Status: Not configured".to_string());
-        lines.push("  → Run /telegram setup for instructions".to_string());
-    }
-    lines.join("\n")
-}
-
-fn format_telegram_setup_guide() -> String {
-    let lines = vec![
-        "Telegram Bot Setup Guide".to_string(),
-        "".to_string(),
-        "  1. Open Telegram and message @BotFather".to_string(),
-        "  2. Send /newbot and follow the prompts".to_string(),
-        "  3. Copy the bot token (e.g. 123456:ABC-DEF...)".to_string(),
-        "  4. Add to config.toml:".to_string(),
-        "".to_string(),
-        "     [channels.telegram]".to_string(),
-        "     enabled = true".to_string(),
-        "     token = \"YOUR_BOT_TOKEN\"".to_string(),
-        "".to_string(),
-        "  Or set the environment variable:".to_string(),
-        "     TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN".to_string(),
-        "".to_string(),
-        "  5. Run `openpista start` to launch the daemon with Telegram enabled".to_string(),
-    ];
-    lines.join("\n")
-}
-
-fn handle_telegram_command(app: &mut TuiApp, config: &Config, message: &str) -> bool {
-    let Some(tg_cmd) = parse_telegram_command(message) else {
-        return false;
-    };
-
-    match tg_cmd {
-        TelegramCommand::Setup => {
-            let guide = format_telegram_setup_guide();
-            app.update(super::action::Action::PushAssistantMessage(guide));
-        }
-        TelegramCommand::Start => {
-            let tg = &config.channels.telegram;
-            if tg.enabled && !tg.token.is_empty() {
-                app.update(super::action::Action::PushAssistantMessage(
-                    "Telegram adapter is configured. Run `openpista start` to launch the daemon with all enabled channels.".to_string(),
-                ));
-            } else {
-                app.update(super::action::Action::PushError(
-                    "Telegram is not configured. Run /telegram setup for instructions.".to_string(),
-                ));
-            }
-        }
-        TelegramCommand::Status => {
-            let status = format_telegram_status(config);
-            app.update(super::action::Action::PushAssistantMessage(status));
-        }
-        TelegramCommand::Invalid(msg) => {
-            app.update(super::action::Action::PushError(msg));
-        }
-    }
-    app.update(super::action::Action::ScrollToBottom);
-    true
-}
+// Explicit pub(crate) re-exports for items used outside the event module
+pub(crate) use auth::build_and_store_credential;
+pub(crate) use helpers::render_qr_text;
 
 /// How to display the model catalog once loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,294 +50,6 @@ enum ModelTaskMode {
     Browse(String),
     /// Print a text listing to chat.
     List,
-}
-
-/// Basic API key validation for interactive TUI login input.
-fn validate_api_key(api_key: String) -> Result<String, String> {
-    let key = api_key.trim().to_string();
-    if key.is_empty() {
-        return Err("API key cannot be empty".to_string());
-    }
-    if key.chars().any(char::is_whitespace) {
-        return Err("API key must not contain whitespace".to_string());
-    }
-    Ok(key)
-}
-
-/// Persists one provider credential into credentials storage.
-fn persist_credential(
-    provider: String,
-    credential: crate::auth::ProviderCredential,
-    path: std::path::PathBuf,
-) -> Result<(), String> {
-    let mut creds = load_credentials(&path);
-    creds.set(provider, credential);
-    creds.save_to(&path).map_err(|e| e.to_string())
-}
-
-/// Loads provider credentials from the given TOML file path.
-fn load_credentials(path: &std::path::Path) -> crate::auth::Credentials {
-    if !path.exists() {
-        return crate::auth::Credentials::default();
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| toml::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-/// Returns the default on-disk credentials file path.
-fn credentials_path() -> std::path::PathBuf {
-    crate::auth::Credentials::path()
-}
-
-#[cfg(not(test))]
-/// Runs browser OAuth login flow for one provider.
-async fn run_oauth_login(
-    provider: &str,
-    endpoints: &OAuthEndpoints,
-    client_id: &str,
-    port: u16,
-    timeout: u64,
-) -> anyhow::Result<crate::auth::ProviderCredential> {
-    crate::auth::login(provider, endpoints, client_id, port, timeout).await
-}
-
-#[cfg(test)]
-/// Test stub for OAuth flow; keeps tests deterministic.
-async fn run_oauth_login(
-    _provider: &str,
-    endpoints: &OAuthEndpoints,
-    client_id: &str,
-    _port: u16,
-    _timeout: u64,
-) -> anyhow::Result<crate::auth::ProviderCredential> {
-    let _ = (
-        endpoints.auth_url,
-        endpoints.token_url,
-        endpoints.scope,
-        client_id,
-    );
-    anyhow::bail!("OAuth login is not available in tests")
-}
-
-/// Applies provider-specific post-OAuth token exchange.
-///
-/// GitHub Copilot requires exchanging the GitHub OAuth token for a
-/// Copilot-specific session token.  For all other providers the credential
-/// is returned unchanged.
-async fn maybe_exchange_copilot_token(
-    provider_name: &str,
-    credential: crate::auth::ProviderCredential,
-) -> Result<crate::auth::ProviderCredential, String> {
-    if provider_name == "github-copilot" {
-        #[cfg(not(test))]
-        {
-            return crate::auth::exchange_github_copilot_token(&credential.access_token)
-                .await
-                .map_err(|e| format!("Copilot token exchange failed: {e}"));
-        }
-        #[cfg(test)]
-        {
-            Ok(credential)
-        }
-    } else {
-        Ok(credential)
-    }
-}
-
-/// Builds and persists a provider credential using the default credentials path.
-pub(crate) async fn build_and_store_credential(
-    config: &Config,
-    intent: AuthLoginIntent,
-    port: u16,
-    timeout: u64,
-) -> Result<String, String> {
-    build_and_store_credential_with_path(config, intent, port, timeout, credentials_path()).await
-}
-
-/// Builds and persists a provider credential to a specified path.
-async fn build_and_store_credential_with_path(
-    config: &Config,
-    intent: AuthLoginIntent,
-    port: u16,
-    timeout: u64,
-    cred_path: std::path::PathBuf,
-) -> Result<String, String> {
-    let provider = intent.provider.to_ascii_lowercase();
-    let entry = provider_registry_entry(&provider).ok_or_else(|| {
-        format!(
-            "Unknown provider '{provider}'. Available providers: {}",
-            crate::config::provider_registry_names()
-        )
-    })?;
-    let provider_name = entry.name.to_string();
-    let resolved_method = intent.auth_method;
-
-    let (credential, success_message) = match entry.auth_mode {
-        LoginAuthMode::OAuth => {
-            if resolved_method == AuthMethodChoice::ApiKey {
-                let raw_key = intent
-                    .api_key
-                    .ok_or_else(|| "API key input is required".to_string())?;
-                let key = validate_api_key(raw_key)?;
-                (
-                    crate::auth::ProviderCredential {
-                        access_token: key,
-                        refresh_token: None,
-                        expires_at: None,
-                        endpoint: intent.endpoint,
-                        id_token: None,
-                    },
-                    format!(
-                        "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
-                        entry.api_key_env
-                    ),
-                )
-            } else {
-                let endpoints = ProviderPreset::from_str(entry.name)
-                    .ok()
-                    .and_then(|p| p.oauth_endpoints())
-                    .or_else(|| crate::config::extension_oauth_endpoints(&provider_name))
-                    .ok_or_else(|| {
-                        format!("Provider '{provider_name}' does not support OAuth login")
-                    })?;
-
-                let client_id = endpoints
-                    .effective_client_id(&config.agent.oauth_client_id)
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        "No OAuth client ID configured. Set openpista_OAUTH_CLIENT_ID environment variable or add oauth_client_id to [agent] in config.toml.".to_string()
-                    })?;
-
-                let oauth_credential = if endpoints.default_callback_port.is_none()
-                    && !endpoints.redirect_path.is_empty()
-                {
-                    let pending = crate::auth::start_code_display_flow(
-                        &provider_name,
-                        &endpoints,
-                        &client_id,
-                    );
-                    let code = if let Some(c) = intent.api_key.as_deref().filter(|s| !s.is_empty())
-                    {
-                        c.to_string()
-                    } else {
-                        crate::auth::read_code_from_stdin()
-                            .await
-                            .map_err(|e| e.to_string())?
-                    };
-                    crate::auth::complete_code_display_flow(&pending, &code)
-                        .await
-                        .map_err(|e| e.to_string())?
-                } else {
-                    let effective_port = endpoints.default_callback_port.unwrap_or(port);
-                    run_oauth_login(
-                        &provider_name,
-                        &endpoints,
-                        &client_id,
-                        effective_port,
-                        timeout,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?
-                };
-
-                let credential =
-                    maybe_exchange_copilot_token(&provider_name, oauth_credential).await?;
-
-                (
-                    credential,
-                    format!(
-                        "Authenticated as '{provider_name}'. Token stored in {}",
-                        cred_path.display()
-                    ),
-                )
-            }
-        }
-        LoginAuthMode::ApiKey => {
-            let raw_key = intent
-                .api_key
-                .ok_or_else(|| "API key input is required".to_string())?;
-            let key = validate_api_key(raw_key)?;
-            (
-                crate::auth::ProviderCredential {
-                    access_token: key,
-                    refresh_token: None,
-                    expires_at: None,
-                    endpoint: intent.endpoint,
-                    id_token: None,
-                },
-                format!(
-                    "Saved API key for '{provider_name}'. It will be used on the next launch (equivalent to setting {}).",
-                    entry.api_key_env
-                ),
-            )
-        }
-        LoginAuthMode::EndpointAndKey => {
-            let raw_key = intent
-                .api_key
-                .ok_or_else(|| "API key input is required".to_string())?;
-            let key = validate_api_key(raw_key)?;
-            let endpoint = intent
-                .endpoint
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "Endpoint is required for this provider".to_string())?;
-
-            (
-                crate::auth::ProviderCredential {
-                    access_token: key,
-                    refresh_token: None,
-                    expires_at: None,
-                    endpoint: Some(endpoint.clone()),
-                    id_token: None,
-                },
-                format!(
-                    "Saved endpoint+key for '{provider_name}'. Endpoint stored as {}.",
-                    entry.endpoint_env.unwrap_or("PROVIDER_ENDPOINT")
-                ),
-            )
-        }
-        LoginAuthMode::None => {
-            return Err(format!(
-                "Provider '{provider_name}' does not require authentication"
-            ));
-        }
-    };
-
-    tokio::task::spawn_blocking(move || persist_credential(provider_name, credential, cred_path))
-        .await
-        .map_err(|e| format!("Auth task join failed: {e}"))??;
-    if entry.supports_runtime {
-        Ok(success_message)
-    } else {
-        Ok(format!(
-            "{} Credential stored; runtime execution not yet wired.",
-            success_message
-        ))
-    }
-}
-
-/// Persists authentication data for OAuth/API-key login paths.
-async fn persist_auth(
-    config: Config,
-    intent: AuthLoginIntent,
-    port: u16,
-    timeout: u64,
-) -> Result<String, String> {
-    build_and_store_credential(&config, intent, port, timeout).await
-}
-
-/// Test helper that delegates to `build_and_store_credential_with_path`.
-#[cfg(test)]
-async fn persist_auth_with_path(
-    config: Config,
-    intent: AuthLoginIntent,
-    port: u16,
-    timeout: u64,
-    cred_path: std::path::PathBuf,
-) -> Result<String, String> {
-    build_and_store_credential_with_path(&config, intent, port, timeout, cred_path).await
 }
 
 /// RAII guard that restores the terminal on drop (even on panic).
@@ -767,7 +95,7 @@ pub async fn run_tui(
     {
         let memory = runtime.memory().clone();
         if let Ok(sessions) = memory.list_sessions_with_preview().await {
-            app.session_list = sessions
+            app.session.session_list = sessions
                 .into_iter()
                 .map(
                     |(id, channel_id, updated_at, preview)| super::app::SessionEntry {
@@ -863,22 +191,22 @@ pub async fn run_tui(
                         let mut pending_async_cmd = Command::None;
 
                         // Handle tool approval prompt keys first
-                        if app.pending_approval.is_some() {
+                        if app.chat.pending_approval.is_some() {
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                    if let Some(pending) = app.pending_approval.take() {
+                                    if let Some(pending) = app.chat.pending_approval.take() {
                                         let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Approve);
                                     }
                                     continue;
                                 }
                                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                                    if let Some(pending) = app.pending_approval.take() {
+                                    if let Some(pending) = app.chat.pending_approval.take() {
                                         let _ = pending.reply_tx.send(proto::ToolApprovalDecision::Reject);
                                     }
                                     continue;
                                 }
                                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                                    if let Some(pending) = app.pending_approval.take() {
+                                    if let Some(pending) = app.chat.pending_approval.take() {
                                         let _ = pending.reply_tx.send(proto::ToolApprovalDecision::AllowForSession);
                                     }
                                     continue;
@@ -897,7 +225,7 @@ pub async fn run_tui(
                             }
 
                             // Step 2: process Enter in idle state with input
-                            if app.state == AppState::Idle && !app.input.is_empty() {
+                            if app.state == AppState::Idle && !app.chat.input.is_empty() {
                                 let message = app.take_input();
                                 if let Some(models_cmd) = parse_models_command(&message) {
                                     if model_task.is_some() {
@@ -951,7 +279,7 @@ pub async fn run_tui(
                                             session_id = new_sid;
                                         }
                                         SessionCommand::Load(partial_id) => {
-                                            let matched: Vec<_> = app.session_list.iter()
+                                            let matched: Vec<_> = app.session.session_list.iter()
                                                 .filter(|e| e.id.as_str().contains(&partial_id))
                                                 .collect();
                                             match matched.len() {
@@ -967,13 +295,13 @@ pub async fn run_tui(
                                             }
                                         }
                                         SessionCommand::Delete(partial_id) => {
-                                            let matched: Vec<_> = app.session_list.iter()
+                                            let matched: Vec<_> = app.session.session_list.iter()
                                                 .filter(|e| e.id.as_str().contains(&partial_id))
                                                 .collect();
                                             match matched.len() {
                                                 0 => { app.update(Action::PushError(format!("No session matching '{partial_id}'"))); }
                                                 1 => {
-                                                    let idx = app.session_list.iter().position(|e| e.id.as_str() == matched[0].id.as_str());
+                                                    let idx = app.session.session_list.iter().position(|e| e.id.as_str() == matched[0].id.as_str());
                                                     if let Some(i) = idx {
                                                         app.update(Action::SidebarHover(Some(i)));
                                                         app.update(Action::RequestDeleteSession);
@@ -1083,7 +411,7 @@ pub async fn run_tui(
                                 let rt = Arc::clone(&runtime);
                                 let sl = Arc::clone(&skill_loader);
                                 let ch = channel_id.clone();
-                                let sess = app.session_id.clone();
+                                let sess = app.session.session_id.clone();
 
                                 let handle = tokio::spawn(async move {
                                     let skills_ctx = sl.load_context().await;
@@ -1253,9 +581,9 @@ pub async fn run_tui(
                                     provider_name.clone(),
                                 ));
                                 if let Ok(preset) = provider_name.parse::<ProviderPreset>() {
-                                    prev_provider = Some((config.agent.provider, app.provider_name.clone()));
+                                    prev_provider = Some((config.agent.provider, app.model.provider_name.clone()));
                                     config.agent.provider = preset;
-                                    app.provider_name = preset.name().to_string();
+                                    app.model.provider_name = preset.name().to_string();
                                 }
                                 auth_task = Some(tokio::spawn(async move {
                                     let oauth_cred =
@@ -1279,9 +607,9 @@ pub async fn run_tui(
 
                             auth_provider_name = Some(intent.provider.clone());
                             if let Ok(preset) = intent.provider.parse::<ProviderPreset>() {
-                                prev_provider = Some((config.agent.provider, app.provider_name.clone()));
+                                prev_provider = Some((config.agent.provider, app.model.provider_name.clone()));
                                 config.agent.provider = preset;
-                                app.provider_name = preset.name().to_string();
+                                app.model.provider_name = preset.name().to_string();
                             }
                             let config_for_task = config.clone();
                             auth_task = Some(tokio::spawn(async move {
@@ -1308,7 +636,7 @@ pub async fn run_tui(
                                     let rt = Arc::clone(&runtime);
                                     let sl = Arc::clone(&skill_loader);
                                     let ch = channel_id.clone();
-                                    let sess = app.session_id.clone();
+                                    let sess = app.session.session_id.clone();
                                     let handle = tokio::spawn(async move {
                                         let skills_ctx = sl.load_context().await;
                                         rt.process_with_progress(&ch, &sess, &msg, Some(&skills_ctx), prog_tx).await
@@ -1589,7 +917,7 @@ pub async fn run_tui(
                         debug!(provider = ?auth_provider_name, error = %err, "Auth task failed");
                         if let Some((old_preset, old_name)) = prev_provider.take() {
                             config.agent.provider = old_preset;
-                            app.provider_name = old_name;
+                            app.model.provider_name = old_name;
                         }
                         auth_provider_name = None;
                         app.update(super::action::Action::PushError(format!("Authentication failed: {err}")));
@@ -1598,7 +926,7 @@ pub async fn run_tui(
                         debug!(provider = ?auth_provider_name, error = %join_err, "Auth task panicked");
                         if let Some((old_preset, old_name)) = prev_provider.take() {
                             config.agent.provider = old_preset;
-                            app.provider_name = old_name;
+                            app.model.provider_name = old_name;
                         }
                         auth_provider_name = None;
                         app.update(super::action::Action::PushError(format!("Auth task failed: {join_err}")));
@@ -1654,7 +982,7 @@ pub async fn run_tui(
 
             // ── Branch: tool approval request ─────────────────────────
             Some(pending) = approval_rx.recv() => {
-                app.pending_approval = Some(pending);
+                app.chat.pending_approval = Some(pending);
             }
 
             // ── Branch 6: spinner tick ─────────────────────────────────
@@ -1716,8 +1044,8 @@ pub async fn run_tui(
         }
 
         // ── Post-select: session browser new request ──────────────
-        if app.session_browser_new_requested {
-            app.session_browser_new_requested = false;
+        if app.session.session_browser_new_requested {
+            app.session.session_browser_new_requested = false;
             let new_sid = proto::SessionId::new();
             app.update(super::action::Action::NewSession(new_sid.clone()));
             session_id = new_sid;
@@ -2238,7 +1566,7 @@ mod tests {
         let config = Config::default();
         let handled = handle_telegram_command(&mut app, &config, "/model");
         assert!(!handled);
-        assert!(app.messages.is_empty());
+        assert!(app.chat.messages.is_empty());
     }
 
     #[test]
@@ -2247,9 +1575,9 @@ mod tests {
         let config = Config::default();
         let handled = handle_telegram_command(&mut app, &config, "/telegram setup");
         assert!(handled);
-        assert_eq!(app.history_scroll, u16::MAX);
+        assert_eq!(app.chat.history_scroll, u16::MAX);
         assert!(matches!(
-            app.messages.last(),
+            app.chat.messages.last(),
             Some(TuiMessage::Assistant(text)) if text.contains("Telegram Bot Setup Guide")
         ));
     }
@@ -2261,7 +1589,7 @@ mod tests {
         let handled = handle_telegram_command(&mut app, &config, "/telegram start");
         assert!(handled);
         assert!(matches!(
-            app.messages.last(),
+            app.chat.messages.last(),
             Some(TuiMessage::Error(text)) if text.contains("not configured")
         ));
 
@@ -2272,7 +1600,7 @@ mod tests {
         let handled = handle_telegram_command(&mut app, &configured, "/telegram start");
         assert!(handled);
         assert!(matches!(
-            app.messages.last(),
+            app.chat.messages.last(),
             Some(TuiMessage::Assistant(text)) if text.contains("openpista start")
         ));
     }
@@ -2284,7 +1612,7 @@ mod tests {
         let handled = handle_telegram_command(&mut app, &config, "/telegram status");
         assert!(handled);
         assert!(matches!(
-            app.messages.last(),
+            app.chat.messages.last(),
             Some(TuiMessage::Assistant(text)) if text.contains("Telegram Configuration Status")
         ));
 
@@ -2292,7 +1620,7 @@ mod tests {
         let handled = handle_telegram_command(&mut app, &config, "/telegram nope");
         assert!(handled);
         assert!(matches!(
-            app.messages.last(),
+            app.chat.messages.last(),
             Some(TuiMessage::Error(text)) if text.contains("Usage: /telegram")
         ));
     }

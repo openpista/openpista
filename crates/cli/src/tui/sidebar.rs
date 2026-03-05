@@ -20,7 +20,7 @@ pub fn sidebar_width() -> u16 {
 
 /// Renders the session sidebar with active/hover highlighting and relative timestamps.
 pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
-    let focus_hint = if app.sidebar_focused {
+    let focus_hint = if app.sidebar.focused {
         Span::styled(" ◉", Style::default().fg(THEME.sidebar_active_indicator))
     } else {
         Span::styled(" [Tab]", Style::default().fg(THEME.fg_muted))
@@ -33,13 +33,13 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("({})", app.session_list.len()),
+            format!("({})", app.session.session_list.len()),
             Style::default().fg(THEME.fg_muted),
         ),
         focus_hint,
     ]);
 
-    let border_style = if app.sidebar_focused {
+    let border_style = if app.sidebar.focused {
         Style::default().fg(THEME.sidebar_active_indicator)
     } else {
         Style::default().fg(THEME.sidebar_border)
@@ -52,7 +52,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.session_list.is_empty() {
+    if app.session.session_list.is_empty() {
         let empty_msg = Paragraph::new(Line::from(Span::styled(
             " No sessions yet",
             Style::default().fg(THEME.fg_muted),
@@ -64,16 +64,16 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let max_name_width = inner.width.saturating_sub(2) as usize;
 
-    for (idx, entry) in app.session_list.iter().enumerate() {
-        let is_active = entry.id.as_str() == app.session_id.as_str();
-        let is_hovered = Some(idx) == app.sidebar_hover;
+    for (idx, entry) in app.session.session_list.iter().enumerate() {
+        let is_active = entry.id.as_str() == app.session.session_id.as_str();
+        let is_hovered = Some(idx) == app.sidebar.hover;
 
         let indicator = if is_active {
             Span::styled("▌", Style::default().fg(THEME.sidebar_active_indicator))
         } else if is_hovered {
             Span::styled(
                 "▌",
-                Style::default().fg(if app.sidebar_focused {
+                Style::default().fg(if app.sidebar.focused {
                     THEME.sidebar_active_indicator
                 } else {
                     THEME.sidebar_hover
@@ -108,7 +108,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
             Span::styled(time_str, time_style),
         ]));
 
-        if idx < app.session_list.len() - 1 {
+        if idx < app.session.session_list.len() - 1 {
             lines.push(Line::from(Span::styled(
                 "─".repeat(max_name_width),
                 Style::default().fg(THEME.sidebar_divider),
@@ -119,7 +119,7 @@ pub fn render(app: &TuiApp, frame: &mut Frame<'_>, area: Rect) {
     let content_height = lines.len() as u16;
     let visible_height = inner.height;
     let max_scroll = content_height.saturating_sub(visible_height);
-    let scroll = app.sidebar_scroll.min(max_scroll);
+    let scroll = app.sidebar.scroll.min(max_scroll);
 
     let list = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -235,7 +235,7 @@ mod tests {
             "openai",
         );
         app.screen = Screen::Chat;
-        app.sidebar_visible = true;
+        app.sidebar.visible = true;
         app
     }
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn render_sidebar_with_sessions() {
         let mut app = make_sidebar_app();
-        app.session_list = vec![
+        app.session.session_list = vec![
             make_test_session("s1", "first session"),
             make_test_session("s2", "second session"),
             make_test_session("s3", "third session"),
@@ -280,8 +280,8 @@ mod tests {
     #[test]
     fn render_sidebar_with_active_session() {
         let mut app = make_sidebar_app();
-        let sid = app.session_id.clone();
-        app.session_list = vec![
+        let sid = app.session.session_id.clone();
+        app.session.session_list = vec![
             make_test_session(sid.as_str(), "active session"),
             make_test_session("other", "other session"),
         ];
@@ -297,11 +297,11 @@ mod tests {
     #[test]
     fn render_sidebar_with_hover() {
         let mut app = make_sidebar_app();
-        app.session_list = vec![
+        app.session.session_list = vec![
             make_test_session("s1", "first"),
             make_test_session("s2", "second"),
         ];
-        app.sidebar_hover = Some(1);
+        app.sidebar.hover = Some(1);
         let backend = TestBackend::new(30, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -314,12 +314,12 @@ mod tests {
     #[test]
     fn render_sidebar_focused() {
         let mut app = make_sidebar_app();
-        app.sidebar_focused = true;
-        app.session_list = vec![
+        app.sidebar.focused = true;
+        app.session.session_list = vec![
             make_test_session("s1", "first"),
             make_test_session("s2", "second"),
         ];
-        app.sidebar_hover = Some(0);
+        app.sidebar.hover = Some(0);
         let backend = TestBackend::new(30, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -332,12 +332,12 @@ mod tests {
     #[test]
     fn render_sidebar_focused_with_hover() {
         let mut app = make_sidebar_app();
-        app.sidebar_focused = true;
-        app.session_list = vec![
+        app.sidebar.focused = true;
+        app.session.session_list = vec![
             make_test_session("s1", "first"),
             make_test_session("s2", "second"),
         ];
-        app.sidebar_hover = Some(1);
+        app.sidebar.hover = Some(1);
         let backend = TestBackend::new(30, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -351,10 +351,11 @@ mod tests {
     fn render_sidebar_with_scroll() {
         let mut app = make_sidebar_app();
         for i in 0..20 {
-            app.session_list
+            app.session
+                .session_list
                 .push(make_test_session(&format!("s{i}"), &format!("session {i}")));
         }
-        app.sidebar_scroll = 5;
+        app.sidebar.scroll = 5;
         let backend = TestBackend::new(30, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

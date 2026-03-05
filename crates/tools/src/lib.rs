@@ -7,6 +7,7 @@ pub mod bash;
 pub mod browser;
 pub mod container;
 pub mod screen;
+pub mod util;
 mod wasm_runtime;
 
 pub use bash::BashTool;

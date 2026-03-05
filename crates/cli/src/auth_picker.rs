@@ -23,9 +23,10 @@ impl AuthMethodChoice {
 }
 
 /// Steps in the interactive login browser wizard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LoginBrowseStep {
     /// Provider selection list.
+    #[default]
     SelectProvider,
     /// Auth method selection (OAuth vs API key).
     SelectMethod,

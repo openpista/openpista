@@ -1,29 +1,15 @@
 //! Container execution tool powered by Docker Engine API.
 
+pub mod docker;
+pub mod lifecycle;
+pub mod skill;
+
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose};
 use bollard::Docker;
-use bollard::body_full;
-use bollard::container::LogOutput;
-use bollard::models::{ContainerCreateBody, HostConfig};
-use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, StartContainerOptions, UploadToContainerOptionsBuilder,
-    WaitContainerOptions,
-};
-use futures_util::TryStreamExt;
 use proto::ToolResult;
-use rand::RngCore;
 use serde::Deserialize;
-use skills::{SkillExecutionMode, SkillLoader};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::process::Command;
-use tokio::time::timeout;
-use tracing::warn;
 
 use crate::Tool;
 use crate::wasm_runtime::{WasmRunRequest, run_wasm_skill};
@@ -244,7 +230,7 @@ impl Tool for ContainerTool {
             }
         };
 
-        let runtime_mode = match resolve_runtime_mode(&parsed).await {
+        let runtime_mode = match skill::resolve_runtime_mode(&parsed).await {
             Ok(mode) => mode,
             Err(e) => return ToolResult::error(call_id, self.name(), e),
         };
@@ -319,7 +305,7 @@ impl Tool for ContainerTool {
 
         let docker_result = Docker::connect_with_local_defaults()
             .map_err(|e| format!("Failed to connect to Docker daemon: {e}"));
-        let execution_result = run_with_docker_or_subprocess(
+        let execution_result = lifecycle::run_with_docker_or_subprocess(
             call_id,
             &parsed,
             timeout_duration,
@@ -339,73 +325,6 @@ impl Tool for ContainerTool {
     }
 }
 
-/// Determine whether the provided container arguments should run as a Docker container or as a WASM skill.
-///
-/// If `skill_name` is not provided or is empty, this returns `RuntimeMode::Docker`.
-/// When `skill_name` is present, `workspace_dir` must also be provided; the function loads the skill's metadata
-/// from the workspace and returns `RuntimeMode::Wasm` when the skill's execution mode is WASM, otherwise
-/// it returns `RuntimeMode::Docker`.
-///
-/// # Errors
-///
-/// Returns `Err` if `skill_name` is present but `workspace_dir` is missing or empty, or if the skill metadata
-/// (SKILL.md) cannot be found for the given `skill_name`.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use crate::ContainerArgs;
-/// # use crate::RuntimeMode;
-/// # tokio_test::block_on(async {
-/// let args = ContainerArgs {
-///     skill_name: None,
-///     workspace_dir: None,
-///     image: None,
-///     command: None,
-///     skill_image: None,
-///     skill_args: None,
-///     timeout_secs: None,
-///     working_dir: None,
-///     env: None,
-///     allow_network: None,
-///     workspace_dir: None,
-///     memory_mb: None,
-///     cpu_millis: None,
-///     pull: None,
-///     inject_task_token: None,
-///     token_ttl_secs: None,
-///     token_env_name: None,
-///     allow_subprocess_fallback: None,
-/// };
-///
-/// let mode = crate::resolve_runtime_mode(&args).await.unwrap();
-/// assert_eq!(mode, RuntimeMode::Docker);
-/// # });
-/// ```
-async fn resolve_runtime_mode(args: &ContainerArgs) -> Result<RuntimeMode, String> {
-    let Some(skill_name) = args.skill_name.as_deref().and_then(non_empty) else {
-        return Ok(RuntimeMode::Docker);
-    };
-
-    let workspace = args
-        .workspace_dir
-        .as_deref()
-        .and_then(non_empty)
-        .ok_or_else(|| "workspace_dir is required when skill_name is provided".to_string())?;
-
-    let loader = SkillLoader::new(workspace);
-    let metadata = loader
-        .load_skill_metadata(skill_name)
-        .await
-        .ok_or_else(|| format!("SKILL.md not found for skill '{skill_name}'"))?;
-
-    if metadata.mode == SkillExecutionMode::Wasm {
-        Ok(RuntimeMode::Wasm)
-    } else {
-        Ok(RuntimeMode::Docker)
-    }
-}
-
 /// Trim whitespace and yield the input slice when it contains non-empty content.
 ///
 /// # Examples
@@ -421,501 +340,6 @@ fn non_empty(value: &str) -> Option<&str> {
         None
     } else {
         Some(trimmed)
-    }
-}
-
-/// Creates and runs a Docker container from the resolved image and returns its captured output and exit code.
-///
-/// The function resolves the image from `args.image` or `args.skill_image`, validates the command,
-/// optionally pulls the image if `args.pull` is true, and starts a container configured with the
-/// resource limits and mounts derived from `args`. If `credential` is provided it is injected into
-/// the container at the configured secure mount path. The container is removed/cleaned up after
-/// execution completes (or on error).
-///
-/// # Returns
-///
-/// `Ok(ContainerExecution)` containing `stdout`, `stderr`, and `exit_code` on success; `Err(String)` with
-/// a human-readable error message on failure.
-///
-/// # Examples
-///
-/// ```ignore
-/// # tokio_test::block_on(async {
-/// use bollard::Docker;
-/// // Construct a Docker client (adjust connection as appropriate for the environment).
-/// let docker = Docker::connect_with_socket_defaults().unwrap();
-///
-/// let args = crate::ContainerArgs {
-///     image: Some("alpine:latest".into()),
-///     command: Some("echo hello".into()),
-///     ..Default::default()
-/// };
-///
-/// // Run the container and inspect the captured output.
-/// let result = crate::run_container(&docker, "example-container", &args, None).await;
-/// let exec = result.expect("container run failed");
-/// assert!(exec.stdout.contains("hello"));
-/// # });
-/// ```
-async fn run_container(
-    docker: &Docker,
-    container_name: &str,
-    args: &ContainerArgs,
-    credential: Option<&TaskCredential>,
-) -> Result<ContainerExecution, String> {
-    let image = args
-        .image
-        .as_deref()
-        .and_then(non_empty)
-        .or_else(|| args.skill_image.as_deref().and_then(non_empty))
-        .ok_or_else(|| "image or skill_image must not be empty".to_string())?;
-
-    let command = args
-        .command
-        .as_deref()
-        .and_then(non_empty)
-        .ok_or_else(|| "command must not be empty".to_string())?;
-
-    if args.pull.unwrap_or(false) {
-        docker
-            .create_image(
-                Some(
-                    CreateImageOptionsBuilder::default()
-                        .from_image(image)
-                        .build(),
-                ),
-                None,
-                None,
-            )
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| format!("Failed to pull image '{image}': {e}"))?;
-    }
-
-    let mut binds = Vec::new();
-    if let Some(workspace_dir) = args.workspace_dir.as_deref() {
-        let workspace_dir = workspace_dir.trim();
-        if !workspace_dir.is_empty() {
-            binds.push(format!("{workspace_dir}:/workspace:ro"));
-        }
-    }
-
-    let mut tmpfs = HashMap::new();
-    tmpfs.insert("/tmp".to_string(), "rw,nosuid,nodev,size=64m".to_string());
-    if credential.is_some() {
-        tmpfs.insert(
-            TOKEN_MOUNT_DIR.to_string(),
-            "rw,nosuid,nodev,noexec,size=1m".to_string(),
-        );
-    }
-
-    let host_config = HostConfig {
-        auto_remove: Some(false),
-        network_mode: if args.allow_network.unwrap_or(false) {
-            None
-        } else {
-            Some("none".to_string())
-        },
-        readonly_rootfs: Some(true),
-        privileged: Some(false),
-        cap_drop: Some(vec!["ALL".to_string()]),
-        security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-        memory: Some(args.memory_mb.unwrap_or(DEFAULT_MEMORY_MB).max(64) * 1024 * 1024),
-        nano_cpus: Some(args.cpu_millis.unwrap_or(DEFAULT_CPU_MILLIS).max(100) * 1_000_000),
-        pids_limit: Some(256),
-        binds: if binds.is_empty() { None } else { Some(binds) },
-        tmpfs: Some(tmpfs),
-        ..Default::default()
-    };
-
-    let config = ContainerCreateBody {
-        image: Some(image.to_string()),
-        cmd: Some(vec![
-            "sh".to_string(),
-            "-lc".to_string(),
-            build_shell_command(command, credential),
-        ]),
-        env: args.env.clone(),
-        working_dir: args.working_dir.clone(),
-        host_config: Some(host_config),
-        attach_stdout: Some(true),
-        attach_stderr: Some(true),
-        tty: Some(false),
-        ..Default::default()
-    };
-
-    let create_result = docker
-        .create_container(
-            Some(
-                CreateContainerOptionsBuilder::default()
-                    .name(container_name)
-                    .build(),
-            ),
-            config,
-        )
-        .await
-        .map_err(|e| format!("Failed to create container: {e}"));
-
-    if let Err(e) = create_result {
-        let _ = cleanup_container(docker, container_name).await;
-        return Err(e);
-    }
-
-    if let Some(credential) = credential
-        && let Err(e) = upload_task_credential(docker, container_name, credential).await
-    {
-        let _ = cleanup_container(docker, container_name).await;
-        return Err(e);
-    }
-
-    let run_result = async {
-        docker
-            .start_container(container_name, None::<StartContainerOptions>)
-            .await
-            .map_err(|e| format!("Failed to start container: {e}"))?;
-
-        let waits = docker
-            .wait_container(container_name, None::<WaitContainerOptions>)
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| format!("Failed while waiting container: {e}"))?;
-
-        let exit_code = waits.last().map(|w| w.status_code).unwrap_or(-1);
-
-        let logs = docker
-            .logs(
-                container_name,
-                Some(
-                    LogsOptionsBuilder::default()
-                        .follow(false)
-                        .stdout(true)
-                        .stderr(true)
-                        .tail("all")
-                        .build(),
-                ),
-            )
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| format!("Failed to read container logs: {e}"))?;
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        for log in logs {
-            match log {
-                LogOutput::StdOut { message }
-                | LogOutput::Console { message }
-                | LogOutput::StdIn { message } => {
-                    stdout.push_str(&String::from_utf8_lossy(&message))
-                }
-                LogOutput::StdErr { message } => {
-                    stderr.push_str(&String::from_utf8_lossy(&message))
-                }
-            }
-        }
-
-        Ok(ContainerExecution {
-            stdout,
-            stderr,
-            exit_code,
-        })
-    }
-    .await;
-
-    let _ = cleanup_container(docker, container_name).await;
-    run_result
-}
-
-/// Execute the requested workload using the Docker daemon when available; if Docker is unavailable and
-/// `args.allow_subprocess_fallback` is true, fall back to running the command as a local subprocess.
-///
-/// This function:
-/// - Requires a resolved image when using Docker and returns an error if none is provided.
-/// - May mint a per-task credential (when requested) and uploads it into the container; the credential is
-///   always cleaned up after the run attempt.
-/// - Applies `timeout_duration` to the container execution; on timeout it attempts to clean up the created
-///   container and returns a timeout error.
-/// - When Docker is unavailable and fallback is allowed, runs the command via the local shell with the same
-///   timeout semantics.
-///
-/// # Parameters
-///
-/// - `call_id`: identifier used for container naming and logging.
-/// - `args`: container run arguments and runtime options.
-/// - `timeout_duration`: maximum allowed duration for the workload execution.
-/// - `container_name`: sanitized container name to use when creating the container.
-/// - `docker_result`: the result of attempting to connect to Docker; `Ok` branch runs in Docker, `Err` branch
-///   triggers optional subprocess fallback.
-///
-/// # Returns
-///
-/// `ContainerExecution` on success; an error `String` describing why execution failed otherwise.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use std::time::Duration;
-/// # async fn example() -> Result<(), String> {
-/// let call_id = "call-123";
-/// let args = /* construct ContainerArgs with desired fields */ todo!();
-/// let timeout = Duration::from_secs(30);
-/// let container_name = "call-123-container";
-/// let docker_conn: Result<_, String> = Err("docker connect failed".to_string());
-///
-/// let result = run_with_docker_or_subprocess(call_id, &args, timeout, container_name, docker_conn).await;
-/// match result {
-///     Ok(exec) => println!("exit={} stdout={}", exec.exit_code, exec.stdout),
-///     Err(e) => eprintln!("execution failed: {}", e),
-/// }
-/// # Ok(())
-/// # }
-/// ```
-async fn run_with_docker_or_subprocess(
-    call_id: &str,
-    args: &ContainerArgs,
-    timeout_duration: Duration,
-    container_name: &str,
-    docker_result: Result<Docker, String>,
-) -> Result<ContainerExecution, String> {
-    match docker_result {
-        Ok(docker) => {
-            if resolve_image(args).is_none() {
-                return Err("image must not be empty".to_string());
-            }
-
-            let mut credential = maybe_mint_task_credential(args)?;
-            let run = timeout(
-                timeout_duration,
-                run_container(&docker, container_name, args, credential.as_ref()),
-            )
-            .await;
-
-            cleanup_task_credential(&mut credential);
-
-            match run {
-                Ok(Ok(execution)) => Ok(execution),
-                Ok(Err(e)) => Err(e),
-                Err(_) => {
-                    let _ = cleanup_container(&docker, container_name).await;
-                    Err(format!(
-                        "Command timed out after {}s",
-                        timeout_duration.as_secs()
-                    ))
-                }
-            }
-        }
-        Err(e) => {
-            if !args.allow_subprocess_fallback.unwrap_or(false) {
-                return Err(e);
-            }
-
-            warn!("Docker unavailable for call_id={call_id}; falling back to subprocess mode: {e}");
-            run_as_subprocess(args, timeout_duration).await
-        }
-    }
-}
-
-/// Execute the configured command locally as a subprocess when Docker is unavailable.
-///
-/// Attempts to spawn `/bin/sh -c <command>` using the provided `ContainerArgs`, applies
-/// optional working directory and environment entries, enforces the provided timeout,
-/// and captures stdout, stderr, and the process exit code. This fallback does not
-/// enforce Docker resource limits.
-///
-/// # Errors
-///
-/// Returns an `Err(String)` when the command is missing or empty, when environment
-/// entries are malformed, when the subprocess cannot be spawned or run, or when the
-/// execution exceeds `timeout_duration`.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use std::time::Duration;
-/// # use tokio::runtime::Runtime;
-/// # use crate::ContainerArgs;
-/// # use crate::run_as_subprocess;
-/// let rt = Runtime::new().unwrap();
-/// rt.block_on(async {
-///     let args = ContainerArgs {
-///         image: None,
-///         skill_image: None,
-///         command: Some("echo hello".to_string()),
-///         skill_name: None,
-///         skill_args: None,
-///         timeout_secs: None,
-///         working_dir: None,
-///         env: None,
-///         allow_network: None,
-///         workspace_dir: None,
-///         memory_mb: None,
-///         cpu_millis: None,
-///         pull: None,
-///         inject_task_token: None,
-///         token_ttl_secs: None,
-///         token_env_name: None,
-///         allow_subprocess_fallback: None,
-///     };
-///     let res = run_as_subprocess(&args, Duration::from_secs(5)).await.unwrap();
-///     assert!(res.stdout.contains("hello"));
-///     assert_eq!(res.exit_code, 0);
-/// });
-/// ```
-async fn run_as_subprocess(
-    args: &ContainerArgs,
-    timeout_duration: Duration,
-) -> Result<ContainerExecution, String> {
-    warn!("Docker is unavailable; running command as local subprocess fallback");
-    warn!(
-        "subprocess fallback does not enforce Docker CPU/memory limits (requested memory_mb={:?}, cpu_millis={:?})",
-        args.memory_mb, args.cpu_millis
-    );
-
-    let command = args
-        .command
-        .as_deref()
-        .and_then(non_empty)
-        .ok_or_else(|| "command must not be empty".to_string())?;
-
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
-
-    if let Some(working_dir) = args
-        .working_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        cmd.current_dir(working_dir);
-    }
-
-    if let Some(env_values) = args.env.as_deref() {
-        for value in env_values {
-            let Some((key, env_value)) = value.split_once('=') else {
-                return Err(format!("Invalid env entry '{value}', expected KEY=VALUE"));
-            };
-
-            let key = key.trim();
-            if key.is_empty() {
-                return Err(format!(
-                    "Invalid env entry '{value}', key must not be empty"
-                ));
-            }
-
-            cmd.env(key, env_value);
-        }
-    }
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn subprocess: {e}"))?;
-    let output = timeout(timeout_duration, child.wait_with_output())
-        .await
-        .map_err(|_| format!("Command timed out after {}s", timeout_duration.as_secs()))?
-        .map_err(|e| format!("Failed to run subprocess: {e}"))?;
-
-    Ok(ContainerExecution {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: i64::from(output.status.code().unwrap_or(-1)),
-    })
-}
-
-fn maybe_mint_task_credential(args: &ContainerArgs) -> Result<Option<TaskCredential>, String> {
-    if !args.inject_task_token.unwrap_or(false) {
-        return Ok(None);
-    }
-
-    let ttl_secs = args
-        .token_ttl_secs
-        .unwrap_or(DEFAULT_TOKEN_TTL_SECS)
-        .clamp(1, MAX_TOKEN_TTL_SECS);
-    let env_name = sanitize_env_name(args.token_env_name.as_deref())?;
-    let now = unix_now_secs()?;
-
-    let mut random = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut random);
-    let token = general_purpose::URL_SAFE_NO_PAD.encode(random);
-
-    Ok(Some(TaskCredential {
-        token,
-        expires_at_unix: now + ttl_secs,
-        env_name,
-    }))
-}
-
-fn sanitize_env_name(env_name: Option<&str>) -> Result<String, String> {
-    let value = env_name.unwrap_or(DEFAULT_TOKEN_ENV_NAME).trim();
-    if !is_valid_env_name(value) {
-        return Err("token_env_name must match [A-Za-z_][A-Za-z0-9_]*".to_string());
-    }
-    Ok(value.to_string())
-}
-
-fn is_valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-/// Returns the current Unix timestamp in seconds.
-///
-/// Produces the number of seconds elapsed since 1970-01-01 00:00:00 UTC.
-/// Returns an `Err(String)` if the system clock is earlier than the Unix epoch
-/// or another system time error occurs.
-///
-/// # Examples
-///
-/// ```ignore
-/// let ts = unix_now_secs().expect("failed to read system time");
-/// assert!(ts > 0);
-/// ```
-fn unix_now_secs() -> Result<u64, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("System clock error: {e}"))?;
-    Ok(now.as_secs())
-}
-
-/// Prepends credential sourcing to a shell command when a task credential is provided.
-///
-/// When `credential` is `Some`, the returned string first sources the credential file
-/// mounted at the tool's token mount directory and suppresses its output, then runs
-/// the provided `command`. When `credential` is `None`, the original `command` is
-/// returned unchanged.
-///
-/// # Examples
-///
-/// ```ignore
-/// // No credential: command unchanged
-/// let cmd = build_shell_command("echo hello", None);
-/// assert_eq!(cmd, "echo hello");
-///
-/// // With credential: result contains the original command and a sourcing prefix
-/// let cred = TaskCredential {
-///     token: "token".into(),
-///     expires_at_unix: 0,
-///     env_name: "openpista_TASK_TOKEN".into(),
-/// };
-/// let cmd_with_cred = build_shell_command("echo secret", Some(&cred));
-/// assert!(cmd_with_cred.ends_with("echo secret"));
-/// assert!(cmd_with_cred.starts_with(". "));
-/// ```
-fn build_shell_command(command: &str, credential: Option<&TaskCredential>) -> String {
-    if credential.is_some() {
-        format!(
-            ". {TOKEN_MOUNT_DIR}/{TOKEN_ENV_FILE_NAME} >/dev/null 2>&1; {}",
-            command
-        )
-    } else {
-        command.to_string()
     }
 }
 
@@ -953,78 +377,6 @@ fn resolve_image(args: &ContainerArgs) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-async fn upload_task_credential(
-    docker: &Docker,
-    container_name: &str,
-    credential: &TaskCredential,
-) -> Result<(), String> {
-    let archive = build_task_credential_archive(credential)?;
-    docker
-        .upload_to_container(
-            container_name,
-            Some(
-                UploadToContainerOptionsBuilder::default()
-                    .path(TOKEN_MOUNT_DIR)
-                    .build(),
-            ),
-            body_full(archive.into()),
-        )
-        .await
-        .map_err(|e| format!("Failed to inject task credential: {e}"))
-}
-
-fn build_task_credential_archive(credential: &TaskCredential) -> Result<Vec<u8>, String> {
-    let payload = build_task_credential_script(credential);
-    let payload_bytes = payload.as_bytes();
-
-    let mut builder = tar::Builder::new(Vec::new());
-    let mut header = tar::Header::new_gnu();
-    header.set_size(payload_bytes.len() as u64);
-    header.set_mode(0o444); // readable by non-root users in container
-    header.set_cksum();
-
-    builder
-        .append_data(&mut header, TOKEN_ENV_FILE_NAME, payload_bytes)
-        .map_err(|e| format!("Failed to build credential archive: {e}"))?;
-
-    builder
-        .into_inner()
-        .map_err(|e| format!("Failed to finalize credential archive: {e}"))
-}
-
-fn build_task_credential_script(credential: &TaskCredential) -> String {
-    format!(
-        "export {}={}\nexport openpista_TASK_TOKEN_EXPIRES_AT={}\n",
-        credential.env_name,
-        shell_single_quote(&credential.token),
-        credential.expires_at_unix
-    )
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn cleanup_task_credential(credential: &mut Option<TaskCredential>) {
-    if let Some(inner) = credential {
-        inner.token.clear();
-        inner.env_name.clear();
-        inner.expires_at_unix = 0;
-    }
-    *credential = None;
-}
-
-async fn cleanup_container(docker: &Docker, container_name: &str) -> Result<(), String> {
-    docker
-        .remove_container(
-            container_name,
-            Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("Failed to remove container '{container_name}': {e}"))
-}
-
 fn build_container_name(call_id: &str) -> String {
     let suffix: String = call_id
         .chars()
@@ -1039,18 +391,9 @@ fn build_container_name(call_id: &str) -> String {
     format!("openpista-{}", suffix)
 }
 
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{truncated}\n[... output truncated at {max_chars} chars]")
-    }
-}
-
 fn format_output(stdout: &str, stderr: &str, exit_code: i64) -> String {
-    let stdout = truncate_str(stdout, MAX_OUTPUT_CHARS / 2);
-    let stderr = truncate_str(stderr, MAX_OUTPUT_CHARS / 2);
+    let stdout = crate::util::truncate_str(stdout, MAX_OUTPUT_CHARS / 2);
+    let stderr = crate::util::truncate_str(stderr, MAX_OUTPUT_CHARS / 2);
 
     let mut out = String::new();
 
@@ -1081,6 +424,15 @@ fn format_output(stdout: &str, stderr: &str, exit_code: i64) -> String {
 mod tests {
     use std::path::Path;
 
+    use tokio::process::Command;
+
+    use super::docker::build_task_credential_archive;
+    use super::lifecycle::{
+        build_shell_command, build_task_credential_script, cleanup_task_credential,
+        is_valid_env_name, maybe_mint_task_credential, run_as_subprocess,
+        run_with_docker_or_subprocess, sanitize_env_name, shell_single_quote, unix_now_secs,
+    };
+    use super::skill::resolve_runtime_mode;
     use super::*;
 
     /// Writes `content` to `path`, creating parent directories if they do not exist.
@@ -1670,28 +1022,6 @@ mod tests {
         let out = format_output("no-newline", "also-no-newline", 2);
         assert!(out.contains("stdout:\nno-newline\n"));
         assert!(out.contains("stderr:\nalso-no-newline\n"));
-    }
-
-    #[test]
-    fn truncate_str_short_string() {
-        assert_eq!(truncate_str("hello", 100), "hello");
-    }
-
-    #[test]
-    fn truncate_str_exact_boundary() {
-        assert_eq!(truncate_str("abc", 3), "abc");
-    }
-
-    #[test]
-    fn truncate_str_over_limit() {
-        let result = truncate_str("abcdef", 3);
-        assert!(result.starts_with("abc"));
-        assert!(result.contains("truncated at 3 chars"));
-    }
-
-    #[test]
-    fn truncate_str_empty() {
-        assert_eq!(truncate_str("", 10), "");
     }
 
     #[test]
