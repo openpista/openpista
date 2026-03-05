@@ -430,6 +430,45 @@ pub fn generate_qr_lines(url: &str) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// Detects image data in tool output and returns a placeholder string.
+/// Looks for JSON with mime: image/* and data_b64 fields.
+fn detect_image_placeholder(output: &str) -> Option<String> {
+    // Try to parse as JSON
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        // Check for image mime type
+        if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
+            if mime.starts_with("image/") {
+                let img_type = mime.strip_prefix("image/").unwrap_or("image");
+                // Check if there's base64 data
+                if json.get("data_b64").is_some() {
+                    return Some(format!("[image:{}]", img_type));
+                }
+                return Some(format!("[image:{}]", img_type));
+            }
+        }
+        
+        // Also check for common image field patterns
+        if json.get("image").is_some() || json.get("img").is_some() {
+            return Some("[image]".to_string());
+        }
+    }
+    
+    // Check for base64 image data indicators in raw output
+    if output.contains("data:image/") && output.contains("base64,") {
+        // Try to extract image type from data URI
+        if let Some(start) = output.find("data:image/") {
+            let rest = &output[start + 11..];
+            if let Some(end) = rest.find(';') {
+                let img_type = &rest[..end];
+                return Some(format!("[image:{}]", img_type));
+            }
+            return Some("[image]".to_string());
+        }
+    }
+    
+    None
+}
+
 impl TuiApp {
     /// Create a new TUI application state.
     pub fn new(
@@ -997,7 +1036,9 @@ impl TuiApp {
                         break;
                     }
                 }
-                let preview = if output.len() > 120 {
+                let preview = if let Some(img_info) = detect_image_placeholder(&output) {
+                    img_info
+                } else if output.len() > 120 {
                     format!("{}…", &output[..120])
                 } else {
                     output
