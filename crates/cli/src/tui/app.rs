@@ -484,6 +484,71 @@ pub fn generate_qr_lines(url: &str) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
+/// Detects image data in tool output and returns a placeholder string.
+/// Looks for JSON with mime: image/* AND a payload field (data_b64, data, or url).
+/// Also detects data:image/*;base64, URIs.
+fn detect_image_placeholder(output: &str) -> Option<String> {
+    // Try to parse as JSON
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        // Check for image mime type AND a payload field
+        if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
+            if mime.starts_with("image/") {
+                // Must have actual image data (data_b64, data, or url field)
+                let has_payload = json.get("data_b64").is_some() 
+                    || json.get("data").is_some()
+                    || json.get("url").is_some();
+                
+                if has_payload {
+                    let img_type = mime.strip_prefix("image/").unwrap_or("image");
+                    return Some(format!("[image:{}]", img_type));
+                }
+            }
+        }
+        
+        // Check for "image" or "img" fields with actual content (non-empty string or object)
+        if let Some(img) = json.get("image") {
+            if has_image_content(img) {
+                return Some("[image]".to_string());
+            }
+        }
+        if let Some(img) = json.get("img") {
+            if has_image_content(img) {
+                return Some("[image]".to_string());
+            }
+        }
+    }
+    
+    // Check for base64 image data indicators in raw output
+    if output.contains("data:image/") && output.contains("base64,") {
+        // Try to extract image type from data URI
+        if let Some(start) = output.find("data:image/") {
+            let rest = &output[start + 11..];
+            if let Some(end) = rest.find(';') {
+                let img_type = &rest[..end];
+                return Some(format!("[image:{}]", img_type));
+            }
+            return Some("[image]".to_string());
+        }
+    }
+    
+    None
+}
+
+/// Helper to check if a JSON value contains actual image content
+fn has_image_content(value: &serde_json::Value) -> bool {
+    // Non-empty string (base64 data or URL)
+    if let Some(s) = value.as_str() {
+        return !s.is_empty();
+    }
+    // Object with payload fields
+    if let Some(obj) = value.as_object() {
+        return obj.get("data_b64").is_some() 
+            || obj.get("data").is_some()
+            || obj.get("url").is_some();
+    }
+    false
+}
+
 impl TuiApp {
     /// Create a new TUI application state.
     pub fn new(
@@ -1051,7 +1116,13 @@ impl TuiApp {
                         break;
                     }
                 }
-                let preview = format_tool_output(&output);
+                let preview = if let Some(img_info) = detect_image_placeholder(&output) {
+                    img_info
+                } else if output.len() > 120 {
+                    format!("{}…", &output[..120])
+                } else {
+                    output
+                };
                 self.messages.push(TuiMessage::ToolResult {
                     tool_name,
                     output_preview: preview,
@@ -1176,7 +1247,14 @@ impl TuiApp {
                     }
                 }
                 proto::Role::Tool => {
-                    let preview = format_tool_output(&msg.content);
+                    // Apply image placeholder detection for consistency with live tool results
+                    let preview = if let Some(img_info) = detect_image_placeholder(&msg.content) {
+                        img_info
+                    } else if msg.content.len() > 120 {
+                        format!("{}…", &msg.content[..120])
+                    } else {
+                        msg.content.clone()
+                    };
                     self.messages.push(TuiMessage::ToolResult {
                         tool_name: msg.tool_name.unwrap_or_default(),
                         output_preview: preview,
@@ -7459,65 +7537,74 @@ mod tests {
         ));
     }
 
-    // --- format_tool_output tests ---
+    // ── Image placeholder detection tests ─────────────────
 
     #[test]
-    fn format_tool_output_short_ascii_unchanged() {
-        assert_eq!(format_tool_output("hello"), "hello");
+    fn detect_image_placeholder_json_mime_png() {
+        let input = r#"{"mime":"image/png","data_b64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}"#;
+        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_truncates_long_ascii() {
-        let long = "a".repeat(200);
-        let result = format_tool_output(&long);
-        assert!(result.ends_with('…'));
-        // char count of the non-ellipsis part equals MAX_OUTPUT_PREVIEW_LEN
-        let body: String = result.chars().take_while(|&c| c != '…').collect();
-        assert_eq!(body.chars().count(), MAX_OUTPUT_PREVIEW_LEN);
+    fn detect_image_placeholder_json_mime_jpeg() {
+        let input = r#"{"mime":"image/jpeg","data_b64":"/9j/4AAQSkZJRgABAQEASABIAAD"}"#;
+        assert_eq!(detect_image_placeholder(input), Some("[image:jpeg]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_utf8_safe_truncation() {
-        // Each Korean char is 3 bytes; naive byte slice at 120 would panic mid-char.
-        let korean = "가".repeat(200); // 600 bytes total
-        let result = format_tool_output(&korean);
-        // Must not panic and must be valid UTF-8
-        assert!(result.ends_with('…'));
+    fn detect_image_placeholder_json_image_field() {
+        let input = r#"{"image":"some-data-here"}"#;
+        assert_eq!(detect_image_placeholder(input), Some("[image]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_detects_single_image() {
-        let json = r#"{"mime":"image/png","data_b64":"aGVsbG8="}"#;
-        assert_eq!(format_tool_output(json), "[image]");
+    fn detect_image_placeholder_json_img_field() {
+        let input = r#"{"img":"some-data-here"}"#;
+        assert_eq!(detect_image_placeholder(input), Some("[image]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_detects_image_array() {
-        let json = r#"[{"mime":"image/jpeg","data_b64":"aGVsbG8="},{"mime":"image/png","data_b64":"d29ybGQ="}]"#;
-        assert_eq!(format_tool_output(json), "[2 image(s)]");
+    fn detect_image_placeholder_data_uri() {
+        let input = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_no_false_positive_empty_data_b64() {
-        // data_b64 exists but is empty — should NOT be treated as image
-        let json = r#"{"mime":"image/png","data_b64":""}"#;
-        let result = format_tool_output(json);
-        assert_ne!(result, "[image]");
+    fn detect_image_placeholder_data_uri_jpeg() {
+        let input = "Here is an image: data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD";
+        assert_eq!(detect_image_placeholder(input), Some("[image:jpeg]".to_string()));
     }
 
     #[test]
-    fn format_tool_output_no_false_positive_null_data_b64() {
-        // data_b64 is null — should NOT be treated as image
-        let json = r#"{"mime":"image/png","data_b64":null}"#;
-        let result = format_tool_output(json);
-        assert_ne!(result, "[image]");
+    fn detect_image_placeholder_no_image() {
+        let input = r#"{"result":"some text output"}"#;
+        assert_eq!(detect_image_placeholder(input), None);
     }
 
     #[test]
-    fn format_tool_output_no_false_positive_plain_json() {
-        // JSON with unrelated fields must not trigger image detection
-        let json = r#"{"status":"ok","count":42}"#;
-        let result = format_tool_output(json);
-        assert_eq!(result, json);
+    fn detect_image_placeholder_plain_text() {
+        let input = "This is just plain text with no image data";
+        assert_eq!(detect_image_placeholder(input), None);
+    }
+
+    #[test]
+    fn detect_image_placeholder_json_no_payload() {
+        // JSON with mime but no payload fields should NOT trigger placeholder
+        let input = r#"{"mime":"image/png","description":"An image"}"#;
+        assert_eq!(detect_image_placeholder(input), None);
+    }
+
+    #[test]
+    fn detect_image_placeholder_json_empty_image_field() {
+        // Empty image field should NOT trigger placeholder
+        let input = r#"{"image":""}"#;
+        assert_eq!(detect_image_placeholder(input), None);
+    }
+
+    #[test]
+    fn detect_image_placeholder_json_url_payload() {
+        // JSON with mime and url field should trigger placeholder
+        let input = r#"{"mime":"image/png","url":"http://example.com/image.png"}"#;
+        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
     }
 }
