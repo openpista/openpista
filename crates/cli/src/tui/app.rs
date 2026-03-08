@@ -491,33 +491,32 @@ fn detect_image_placeholder(output: &str) -> Option<String> {
     // Try to parse as JSON
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
         // Check for image mime type AND a payload field
-        if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
-            if mime.starts_with("image/") {
-                // Must have actual image data (data_b64, data, or url field)
-                let has_payload = json.get("data_b64").is_some() 
-                    || json.get("data").is_some()
-                    || json.get("url").is_some();
-                
-                if has_payload {
-                    let img_type = mime.strip_prefix("image/").unwrap_or("image");
-                    return Some(format!("[image:{}]", img_type));
-                }
+        if let Some(mime) = json.get("mime").and_then(|m| m.as_str())
+            && mime.starts_with("image/")
+        {
+            // Must have actual image data (data_b64, data, or url field)
+            let has_payload = json.get("data_b64").is_some()
+                || json.get("data").is_some()
+                || json.get("url").is_some();
+            if has_payload {
+                let img_type = mime.strip_prefix("image/").unwrap_or("image");
+                return Some(format!("[image:{}]", img_type));
             }
         }
-        
+
         // Check for "image" or "img" fields with actual content (non-empty string or object)
-        if let Some(img) = json.get("image") {
-            if has_image_content(img) {
-                return Some("[image]".to_string());
-            }
+        if let Some(img) = json.get("image")
+            && has_image_content(img)
+        {
+            return Some("[image]".to_string());
         }
-        if let Some(img) = json.get("img") {
-            if has_image_content(img) {
-                return Some("[image]".to_string());
-            }
+        if let Some(img) = json.get("img")
+            && has_image_content(img)
+        {
+            return Some("[image]".to_string());
         }
     }
-    
+
     // Check for base64 image data indicators in raw output
     if output.contains("data:image/") && output.contains("base64,") {
         // Try to extract image type from data URI
@@ -530,7 +529,7 @@ fn detect_image_placeholder(output: &str) -> Option<String> {
             return Some("[image]".to_string());
         }
     }
-    
+
     None
 }
 
@@ -542,7 +541,7 @@ fn has_image_content(value: &serde_json::Value) -> bool {
     }
     // Object with payload fields
     if let Some(obj) = value.as_object() {
-        return obj.get("data_b64").is_some() 
+        return obj.get("data_b64").is_some()
             || obj.get("data").is_some()
             || obj.get("url").is_some();
     }
@@ -7542,13 +7541,19 @@ mod tests {
     #[test]
     fn detect_image_placeholder_json_mime_png() {
         let input = r#"{"mime":"image/png","data_b64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}"#;
-        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
+        assert_eq!(
+            detect_image_placeholder(input),
+            Some("[image:png]".to_string())
+        );
     }
 
     #[test]
     fn detect_image_placeholder_json_mime_jpeg() {
         let input = r#"{"mime":"image/jpeg","data_b64":"/9j/4AAQSkZJRgABAQEASABIAAD"}"#;
-        assert_eq!(detect_image_placeholder(input), Some("[image:jpeg]".to_string()));
+        assert_eq!(
+            detect_image_placeholder(input),
+            Some("[image:jpeg]".to_string())
+        );
     }
 
     #[test]
@@ -7566,13 +7571,19 @@ mod tests {
     #[test]
     fn detect_image_placeholder_data_uri() {
         let input = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
+        assert_eq!(
+            detect_image_placeholder(input),
+            Some("[image:png]".to_string())
+        );
     }
 
     #[test]
     fn detect_image_placeholder_data_uri_jpeg() {
         let input = "Here is an image: data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD";
-        assert_eq!(detect_image_placeholder(input), Some("[image:jpeg]".to_string()));
+        assert_eq!(
+            detect_image_placeholder(input),
+            Some("[image:jpeg]".to_string())
+        );
     }
 
     #[test]
@@ -7605,6 +7616,9 @@ mod tests {
     fn detect_image_placeholder_json_url_payload() {
         // JSON with mime and url field should trigger placeholder
         let input = r#"{"mime":"image/png","url":"http://example.com/image.png"}"#;
-        assert_eq!(detect_image_placeholder(input), Some("[image:png]".to_string()));
+        assert_eq!(
+            detect_image_placeholder(input),
+            Some("[image:png]".to_string())
+        );
     }
 }
