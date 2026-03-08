@@ -3,6 +3,60 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::THEME;
+
+/// Maximum length for tool output preview before truncation.
+const MAX_OUTPUT_PREVIEW_LEN: usize = 120;
+
+/// Detects if the output contains image data (JSON with mime type and base64 data).
+/// Returns a formatted placeholder if images are detected, or the original output
+/// truncated to MAX_OUTPUT_PREVIEW_LEN.
+fn format_tool_output(output: &str) -> String {
+    // Try to parse as JSON to detect image data
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        // Check for single image object: require mime = "image/*" and non-empty data_b64 string.
+        if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
+            let has_data = json
+                .get("data_b64")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if mime.starts_with("image/") && has_data {
+                return "[image]".to_string();
+            }
+        }
+        // Check for array of images
+        if let Some(arr) = json.as_array() {
+            let image_count = arr
+                .iter()
+                .filter(|item| {
+                    let is_image_mime = item
+                        .get("mime")
+                        .and_then(|m| m.as_str())
+                        .map(|m| m.starts_with("image/"))
+                        .unwrap_or(false);
+                    let has_data = item
+                        .get("data_b64")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    is_image_mime && has_data
+                })
+                .count();
+            if image_count > 0 {
+                return format!("[{} image(s)]", image_count);
+            }
+        }
+    }
+
+    // No image data detected; truncate by char count (UTF-8 safe).
+    let char_count = output.chars().count();
+    if char_count > MAX_OUTPUT_PREVIEW_LEN {
+        let truncated: String = output.chars().take(MAX_OUTPUT_PREVIEW_LEN).collect();
+        format!("{truncated}…")
+    } else {
+        output.to_string()
+    }
+}
 use crate::auth_picker::{self, AuthLoginIntent, AuthMethodChoice, LoginBrowseStep};
 use crate::config::LoginAuthMode;
 use crate::model_catalog;
