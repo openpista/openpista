@@ -3,6 +3,60 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::THEME;
+
+/// Maximum length for tool output preview before truncation.
+const MAX_OUTPUT_PREVIEW_LEN: usize = 120;
+
+/// Detects if the output contains image data (JSON with mime type and base64 data).
+/// Returns a formatted placeholder if images are detected, or the original output
+/// truncated to MAX_OUTPUT_PREVIEW_LEN.
+fn format_tool_output(output: &str) -> String {
+    // Try to parse as JSON to detect image data
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        // Check for single image object: require mime = "image/*" and non-empty data_b64 string.
+        if let Some(mime) = json.get("mime").and_then(|m| m.as_str()) {
+            let has_data = json
+                .get("data_b64")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if mime.starts_with("image/") && has_data {
+                return "[image]".to_string();
+            }
+        }
+        // Check for array of images
+        if let Some(arr) = json.as_array() {
+            let image_count = arr
+                .iter()
+                .filter(|item| {
+                    let is_image_mime = item
+                        .get("mime")
+                        .and_then(|m| m.as_str())
+                        .map(|m| m.starts_with("image/"))
+                        .unwrap_or(false);
+                    let has_data = item
+                        .get("data_b64")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    is_image_mime && has_data
+                })
+                .count();
+            if image_count > 0 {
+                return format!("[{} image(s)]", image_count);
+            }
+        }
+    }
+
+    // No image data detected; truncate by char count (UTF-8 safe).
+    let char_count = output.chars().count();
+    if char_count > MAX_OUTPUT_PREVIEW_LEN {
+        let truncated: String = output.chars().take(MAX_OUTPUT_PREVIEW_LEN).collect();
+        format!("{truncated}…")
+    } else {
+        output.to_string()
+    }
+}
 use crate::auth_picker::{self, AuthLoginIntent, AuthMethodChoice, LoginBrowseStep};
 use crate::config::LoginAuthMode;
 use crate::model_catalog;
@@ -997,11 +1051,7 @@ impl TuiApp {
                         break;
                     }
                 }
-                let preview = if output.len() > 120 {
-                    format!("{}…", &output[..120])
-                } else {
-                    output
-                };
+                let preview = format_tool_output(&output);
                 self.messages.push(TuiMessage::ToolResult {
                     tool_name,
                     output_preview: preview,
@@ -1126,9 +1176,10 @@ impl TuiApp {
                     }
                 }
                 proto::Role::Tool => {
+                    let preview = format_tool_output(&msg.content);
                     self.messages.push(TuiMessage::ToolResult {
                         tool_name: msg.tool_name.unwrap_or_default(),
-                        output_preview: msg.content,
+                        output_preview: preview,
                         is_error: false,
                     });
                 }
@@ -7406,5 +7457,67 @@ mod tests {
             actions[0],
             Action::TextSelectionDrag { row: 21, col: 77 }
         ));
+    }
+
+    // --- format_tool_output tests ---
+
+    #[test]
+    fn format_tool_output_short_ascii_unchanged() {
+        assert_eq!(format_tool_output("hello"), "hello");
+    }
+
+    #[test]
+    fn format_tool_output_truncates_long_ascii() {
+        let long = "a".repeat(200);
+        let result = format_tool_output(&long);
+        assert!(result.ends_with('…'));
+        // char count of the non-ellipsis part equals MAX_OUTPUT_PREVIEW_LEN
+        let body: String = result.chars().take_while(|&c| c != '…').collect();
+        assert_eq!(body.chars().count(), MAX_OUTPUT_PREVIEW_LEN);
+    }
+
+    #[test]
+    fn format_tool_output_utf8_safe_truncation() {
+        // Each Korean char is 3 bytes; naive byte slice at 120 would panic mid-char.
+        let korean = "가".repeat(200); // 600 bytes total
+        let result = format_tool_output(&korean);
+        // Must not panic and must be valid UTF-8
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn format_tool_output_detects_single_image() {
+        let json = r#"{"mime":"image/png","data_b64":"aGVsbG8="}"#;
+        assert_eq!(format_tool_output(json), "[image]");
+    }
+
+    #[test]
+    fn format_tool_output_detects_image_array() {
+        let json = r#"[{"mime":"image/jpeg","data_b64":"aGVsbG8="},{"mime":"image/png","data_b64":"d29ybGQ="}]"#;
+        assert_eq!(format_tool_output(json), "[2 image(s)]");
+    }
+
+    #[test]
+    fn format_tool_output_no_false_positive_empty_data_b64() {
+        // data_b64 exists but is empty — should NOT be treated as image
+        let json = r#"{"mime":"image/png","data_b64":""}"#;
+        let result = format_tool_output(json);
+        assert_ne!(result, "[image]");
+    }
+
+    #[test]
+    fn format_tool_output_no_false_positive_null_data_b64() {
+        // data_b64 is null — should NOT be treated as image
+        let json = r#"{"mime":"image/png","data_b64":null}"#;
+        let result = format_tool_output(json);
+        assert_ne!(result, "[image]");
+    }
+
+    #[test]
+    fn format_tool_output_no_false_positive_plain_json() {
+        // JSON with unrelated fields must not trigger image detection
+        let json = r#"{"status":"ok","count":42}"#;
+        let result = format_tool_output(json);
+        assert_eq!(result, json);
     }
 }
