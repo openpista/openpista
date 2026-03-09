@@ -32,13 +32,7 @@ impl SqliteMemory {
             .await
             .map_err(|e| DatabaseError::Sqlx(e.to_string()))?;
 
-        let migrations_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let migrator = sqlx::migrate::Migrator::new(migrations_dir.as_path())
-            .await
-            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
-
-        migrator
+        sqlx::migrate!("../../migrations")
             .run(&pool)
             .await
             .map_err(|e| DatabaseError::Migration(e.to_string()))?;

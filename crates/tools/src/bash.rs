@@ -52,7 +52,7 @@ impl Default for BashTool {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "system.run"
+        "system_run"
     }
 
     fn description(&self) -> &str {

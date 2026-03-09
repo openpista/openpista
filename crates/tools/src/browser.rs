@@ -199,7 +199,7 @@ impl Default for BrowserScreenshotTool {
 #[async_trait]
 impl Tool for BrowserTool {
     fn name(&self) -> &str {
-        "browser.navigate"
+        "browser_navigate"
     }
 
     fn description(&self) -> &str {
@@ -299,7 +299,7 @@ impl Tool for BrowserTool {
 #[async_trait]
 impl Tool for BrowserClickTool {
     fn name(&self) -> &str {
-        "browser.click"
+        "browser_click"
     }
 
     fn description(&self) -> &str {
@@ -397,7 +397,7 @@ impl Tool for BrowserClickTool {
 #[async_trait]
 impl Tool for BrowserTypeTool {
     fn name(&self) -> &str {
-        "browser.type"
+        "browser_type"
     }
 
     fn description(&self) -> &str {
@@ -519,7 +519,7 @@ impl Tool for BrowserTypeTool {
 #[async_trait]
 impl Tool for BrowserScreenshotTool {
     fn name(&self) -> &str {
-        "browser.screenshot"
+        "browser_screenshot"
     }
 
     fn description(&self) -> &str {
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn browser_click_tool_metadata_is_stable() {
         let tool = BrowserClickTool::new();
-        assert_eq!(tool.name(), "browser.click");
+        assert_eq!(tool.name(), "browser_click");
         assert!(tool.description().contains("Click"));
 
         let schema = tool.parameters_schema();
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn browser_type_tool_metadata_is_stable() {
         let tool = BrowserTypeTool::new();
-        assert_eq!(tool.name(), "browser.type");
+        assert_eq!(tool.name(), "browser_type");
         assert!(tool.description().contains("Type"));
 
         let schema = tool.parameters_schema();
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn browser_screenshot_tool_metadata_is_stable() {
         let tool = BrowserScreenshotTool::new();
-        assert_eq!(tool.name(), "browser.screenshot");
+        assert_eq!(tool.name(), "browser_screenshot");
         assert!(tool.description().contains("screenshot"));
 
         let schema = tool.parameters_schema();
@@ -684,7 +684,7 @@ mod tests {
             .execute("call-2", serde_json::json!({"selector":7}))
             .await;
         assert_eq!(result.call_id, "call-2");
-        assert_eq!(result.tool_name, "browser.click");
+        assert_eq!(result.tool_name, "browser_click");
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
     }
@@ -696,7 +696,7 @@ mod tests {
             .execute("call-3", serde_json::json!({"selector":"#q"}))
             .await;
         assert_eq!(result.call_id, "call-3");
-        assert_eq!(result.tool_name, "browser.type");
+        assert_eq!(result.tool_name, "browser_type");
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
     }
@@ -708,7 +708,7 @@ mod tests {
             .execute("call-4", serde_json::json!({"full_page":"yes"}))
             .await;
         assert_eq!(result.call_id, "call-4");
-        assert_eq!(result.tool_name, "browser.screenshot");
+        assert_eq!(result.tool_name, "browser_screenshot");
         assert!(result.is_error);
         assert!(result.output.contains("Invalid arguments"));
     }
@@ -739,7 +739,7 @@ mod tests {
             )
             .await;
         assert_eq!(result.call_id, "call-6");
-        assert_eq!(result.tool_name, "browser.click");
+        assert_eq!(result.tool_name, "browser_click");
         assert!(!result.output.is_empty());
     }
 
@@ -753,7 +753,7 @@ mod tests {
             )
             .await;
         assert_eq!(result.call_id, "call-7");
-        assert_eq!(result.tool_name, "browser.type");
+        assert_eq!(result.tool_name, "browser_type");
         assert!(!result.output.is_empty());
     }
 
@@ -767,7 +767,7 @@ mod tests {
             )
             .await;
         assert_eq!(result.call_id, "call-8");
-        assert_eq!(result.tool_name, "browser.screenshot");
+        assert_eq!(result.tool_name, "browser_screenshot");
         assert!(!result.output.is_empty());
     }
 
