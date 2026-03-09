@@ -39,7 +39,7 @@ impl Default for ScreenTool {
 #[async_trait]
 impl Tool for ScreenTool {
     fn name(&self) -> &str {
-        "screen.capture"
+        "screen_capture"
     }
 
     fn description(&self) -> &str {

@@ -33,7 +33,7 @@ serde_yaml = "0.9"
 async-openai = { version = "0.27", default-features = false, features = ["rustls"] }
 
 # 데이터베이스
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

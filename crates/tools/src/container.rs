@@ -106,7 +106,7 @@ impl Default for ContainerTool {
 #[async_trait]
 impl Tool for ContainerTool {
     fn name(&self) -> &str {
-        "container.run"
+        "container_run"
     }
 
     fn description(&self) -> &str {
