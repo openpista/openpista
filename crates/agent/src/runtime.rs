@@ -80,6 +80,11 @@ impl AgentRuntime {
         &self.memory
     }
 
+    /// Returns a reference to the tool registry (for late tool registration).
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
+    }
+
     pub fn set_model(&self, model: String) {
         *self.model.write().expect("model lock") = model;
     }
@@ -1057,7 +1062,9 @@ mod tests {
                     assert!(!is_error);
                     finished = true;
                 }
-                proto::ProgressEvent::LlmThinking { .. } => {}
+                proto::ProgressEvent::LlmThinking { .. }
+                | proto::ProgressEvent::SubAgentStarted { .. }
+                | proto::ProgressEvent::SubAgentFinished { .. } => {}
             }
         }
         assert!(started);

@@ -6,13 +6,19 @@
 pub mod bash;
 pub mod browser;
 pub mod container;
+pub mod delegate;
 pub mod screen;
+#[cfg(target_os = "macos")]
+pub mod ui;
 mod wasm_runtime;
 
 pub use bash::BashTool;
 pub use browser::{BrowserClickTool, BrowserScreenshotTool, BrowserTool, BrowserTypeTool};
 pub use container::ContainerTool;
+pub use delegate::{DelegateTool, SubAgentExecutor};
 pub use screen::ScreenTool;
+#[cfg(target_os = "macos")]
+pub use ui::{UiAppTool, UiClickTool, UiClipboardTool, UiKeyTool, UiSnapshotTool, UiTypeTool};
 
 use async_trait::async_trait;
 use proto::ToolResult;

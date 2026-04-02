@@ -95,6 +95,20 @@ pub enum ProgressEvent {
         /// Whether the tool result represents an error.
         is_error: bool,
     },
+    /// A sub-agent has started processing a delegated task.
+    SubAgentStarted {
+        /// Description of the delegated task.
+        task: String,
+        /// Nesting depth of this sub-agent.
+        depth: u32,
+    },
+    /// A sub-agent has finished processing.
+    SubAgentFinished {
+        /// Nesting depth of this sub-agent.
+        depth: u32,
+        /// Whether the sub-agent encountered an error.
+        is_error: bool,
+    },
 }
 
 /// Metadata kind tag used for worker reports embedded in `ChannelEvent.metadata`.

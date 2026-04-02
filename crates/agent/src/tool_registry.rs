@@ -1,35 +1,52 @@
 //! Tool registry used by the runtime to list and execute tools.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use proto::{ToolDefinition, ToolResult};
 use tools::Tool;
 use tracing::debug;
 
-/// Registry of available tools
+/// Registry of available tools.
+///
+/// Uses interior mutability (`RwLock`) to support late tool registration
+/// (e.g. `DelegateTool` which requires a reference to the runtime).
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl ToolRegistry {
     /// Creates an empty tool registry.
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Register a tool
+    /// Register a tool (takes `&mut self` for initial setup).
     pub fn register(&mut self, tool: impl Tool + 'static) {
         let name = tool.name().to_string();
         debug!("Registering tool: {name}");
-        self.tools.insert(name, Arc::new(tool));
+        self.tools
+            .get_mut()
+            .expect("tool_registry lock")
+            .insert(name, Arc::new(tool));
+    }
+
+    /// Register a tool after the registry has been shared (takes `&self`).
+    pub fn register_late(&self, tool: impl Tool + 'static) {
+        let name = tool.name().to_string();
+        debug!("Late-registering tool: {name}");
+        self.tools
+            .write()
+            .expect("tool_registry lock")
+            .insert(name, Arc::new(tool));
     }
 
     /// Get tool definitions for the LLM
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let tools = self.tools.read().expect("tool_registry lock");
+        tools
             .values()
             .map(|t| ToolDefinition::new(t.name(), t.description(), t.parameters_schema()))
             .collect()
@@ -37,7 +54,11 @@ impl ToolRegistry {
 
     /// Execute a tool call
     pub async fn execute(&self, call_id: &str, name: &str, args: serde_json::Value) -> ToolResult {
-        if let Some(tool) = self.tools.get(name) {
+        let tool = {
+            let tools = self.tools.read().expect("tool_registry lock");
+            tools.get(name).cloned()
+        };
+        if let Some(tool) = tool {
             debug!("Executing tool: {name} (call_id: {call_id})");
             tool.execute(call_id, args).await
         } else {
@@ -46,8 +67,9 @@ impl ToolRegistry {
     }
 
     /// Returns the list of registered tool names.
-    pub fn tool_names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+    pub fn tool_names(&self) -> Vec<String> {
+        let tools = self.tools.read().expect("tool_registry lock");
+        tools.keys().cloned().collect()
     }
 }
 
@@ -119,7 +141,7 @@ mod tests {
         registry.register(EchoTool);
 
         let names = registry.tool_names();
-        assert_eq!(names, vec!["echo"]);
+        assert!(names.contains(&"echo".to_string()));
 
         let defs = registry.definitions();
         assert_eq!(defs.len(), 1);
