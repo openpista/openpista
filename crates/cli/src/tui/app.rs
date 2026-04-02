@@ -187,6 +187,8 @@ pub enum TuiMessage {
     },
     /// An error from the agent runtime.
     Error(String),
+    /// A system/status message (e.g. sub-agent progress).
+    System(String),
 }
 
 /// Determines which "view" is active
@@ -1127,6 +1129,22 @@ impl TuiApp {
                     output_preview: preview,
                     is_error,
                 });
+            }
+            ProgressEvent::SubAgentStarted { task, depth } => {
+                let prefix = "┃ ".repeat(depth as usize);
+                self.messages.push(TuiMessage::System(format!(
+                    "{prefix}서브에이전트 시작: {task}"
+                )));
+            }
+            ProgressEvent::SubAgentFinished { depth, is_error } => {
+                let prefix = "┃ ".repeat(depth as usize);
+                let status = if is_error {
+                    "오류로 종료"
+                } else {
+                    "완료"
+                };
+                self.messages
+                    .push(TuiMessage::System(format!("{prefix}서브에이전트 {status}")));
             }
         }
     }

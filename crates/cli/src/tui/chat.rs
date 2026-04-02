@@ -87,6 +87,12 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame<'_>, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )));
             }
+            TuiMessage::System(text) => {
+                lines.push(Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().fg(THEME.fg_muted),
+                )));
+            }
         }
     }
 
